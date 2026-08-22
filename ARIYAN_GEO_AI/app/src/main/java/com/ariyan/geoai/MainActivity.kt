@@ -96,7 +96,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             try {
                 val json = withContext(Dispatchers.Default) {
-                    runInvestigation(lat, lon, radius, grid, useRealDem, apiKey, demType)
+                    runInvestigation(lat, lon, radius, grid, useRealDem, apiKey, demType, includeNdvi)
                 }
                 renderResult(json)
             } catch (e: PyException) {
