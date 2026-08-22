@@ -74,7 +74,7 @@ class MainActivity : AppCompatActivity() {
         val apiKey = binding.inputApiKey.text?.toString()?.trim().orEmpty()
         val demType = binding.inputDemType.text?.toString()?.trim()
             ?.ifEmpty { "SRTMGL1" } ?: "SRTMGL1"
-val includeNdvi = binding.switchNdviCorrelation.isChecked
+        val includeNdvi = binding.switchNdviCorrelation.isChecked
         if (lat == null || lat < -90.0 || lat > 90.0) {
             toast("Enter a valid latitude (-90 to 90)"); return
         }
