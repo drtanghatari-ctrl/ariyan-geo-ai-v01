@@ -128,17 +128,29 @@ class MainActivity : AppCompatActivity() {
      * never be called from the main thread. */
     private fun runInvestigation(
         lat: Double, lon: Double, radiusM: Double, gridSize: Int,
-        useRealDem: Boolean, apiKey: String, demType: String
+        useRealDem: Boolean, apiKey: String, demType: String, includeNdvi: Boolean
     ): String {
-        val module = python.getModule("investigation_mobile")
-        val result = module.callAttr(
-            "run_investigation_json",
-            lat, lon, radiusM, gridSize,
-            Kwarg("use_real_dem", useRealDem),
-            Kwarg("api_key", apiKey),
-            Kwarg("demtype", demType)
-        )
-        return result.toString()
+        return if (includeNdvi) {
+            val module = python.getModule("investigation_multi_mobile")
+            val result = module.callAttr(
+                "run_investigation_multi_json",
+                lat, lon, radiusM, gridSize,
+                Kwarg("use_real_dem", useRealDem),
+                Kwarg("api_key", apiKey),
+                Kwarg("demtype", demType)
+            )
+            result.toString()
+        } else {
+            val module = python.getModule("investigation_mobile")
+            val result = module.callAttr(
+                "run_investigation_json",
+                lat, lon, radiusM, gridSize,
+                Kwarg("use_real_dem", useRealDem),
+                Kwarg("api_key", apiKey),
+                Kwarg("demtype", demType)
+            )
+            result.toString()
+        }
     }
 
     private fun renderResult(jsonText: String) {
@@ -178,7 +190,16 @@ class MainActivity : AppCompatActivity() {
                 ))
             }
         }
-
+        val correlation = record.optJSONArray("correlation")
+        if (correlation != null && correlation.length() > 0) {
+            sb.append("\nCorrelation:\n")
+            for (i in 0 until correlation.length()) {
+                val c = correlation.getJSONObject(i)
+                sb.append(" ").append(c.optString("status")).append(" ")
+                sb.append("sources=").append(c.optJSONArray("supporting_sources")?.toString() ?: "[]")
+                sb.append("\n ").append(c.optString("note")).append("\n")
+            }
+        }
         val limitations = record.optJSONArray("limitations")
         if (limitations != null && limitations.length() > 0) {
             sb.append("\nLimitations:\n")
