@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">ARIYAN GEO AI</string>
+    <string name="hint_lat">Latitude (e.g. 51.1789)</string>
+    <string name="hint_lon">Longitude (e.g. -1.8262)</string>
+    <string name="hint_radius">Radius (m)</string>
+    <string name="hint_grid">Grid size (cells/side)</string>
+    <string name="run_investigation">Run Investigation</string>
+    <string name="running">Running…</string>
+    <string name="synthetic_notice">SYNTHETIC DATA — this build has no live DEM source wired in yet. Every number below is computed on offline synthetic terrain, not a real location.</string>
+    <string name="use_real_dem">Use real OpenTopography DEM (needs network + API key)</string>
+    <string name="real_dem_notice">Requires your own free OpenTopography API key (opentopography.org). Stored only in memory for this session — not saved to disk. Uses your device\'s data connection.</string>
+    <string name="hint_api_key">OpenTopography API key</string>
+    <string name="hint_demtype">Dataset (e.g. SRTMGL1, COP30, NASADEM)</string>
+</resources>

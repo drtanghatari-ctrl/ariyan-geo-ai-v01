@@ -1,0 +1,8 @@
+<resources>
+    <color name="ariyan_bg">#0E1116</color>
+    <color name="ariyan_surface">#161B22</color>
+    <color name="ariyan_accent">#3FB68B</color>
+    <color name="ariyan_warn">#D9822B</color>
+    <color name="ariyan_text_primary">#E6EDF3</color>
+    <color name="ariyan_text_secondary">#8B949E</color>
+</resources>
