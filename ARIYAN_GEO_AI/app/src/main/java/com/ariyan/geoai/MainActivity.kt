@@ -59,9 +59,8 @@ class MainActivity : AppCompatActivity() {
         // Chaquopy's Python interpreter is started once per process by
         // AriyanApplication.onCreate(). By the time any Activity runs,
         // Python.isStarted() is guaranteed true.
-        python = Python.getInstance()fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-        binding.buttonUseLocation.setOnClickListener { onUseLocationClicked() }
-
+       python = Python.getInstance()
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
         binding.switchRealDem.setOnCheckedChangeListener { _, checked ->
             setRealDemUiVisible(checked)
