@@ -59,7 +59,9 @@ class MainActivity : AppCompatActivity() {
         // Chaquopy's Python interpreter is started once per process by
         // AriyanApplication.onCreate(). By the time any Activity runs,
         // Python.isStarted() is guaranteed true.
-        python = Python.getInstance()
+        python = Python.getInstance()fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        binding.buttonUseLocation.setOnClickListener { onUseLocationClicked() }
+
 
         binding.switchRealDem.setOnCheckedChangeListener { _, checked ->
             setRealDemUiVisible(checked)
@@ -77,8 +79,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onRunClicked() {
-        val lat = binding.inputLat.text?.toString()?.trim()?.toDoubleOrNull()
-        val lon = binding.inputLon.text?.toString()?.trim()?.toDoubleOrNull()
+        val coordsParts = binding.inputCoords.text?.toString()?.trim().orEmpty().split(",").map { it.trim() }
+        val lat = coordsParts.getOrNull(0)?.toDoubleOrNull()
+        val lon = coordsParts.getOrNull(1)?.toDoubleOrNull()
         val radius = binding.inputRadius.text?.toString()?.trim()?.toDoubleOrNull()
         val grid = binding.inputGrid.text?.toString()?.trim()?.toIntOrNull()
         val useRealDem = binding.switchRealDem.isChecked
@@ -86,11 +89,8 @@ class MainActivity : AppCompatActivity() {
         val demType = binding.inputDemType.text?.toString()?.trim()
             ?.ifEmpty { "SRTMGL1" } ?: "SRTMGL1"
         val includeNdvi = binding.switchNdviCorrelation.isChecked
-        if (lat == null || lat < -90.0 || lat > 90.0) {
-            toast("Enter a valid latitude (-90 to 90)"); return
-        }
-        if (lon == null || lon < -180.0 || lon > 180.0) {
-            toast("Enter a valid longitude (-180 to 180)"); return
+        if (lat == null || lat < -90.0 || lat > 90.0 || lon == null || lon < -180.0 || lon > 180.0) {
+            toast("Enter coordinates as \"lat, lon\", e.g. 51.1789, -1.8262"); return
         }
         if (radius == null || radius <= 0.0) {
             toast("Enter a positive radius in meters"); return
@@ -122,6 +122,34 @@ class MainActivity : AppCompatActivity() {
             } finally {
                 setRunning(false)
             }
+        }
+    }
+    private fun onUseLocationClicked() {
+        val hasPermission = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasPermission) {
+            fetchLocation()
+        } else {
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+
+    private fun fetchLocation() {
+        try {
+            fusedLocationClient.lastLocation.addOnSuccessListener { location: Location? ->
+                if (location != null) {
+                    binding.inputCoords.setText(
+                        String.format("%.7f, %.7f", location.latitude, location.longitude)
+                    )
+                } else {
+                    toast("No recent location fix available — ensure GPS/location is on and try again")
+                }
+            }.addOnFailureListener {
+                toast("Could not get location: ${it.message}")
+            }
+        } catch (e: SecurityException) {
+            toast("Location permission not granted")
         }
     }
 
