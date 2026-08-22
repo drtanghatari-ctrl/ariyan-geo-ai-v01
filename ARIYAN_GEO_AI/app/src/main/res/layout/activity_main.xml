@@ -33,27 +33,21 @@
         <com.google.android.material.textfield.TextInputLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="@string/hint_lat">
+            android:hint="Coordinates (lat, lon)">
             <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/inputLat"
+                android:id="@+id/inputCoords"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:inputType="numberDecimal|numberSigned"
-                android:text="51.1789" />
+                android:inputType="text"
+                android:text="51.1789000, -1.8262000" />
         </com.google.android.material.textfield.TextInputLayout>
 
-        <com.google.android.material.textfield.TextInputLayout
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonUseLocation"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="@string/hint_lon">
-            <com.google.android.material.textfield.TextInputEditText
-                android:id="@+id/inputLon"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:inputType="numberDecimal|numberSigned"
-                android:text="-1.8262" />
-        </com.google.android.material.textfield.TextInputLayout>
-
+            android:layout_marginTop="8dp"
+            android:text="Use current location" />
         <com.google.android.material.textfield.TextInputLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
