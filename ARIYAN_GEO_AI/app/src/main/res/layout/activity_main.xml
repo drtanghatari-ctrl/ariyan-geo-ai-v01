@@ -130,6 +130,22 @@
                 android:layout_height="wrap_content"
                 android:text="SRTMGL1" />
         </com.google.android.material.textfield.TextInputLayout>
+<com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchNdviCorrelation"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="Include NDVI correlation (adds a second evidence source)"
+            android:textColor="@color/ariyan_text_primary" />
+
+        <TextView
+            android:id="@+id/textNdviNotice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="NDVI is always synthetic on this build (Sentinel-2 imagery requires rasterio, which cannot be built for Android yet). A CORROBORATED result means real DEM + synthetic NDVI co-located — correlation logic is real and tested, full two-real-source corroboration is a future step."
+            android:textColor="@color/ariyan_text_secondary"
+            android:textSize="11sp"
+            android:paddingTop="2dp" />
 
         <ProgressBar
             android:id="@+id/progressBar"
