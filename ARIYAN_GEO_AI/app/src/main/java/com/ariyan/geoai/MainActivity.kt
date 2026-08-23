@@ -68,6 +68,7 @@ class MainActivity : AppCompatActivity() {
         setRealDemUiVisible(false)
 
         binding.buttonRun.setOnClickListener { onRunClicked() }
+        binding.buttonUseLocation.setOnClickListener { onUseLocationClicked() }
     }
 
     private fun setRealDemUiVisible(useRealDem: Boolean) {
