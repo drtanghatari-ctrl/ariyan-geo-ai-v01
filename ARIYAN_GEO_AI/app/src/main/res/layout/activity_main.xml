@@ -137,10 +137,55 @@
             android:id="@+id/textNdviNotice"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="NDVI is always synthetic on this build (Sentinel-2 imagery requires rasterio, which cannot be built for Android yet). A CORROBORATED result means real DEM + synthetic NDVI co-located — correlation logic is real and tested, full two-real-source corroboration is a future step."
+            android:text="NDVI is synthetic by default on this build. Turn on \"Use real Copernicus NDVI\" below for a real, network-fetched vegetation-stress check per DEM candidate. A CORROBORATED result means real DEM + real (or synthetic) NDVI co-located."
             android:textColor="@color/ariyan_text_secondary"
             android:textSize="11sp"
             android:paddingTop="2dp" />
+
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchRealNdvi"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Use real Copernicus NDVI (needs network + client credentials)"
+            android:textColor="@color/ariyan_text_primary" />
+
+        <TextView
+            android:id="@+id/textRealNdviNotice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Requires your own free Copernicus Data Space Ecosystem OAuth client ID/secret (dataspace.copernicus.eu). Stored only in memory for this session — not saved to disk. Uses your device's data connection. For each DEM candidate, fetches real NDVI mean/stdDev for a small core area at the point and a larger halo area around it; a core significantly below the halo indicates vegetation stress, a real documented signature of buried features."
+            android:textColor="@color/ariyan_text_secondary"
+            android:textSize="11sp"
+            android:paddingTop="2dp"
+            android:visibility="gone" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/layoutNdviClientId"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="Copernicus OAuth client ID"
+            android:visibility="gone">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/inputNdviClientId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="text" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/layoutNdviClientSecret"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Copernicus OAuth client secret"
+            android:visibility="gone">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/inputNdviClientSecret"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="textPassword" />
+        </com.google.android.material.textfield.TextInputLayout>
 
         <ProgressBar
             android:id="@+id/progressBar"
