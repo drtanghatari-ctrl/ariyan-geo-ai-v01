@@ -137,7 +137,7 @@
             android:id="@+id/textNdviNotice"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="NDVI is synthetic by default on this build. Turn on \"Use real Copernicus NDVI\" below for a real, network-fetched vegetation-stress check per DEM candidate. A CORROBORATED result means real DEM + real (or synthetic) NDVI co-located."
+            android:text="NDVI is synthetic by default on this build. Turn on "Use real Copernicus NDVI" below for a real, network-fetched vegetation-stress check per DEM candidate. A CORROBORATED result means real DEM + real (or synthetic) NDVI co-located."
             android:textColor="@color/ariyan_text_secondary"
             android:textSize="11sp"
             android:paddingTop="2dp" />
