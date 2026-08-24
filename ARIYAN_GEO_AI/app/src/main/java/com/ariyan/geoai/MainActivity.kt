@@ -24,22 +24,31 @@ import org.json.JSONObject
  * MainActivity — the entire native UI shell for the ARIYAN GEO AI Android
  * vertical slice.
  *
- * Calls investigation_mobile.run_investigation_json() (the real,
- * test-verified Python pipeline embedded via Chaquopy) and renders the
- * returned evidence record. Two DEM sources are available:
+ * Calls investigation_mobile.run_investigation_json() (single-source DEM)
+ * or investigation_multi_mobile.run_investigation_multi_json()
+ * (DEM + NDVI correlation) depending on the "Include NDVI correlation"
+ * switch, and renders the returned evidence record.
  *
+ * Two DEM sources are available:
  *  - Synthetic (default): offline, no network, every result explicitly
  *    labeled synthetic on screen.
- *  - Real (opt-in via the switch): a live OpenTopography fetch, decoded
+ *  - Real (opt-in via switchRealDem): a live OpenTopography fetch, decoded
  *    as AAIGrid rather than GeoTIFF because Chaquopy cannot build
  *    GDAL/rasterio for Android (see dem_source_mobile.py). Requires the
  *    user's own OpenTopography API key, entered in-app and held only in
  *    memory for this session -- never written to disk.
  *
- * There is still no AI Debate Engine, no multi-source (DEM+NDVI)
- * correlation wired into this entry point, and no depth estimation in
- * this build; see HANDOFF.md for the honest current state and what's
- * next.
+ * Two NDVI sources are available when NDVI correlation is included:
+ *  - Synthetic (default): offline, no network, always labeled synthetic.
+ *  - Real (opt-in via switchRealNdvi): a live Copernicus Data Space
+ *    Ecosystem Statistical API core/halo vegetation-stress check per DEM
+ *    candidate (see ndvi_source_mobile.py). Requires the user's own
+ *    Copernicus OAuth client ID/secret, entered in-app and held only in
+ *    memory for this session -- never written to disk.
+ *
+ * There is still no AI Debate Engine wired into this entry point and no
+ * depth estimation in this build; see HANDOFF.md for the honest current
+ * state and what's next.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -67,6 +76,11 @@ class MainActivity : AppCompatActivity() {
         }
         setRealDemUiVisible(false)
 
+        binding.switchRealNdvi.setOnCheckedChangeListener { _, checked ->
+            setRealNdviUiVisible(checked)
+        }
+        setRealNdviUiVisible(false)
+
         binding.buttonRun.setOnClickListener { onRunClicked() }
         binding.buttonUseLocation.setOnClickListener { onUseLocationClicked() }
     }
@@ -76,6 +90,12 @@ class MainActivity : AppCompatActivity() {
         binding.layoutDemType.visibility = if (useRealDem) View.VISIBLE else View.GONE
         binding.textRealDemNotice.visibility = if (useRealDem) View.VISIBLE else View.GONE
         binding.textSyntheticNotice.visibility = if (useRealDem) View.GONE else View.VISIBLE
+    }
+
+    private fun setRealNdviUiVisible(useRealNdvi: Boolean) {
+        binding.layoutNdviClientId.visibility = if (useRealNdvi) View.VISIBLE else View.GONE
+        binding.layoutNdviClientSecret.visibility = if (useRealNdvi) View.VISIBLE else View.GONE
+        binding.textRealNdviNotice.visibility = if (useRealNdvi) View.VISIBLE else View.GONE
     }
 
     private fun onRunClicked() {
@@ -89,6 +109,10 @@ class MainActivity : AppCompatActivity() {
         val demType = binding.inputDemType.text?.toString()?.trim()
             ?.ifEmpty { "SRTMGL1" } ?: "SRTMGL1"
         val includeNdvi = binding.switchNdviCorrelation.isChecked
+        val useRealNdvi = binding.switchRealNdvi.isChecked
+        val ndviClientId = binding.inputNdviClientId.text?.toString()?.trim().orEmpty()
+        val ndviClientSecret = binding.inputNdviClientSecret.text?.toString()?.trim().orEmpty()
+
         if (lat == null || lat < -90.0 || lat > 90.0 || lon == null || lon < -180.0 || lon > 180.0) {
             toast("Enter coordinates as \"lat, lon\", e.g. 51.1789, -1.8262"); return
         }
@@ -101,22 +125,30 @@ class MainActivity : AppCompatActivity() {
         if (useRealDem && apiKey.isEmpty()) {
             toast("Enter your OpenTopography API key, or turn off \"Use real DEM\""); return
         }
+        if (includeNdvi && useRealNdvi && (ndviClientId.isEmpty() || ndviClientSecret.isEmpty())) {
+            toast("Enter your Copernicus client ID and secret, or turn off \"Use real Copernicus NDVI\""); return
+        }
 
         setRunning(true)
 
         lifecycleScope.launch {
             try {
                 val json = withContext(Dispatchers.Default) {
-                    runInvestigation(lat, lon, radius, grid, useRealDem, apiKey, demType, includeNdvi)
+                    runInvestigation(
+                        lat, lon, radius, grid,
+                        useRealDem, apiKey, demType,
+                        includeNdvi, useRealNdvi, ndviClientId, ndviClientSecret
+                    )
                 }
                 renderResult(json)
             } catch (e: PyException) {
                 // Surface the real Python error rather than a generic
                 // "something went wrong" -- this app is a scientific
                 // instrument, not a consumer toy, and dem_source_mobile.py
-                // already produces human-readable messages for every
-                // network/HTTP/parsing failure. Show just that message,
-                // not the full traceback noise Chaquopy appends.
+                // / ndvi_source_mobile.py already produce human-readable
+                // messages for every network/HTTP/parsing failure. Show
+                // just that message, not the full traceback noise Chaquopy
+                // appends.
                 binding.textConfidence.text = "Investigation failed"
                 binding.textResults.text = cleanErrorMessage(e.message)
             } finally {
@@ -167,7 +199,9 @@ class MainActivity : AppCompatActivity() {
      * never be called from the main thread. */
     private fun runInvestigation(
         lat: Double, lon: Double, radiusM: Double, gridSize: Int,
-        useRealDem: Boolean, apiKey: String, demType: String, includeNdvi: Boolean
+        useRealDem: Boolean, apiKey: String, demType: String,
+        includeNdvi: Boolean, useRealNdvi: Boolean,
+        ndviClientId: String, ndviClientSecret: String
     ): String {
         return if (includeNdvi) {
             val module = python.getModule("investigation_multi_mobile")
@@ -176,7 +210,10 @@ class MainActivity : AppCompatActivity() {
                 lat, lon, radiusM, gridSize,
                 Kwarg("use_real_dem", useRealDem),
                 Kwarg("api_key", apiKey),
-                Kwarg("demtype", demType)
+                Kwarg("demtype", demType),
+                Kwarg("use_real_ndvi", useRealNdvi),
+                Kwarg("ndvi_client_id", ndviClientId),
+                Kwarg("ndvi_client_secret", ndviClientSecret)
             )
             result.toString()
         } else {
