@@ -1,139 +1,330 @@
 """
-ndvi_source_mobile.py
-======================
-REAL Sentinel-2 NDVI for Android, via the Copernicus Data Space Ecosystem's
-Sentinel Hub Statistical API.
+investigation_multi_mobile.py — Two-evidence-source investigation entry
+point called from Kotlin (via Chaquopy): DEM + NDVI correlation.
 
-WHY THIS UNBLOCKS REAL NDVI ON ANDROID:
-The earlier blocker (documented in this project's history) was that
-rasterio/GDAL cannot be compiled by Chaquopy, so no raster (GeoTIFF/COG)
-could be read on-device. The Statistical API sidesteps that entirely: you
-send it an AOI + time range + a small NDVI script, and Sentinel Hub computes
-the statistics (mean/min/max/stddev) *server-side* and returns them as a
-plain JSON object. No raster ever reaches the device. This is the same
-"push the heavy processing server-side, parse plain text/JSON on-device"
-pattern already used for DEM (OpenTopography's AAIGrid text format).
+Mirrors investigation_mobile.py's pattern (JSON string return, no
+scipy, no file I/O) but runs BOTH an elevation (DEM) and a vegetation
+(NDVI) raster through anomaly detection and cross-references them via
+correlation.py to produce CORROBORATED / SINGLE_SOURCE status per
+candidate -- the actual "independent evidence corroboration" step the
+project's roadmap has been building toward.
 
-Pure Python standard library only (urllib, json, math, datetime). No numpy,
-no rasterio, no requests library dependency.
+NDVI HAS TWO MODES NOW:
 
-CREDENTIALS REQUIRED (real account, like the existing OpenTopography key):
-A free Copernicus Data Space Ecosystem account + an OAuth2 "client
-credentials" client (client_id + client_secret), created at
-https://dataspace.copernicus.eu -> user settings -> OAuth clients.
-This mirrors the existing OpenTopography API-key pattern already in the app.
+1. use_real_ndvi=False (default): NDVI is ALWAYS SyntheticNDVISource,
+   because real Sentinel-2 raster NDVI (PlanetaryComputerNDVISource)
+   requires rasterio to read GeoTIFF bands, and Chaquopy cannot build
+   rasterio/GDAL for Android (same blocker that ruled out rasterio for
+   the DEM path -- see dem_source_mobile.py). This mode's correlation
+   LOGIC is real and tested, but a CORROBORATED result means "real DEM
+   anomaly co-located with a synthetic NDVI anomaly", not two real
+   sources.
+
+2. use_real_ndvi=True: for EACH real DEM candidate, calls
+   ndvi_source_mobile.fetch_ndvi_core_halo_check() -- a real,
+   network-fetched, per-candidate vegetation-stress check via the
+   Copernicus Sentinel Hub Statistical API (server-side NDVI
+   computation, no raster ever reaches the device, so the GDAL
+   blocker does not apply here). This is NOT an independent full-grid
+   NDVI scan; it is a targeted real check anchored at each DEM
+   candidate's location. A candidate is CORROBORATED when real
+   vegetation stress is detected there, SINGLE_SOURCE otherwise (or on
+   a per-candidate fetch failure, which is caught and recorded with
+   the real error message rather than failing the whole investigation).
+   Requires a real Copernicus Data Space Ecosystem OAuth client
+   (client_id + client_secret).
 """
-
 from __future__ import annotations
 
-import json
-import math
-import urllib.error
-import urllib.parse
-import urllib.request
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 
-TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
-STATISTICS_URL = "https://sh.dataspace.copernicus.eu/statistics/v1"
-
-# Computes NDVI server-side, masks out water (SCL==6) and pixels where
-# B04+B08==0 (division-by-zero guard), matching Copernicus's own documented
-# example evalscript for "basic statistics of NDVI with water pixels excluded".
-NDVI_EVALSCRIPT = """//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["B04", "B08", "SCL", "dataMask"] }],
-    output: [
-      { id: "data", bands: 1 },
-      { id: "dataMask", bands: 1 }
-    ]
-  }
-}
-function evaluatePixel(samples) {
-  let ndvi = (samples.B08 - samples.B04) / (samples.B08 + samples.B04)
-  var validMask = 1
-  if (samples.B08 + samples.B04 == 0) { validMask = 0 }
-  var noWaterMask = 1
-  if (samples.SCL == 6) { noWaterMask = 0 }
-  return {
-    data: [ndvi],
-    dataMask: [samples.dataMask * validMask * noWaterMask]
-  }
-}
-"""
+from coordinate import GeoPoint, build_aoi
+from dem_source import SyntheticDEMSource
+from imagery_source import SyntheticNDVISource
+from anomaly_detection_mobile import detect_anomalies, detect_raster_anomalies
+from correlation import correlate_anomalies, CorrelatedCandidate
+from evidence_record import build_investigation_record
+import ndvi_source_mobile
+from ndvi_source_mobile import NDVIFetchError
 
 
-class NDVIFetchError(Exception):
-    """Raised for any failure fetching/parsing real NDVI: auth, network,
-    malformed response, or an AOI/time-range with no usable (unmasked) data.
-    Callers (e.g. debate_mobile.py-style wrappers) should catch this and
-    surface a readable message, matching the existing DEM error-handling
-    pattern -- never silently fall back to synthetic data."""
+@dataclass
+class NdviCoreHaloResult:
+    """One real per-candidate NDVI core/halo check result (or a recorded
+    failure), used as a `second_anomalies` entry when use_real_ndvi=True.
+    Kept as a plain dataclass so evidence_record.py's asdict() call works
+    on it exactly like it does on AnomalyCandidate."""
+    lat: float
+    lon: float
+    core_mean: float | None
+    halo_mean: float | None
+    halo_stddev: float | None
+    z_score: float | None
+    vegetation_stress_detected: bool
+    error: str | None = None
 
 
-def _http_post(url: str, data: bytes, headers: dict, timeout: int) -> str:
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise NDVIFetchError(f"HTTP {exc.code} from {url}: {body[:300]}") from exc
-    except urllib.error.URLError as exc:
-        raise NDVIFetchError(f"Network error contacting {url}: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise NDVIFetchError(f"Timed out contacting {url}") from exc
+class RealNdviCoreHaloEvidence:
+    """Wrapper satisfying build_investigation_record's `second_evidence`
+    interface (.as_evidence_record(), .source, .synthetic) for the
+    real-NDVI-via-Statistical-API path, since there is no NDVIRaster
+    object in this mode (no raster is ever fetched -- only per-candidate
+    server-side statistics)."""
+
+    source = "Copernicus Sentinel-2 L2A (Sentinel Hub Statistical API, real per-candidate core/halo check)"
+    synthetic = False
+
+    def __init__(self, n_candidates_checked: int, n_fetch_errors: int):
+        self.n_candidates_checked = n_candidates_checked
+        self.n_fetch_errors = n_fetch_errors
+
+    def as_evidence_record(self) -> dict:
+        return {
+            "evidence_type": "NDVI",
+            "source": self.source,
+            "synthetic": self.synthetic,
+            "method": (
+                "OAuth2 client-credentials auth to Copernicus Data Space "
+                "Ecosystem; per-DEM-candidate real NDVI mean/stddev fetched "
+                "server-side for a small core bbox and a larger halo bbox "
+                "around each candidate; vegetation stress flagged when core "
+                "mean NDVI is significantly below halo mean (z-score vs "
+                "halo stddev). Halo bbox geometrically includes the core "
+                "(not a true annulus) -- a documented approximation."
+            ),
+            "n_candidates_checked": self.n_candidates_checked,
+            "n_fetch_errors": self.n_fetch_errors,
+        }
 
 
-def get_access_token(client_id: str, client_secret: str, timeout: int = 30) -> str:
-    """OAuth2 client-credentials token exchange. Raises NDVIFetchError on any
-    failure (missing credentials, bad credentials, network error, malformed
-    response, or a token response missing access_token)."""
-    if not client_id or not client_secret:
-        raise NDVIFetchError("Copernicus client_id and client_secret are required.")
+def _real_ndvi_correlation_for_dem_candidates(
+    dem_candidates: list,
+    client_id: str,
+    client_secret: str,
+    stress_zscore_threshold: float = 1.5,
+) -> tuple[list, list]:
+    """For each DEM candidate, run a real Copernicus NDVI core/halo check
+    anchored at that candidate's location. Returns
+    (correlated_candidates, ndvi_results) -- correlated_candidates is a
+    list[CorrelatedCandidate] (one per DEM candidate, CORROBORATED or
+    SINGLE_SOURCE), ndvi_results is a list[NdviCoreHaloResult] (including
+    failed fetches, recorded honestly rather than dropped)."""
+    correlated: list[CorrelatedCandidate] = []
+    ndvi_results: list[NdviCoreHaloResult] = []
 
-    body = urllib.parse.urlencode({
-        "grant_type": "client_credentials",
-        "client_id": client_id,
-        "client_secret": client_secret,
-    }).encode("utf-8")
+    for dem_candidate in dem_candidates:
+        try:
+            check = ndvi_source_mobile.fetch_ndvi_core_halo_check(
+                dem_candidate.lat, dem_candidate.lon,
+                client_id, client_secret,
+                stress_zscore_threshold=stress_zscore_threshold,
+            )
+            ndvi_results.append(NdviCoreHaloResult(
+                lat=dem_candidate.lat,
+                lon=dem_candidate.lon,
+                core_mean=check["core_mean"],
+                halo_mean=check["halo_mean"],
+                halo_stddev=check["halo_stddev"],
+                z_score=check["z_score"],
+                vegetation_stress_detected=check["vegetation_stress_detected"],
+            ))
+            if check["vegetation_stress_detected"]:
+                status = "CORROBORATED"
+                note = (
+                    f"Real Copernicus Sentinel-2 NDVI shows significant "
+                    f"vegetation stress at this DEM candidate "
+                    f"(core mean={check['core_mean']:.4f} vs halo mean="
+                    f"{check['halo_mean']:.4f}, z={check['z_score']:.2f}). "
+                    f"This is genuine independent corroboration from a real "
+                    f"second evidence source -- confidence should be treated "
+                    f"as MODERATE to HIGH, still pending field verification."
+                )
+                supporting_sources = ["DEM", "NDVI"]
+            else:
+                status = "SINGLE_SOURCE"
+                note = (
+                    f"Real Copernicus Sentinel-2 NDVI at this DEM candidate "
+                    f"shows no significant vegetation stress "
+                    f"(core mean={check['core_mean']:.4f} vs halo mean="
+                    f"{check['halo_mean']:.4f}, z={check['z_score']:.2f}). "
+                    f"No independent corroboration found. Confidence remains LOW."
+                )
+                supporting_sources = ["DEM"]
+        except NDVIFetchError as exc:
+            ndvi_results.append(NdviCoreHaloResult(
+                lat=dem_candidate.lat,
+                lon=dem_candidate.lon,
+                core_mean=None,
+                halo_mean=None,
+                halo_stddev=None,
+                z_score=None,
+                vegetation_stress_detected=False,
+                error=str(exc),
+            ))
+            status = "SINGLE_SOURCE"
+            note = (
+                f"Real NDVI check failed for this candidate: {exc}. "
+                f"Recorded honestly as SINGLE_SOURCE (DEM only) rather than "
+                f"failing the whole investigation. Confidence remains LOW."
+            )
+            supporting_sources = ["DEM"]
 
-    raw = _http_post(
-        TOKEN_URL, body,
-        {"Content-Type": "application/x-www-form-urlencoded"},
-        timeout,
+        correlated.append(CorrelatedCandidate(
+            lat=dem_candidate.lat,
+            lon=dem_candidate.lon,
+            status=status,
+            supporting_sources=supporting_sources,
+            source_candidates={"DEM": dem_candidate},
+            distance_between_peaks_m=0.0,
+            combined_confidence_note=note,
+        ))
+
+    correlated.sort(key=lambda r: (r.status != "CORROBORATED", -len(r.supporting_sources)))
+    return correlated, ndvi_results
+
+
+def run_investigation_multi_json(
+    lat: float,
+    lon: float,
+    radius_m: float = 500.0,
+    grid_size: int = 96,
+    dem_kernel_sigma_cells: float = 12.0,
+    dem_zscore_threshold: float = 2.5,
+    ndvi_kernel_sigma_cells: float = 12.0,
+    ndvi_zscore_threshold: float = 2.0,
+    colocation_distance_m: float | None = None,
+    synthetic_seed: int = 42,
+    synthetic_ndvi_seed: int = 43,
+    use_real_dem: bool = False,
+    api_key: str | None = None,
+    demtype: str = "SRTMGL1",
+    use_real_ndvi: bool = False,
+    ndvi_client_id: str | None = None,
+    ndvi_client_secret: str | None = None,
+) -> str:
+    """Run a two-source (DEM + NDVI) investigation and return the
+    InvestigationRecord as a JSON string. This is the function
+    MainActivity.kt calls when the "Include NDVI correlation" switch
+    is on.
+
+    DEM: real (OpenTopography, if use_real_dem=True + api_key given)
+    or synthetic, exactly as in investigation_mobile.py.
+
+    NDVI: real (Copernicus Sentinel Hub Statistical API, per-DEM-candidate
+    core/halo check) if use_real_ndvi=True + ndvi_client_id/secret given;
+    otherwise ALWAYS SyntheticNDVISource -- see module docstring.
+
+    Raises ValueError if use_real_dem=True without api_key, or
+    use_real_ndvi=True without both ndvi_client_id and ndvi_client_secret.
+    Raises the underlying OpenTopographyFetchError / NDVIFetchError for
+    any real-DEM or real-NDVI network/HTTP/parse failure that isn't
+    per-candidate-recoverable (auth failures fail the whole run; a single
+    candidate's NDVI fetch failure does not -- see
+    _real_ndvi_correlation_for_dem_candidates).
+    """
+    center = GeoPoint(lat, lon)
+    aoi = build_aoi(center, radius_m=radius_m, grid_size=grid_size)
+
+    if use_real_dem:
+        if not api_key:
+            raise ValueError("use_real_dem=True requires a non-empty api_key")
+        from dem_source_mobile import OpenTopographyAAIGridSource
+        dem = OpenTopographyAAIGridSource(api_key, demtype=demtype).fetch(aoi)
+    else:
+        dem = SyntheticDEMSource(seed=synthetic_seed).fetch(
+            aoi,
+            relief_amplitude_m=0.5,
+            relief_wavelength_cells=max(20.0, grid_size * 0.7),
+        )
+
+    dem_candidates = detect_anomalies(
+        dem,
+        kernel_sigma_cells=dem_kernel_sigma_cells,
+        zscore_threshold=dem_zscore_threshold,
+        min_area_cells=3,
     )
-    try:
-        token_data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise NDVIFetchError(f"Malformed token response: {exc}") from exc
 
-    token = token_data.get("access_token")
-    if not token:
-        raise NDVIFetchError("Token response did not include an access_token.")
-    return token
+    if use_real_ndvi:
+        if not ndvi_client_id or not ndvi_client_secret:
+            raise ValueError(
+                "use_real_ndvi=True requires non-empty ndvi_client_id and "
+                "ndvi_client_secret"
+            )
 
+        correlation_results, ndvi_results = _real_ndvi_correlation_for_dem_candidates(
+            dem_candidates, ndvi_client_id, ndvi_client_secret,
+        )
+        n_errors = sum(1 for r in ndvi_results if r.error is not None)
+        second_evidence = RealNdviCoreHaloEvidence(
+            n_candidates_checked=len(dem_candidates),
+            n_fetch_errors=n_errors,
+        )
 
-def _bbox_from_point(lat: float, lon: float, radius_m: float) -> list:
-    """Small equirectangular-approximation bbox around a point, same
-    approach already used for the DEM AOI math in this project."""
-    dlat = radius_m / 111_320.0
-    cos_lat = max(0.1, abs(math.cos(math.radians(lat))))
-    dlon = radius_m / (111_320.0 * cos_lat)
-    return [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
+        record = build_investigation_record(
+            aoi, dem, dem_candidates, dem_zscore_threshold, dem_kernel_sigma_cells,
+            second_evidence=second_evidence,
+            second_anomalies=ndvi_results,
+            second_evidence_type="NDVI",
+            correlation_results=correlation_results,
+        )
+        record.limitations.append(
+            "Real NDVI in this run is a TARGETED PER-CANDIDATE check "
+            "(core bbox vs. halo bbox around each DEM candidate), not an "
+            "independent full-grid NDVI scan -- unlike the DEM anomaly "
+            "detector, this method cannot discover a candidate that DEM "
+            "missed. It can only confirm or fail to confirm vegetation "
+            "stress at locations DEM already flagged. The halo bbox also "
+            "geometrically includes the core bbox rather than being a true "
+            "annulus, a documented approximation of the underlying "
+            "Statistical API's bbox-only interface."
+        )
+        if n_errors > 0:
+            record.limitations.append(
+                f"{n_errors} of {len(dem_candidates)} candidate(s) had a "
+                f"real NDVI fetch failure (network/auth/no-data) and were "
+                f"recorded as SINGLE_SOURCE with the real error message "
+                f"rather than silently dropped or faked."
+            )
+        return record.to_json()
 
+    # --- Synthetic-NDVI path (unchanged default behavior) ---
+    ndvi = SyntheticNDVISource(seed=synthetic_ndvi_seed).fetch(
+        aoi,
+        variability=0.06,
+        variability_wavelength_cells=max(15.0, grid_size * 0.23),
+    )
 
-def _default_time_range(days_back: int = 60) -> tuple:
-    """Defaults to the last `days_back` days ending now (UTC), so a live
-    real-time investigation doesn't require the user to pick dates."""
-    now = datetime.now(timezone.utc)
-    start = now - timedelta(days=days_back)
-    fmt = "%Y-%m-%dT%H:%M:%SZ"
-    return start.strftime(fmt), now.strftime(fmt)
+    ndvi_candidates = detect_raster_anomalies(
+        aoi, ndvi.ndvi,
+        kernel_sigma_cells=ndvi_kernel_sigma_cells,
+        zscore_threshold=ndvi_zscore_threshold,
+        min_area_cells=3,
+    )
 
+    if colocation_distance_m is None:
+        colocation_distance_m = max(30.0, aoi.cell_size_m * 4)
 
-def _stats_for_bbox(
-    bbox: list, client_id: str, client_secret:
-...
+    correlation_results = correlate_anomalies(
+        {"DEM": dem_candidates, "NDVI": ndvi_candidates},
+        aoi_center=center,
+        colocation_distance_m=colocation_distance_m,
+    )
 
-[Message clipped]  View entire message
+    record = build_investigation_record(
+        aoi, dem, dem_candidates, dem_zscore_threshold, dem_kernel_sigma_cells,
+        second_evidence=ndvi,
+        second_anomalies=ndvi_candidates,
+        second_evidence_type="NDVI",
+        correlation_results=correlation_results,
+    )
+    record.limitations.append(
+        "NDVI evidence in this run is SYNTHETIC regardless of the DEM "
+        "source, because this platform (Android/Chaquopy) cannot yet "
+        "read real Sentinel-2 GeoTIFF bands (rasterio/GDAL are not "
+        "buildable here). A CORROBORATED status therefore reflects "
+        "real DEM co-located with synthetic NDVI, not two real "
+        "sources -- the correlation LOGIC is real and tested; full "
+        "two-real-source corroboration is available via use_real_ndvi=True "
+        "(see the per-candidate Copernicus check above)."
+    )
+    return record.to_json()
