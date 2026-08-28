@@ -49,17 +49,21 @@ import org.json.JSONObject
  * After a successful investigation, the AI Debate Engine
  * (debate_mobile.run_debate_json()) is called and, if it succeeds, its
  * per-candidate positions/synthesis are appended to the results view.
- * The call is defensive: a debate-engine failure (including the module
- * not being present at all) never blocks showing the investigation
- * results themselves -- it is caught and simply omits the debate
- * section.
+ * The call is defensive: a debate-engine failure never blocks showing
+ * the investigation results themselves -- it is caught and simply omits
+ * the debate section.
  *
- * HONEST STATE (do not remove this note until it stops being true):
- * as of this commit, debate_engine.py / debate_mobile.py do NOT exist
- * in app/src/main/python/, so this call will currently always fail and
- * no debate section will render. This wiring is forward-prep for when
- * the real debate engine source is added to app/src/main/python/ --
- * see HANDOFF.md for the honest current state. There is no depth
+ * HONEST STATE (updated -- keep this note truthful, don't just delete it):
+ * debate_engine.py (rule-based, offline, four perspectives: Geomorphology,
+ * Anthropogenic/Archaeological, Data Artifact/Skeptic, Vegetation/
+ * Agronomic) and debate_mobile.py (the JSON-string wrapper this Activity
+ * calls, which translates the real anomalies[]/correlation[]/evidence[]
+ * schema into debate_engine.py's field vocabulary) now both exist in
+ * app/src/main/python/, committed on 2026-08-28. This has NOT yet been
+ * verified on an actual compiled APK on a physical device -- only
+ * schema-mapped against the real Kotlin/Python source by direct file
+ * inspection. Treat the debate section as unverified until a real
+ * on-device run confirms it renders correctly. There is no depth
  * estimation in this build.
  */
 class MainActivity : AppCompatActivity() {
@@ -152,12 +156,11 @@ class MainActivity : AppCompatActivity() {
                         includeNdvi, useRealNdvi, ndviClientId, ndviClientSecret
                     )
                 }
-                // The debate engine is intended to be rule-based, offline, and
-                // stdlib-only (debate_engine.py) -- it should never touch the
-                // network, so it is safe to call automatically after every
-                // investigation. Still wrapped defensively: a debate-engine
-                // failure (or the module simply not existing yet) must never
-                // hide the investigation result the user already has.
+                // The debate engine is rule-based, offline, and stdlib-only
+                // (debate_engine.py) -- it never touches the network, so it
+                // is safe to call automatically after every investigation.
+                // Still wrapped defensively: a debate-engine failure must
+                // never hide the investigation result the user already has.
                 val debateJson = withContext(Dispatchers.Default) {
                     try {
                         runDebate(json)
@@ -255,12 +258,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Runs on a background thread, same constraint as runInvestigation().
-     * Calls debate_mobile.run_debate_json(). Per the intended contract that
-     * module should never raise on its own (it should catch internally and
-     * return {"error": "..."} JSON) -- but this still runs inside a
-     * try/catch upstream in case Chaquopy itself throws, which today it
-     * always will, since debate_mobile.py does not exist yet in
-     * app/src/main/python/ (module-not-found is itself a PyException). */
+     * Calls debate_mobile.run_debate_json(), which never raises on its own
+     * (it catches internally and returns {"error": "..."} JSON) -- but this
+     * still runs inside a try/catch upstream in case Chaquopy itself throws
+     * (e.g. the module failing to import). */
     private fun runDebate(investigationJson: String): String {
         val module = python.getModule("debate_mobile")
         val result = module.callAttr("run_debate_json", investigationJson)
@@ -328,11 +329,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Renders the AI Debate Engine's output (debate_mobile.run_debate_json())
-     * if it succeeded. Intended to be a ranked heuristic opinion across four
-     * rule-based perspectives, not a verified conclusion -- rendered as such.
-     * Silently renders nothing if debateJsonText is null/blank, unparsable,
-     * or contains an "error" key -- which today is always the case, since
-     * debate_mobile.py does not exist yet. */
+     * if it succeeded. This is a ranked heuristic opinion across four rule-
+     * based perspectives, not a verified conclusion -- rendered as such,
+     * matching debate_engine.py's own synthesis framing
+     * (LEADING_INTERPRETATION / CONTESTED / WEAK_SIGNAL / NO_DATA). */
     private fun appendDebateSection(sb: StringBuilder, debateJsonText: String?) {
         if (debateJsonText.isNullOrBlank()) return
         val debateResult = try {
