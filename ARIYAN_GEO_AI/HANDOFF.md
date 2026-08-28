@@ -1,4 +1,4 @@
-# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-28)
+# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-28, build-fix session)
 
 > This file is the durable source of truth for project status. It is
 > updated at the end of every working session so the project state
@@ -23,21 +23,81 @@ verification that didn't actually happen.
 |---|------|--------|
 | 1 | Multi-source DEM+NDVI correlation | ✅ Complete, on-device verified |
 | 2 | Device GPS integration | ✅ Complete, on-device verified |
-| 3 | Offline rule-based AI Debate Engine (4 perspectives) | ⚠️ Code wired in and byte-verified on GitHub, but **NOT yet confirmed on-device**. A build was just triggered (this commit) to close that gap. |
+| 3 | Offline rule-based AI Debate Engine (4 perspectives) | ⚠️ Code wired in and byte-verified on GitHub. Build was failing on an unrelated infra bug (corrupted debug.keystore, see below) — that's now fixed and a fresh build (run #48) is in flight. Still needs an actual sideload test to confirm the debate section renders before this item is marked complete. |
 | 4 | Depth estimation | ❌ Not started. Deferred — needs real GPR hardware, which is a future purchase (too expensive right now). Kept on roadmap intentionally, not dropped. |
 | 5 | Real Sentinel-2 NDVI via Copernicus | ✅ Complete, on-device verified |
 
-## Immediate next step (why this commit exists)
+## LATEST SESSION: build was failing, root cause found and fixed
 
-This commit pushes to `main`, which triggers `.github/workflows/build-apk.yml`
-(GitHub Actions: JDK17/Gradle8.9/Android SDK35 → debug APK artifact
-`ariyan-geo-ai-debug-apk`).
+User reported "Actions got red." Investigation using new GitHub Actions
+tooling (see "New tooling" below) found:
 
-**Goal:** install the resulting APK on-device, run an investigation that
-produces at least one candidate, and confirm the Debate Engine section
-actually renders (via `appendDebateSection()` in `MainActivity.kt`
-calling `debate_mobile.run_debate_json()`). Only once that's confirmed
-should roadmap item (3) be re-marked fully complete.
+- Runs #45/#46 (triggered by the previous HANDOFF.md commit) both
+  failed at the **"Build debug APK"** Gradle step, not at setup.
+- Root cause: `ARIYAN_GEO_AI/app/debug.keystore` was corrupted. The
+  file's raw bytes on GitHub were literally the ASCII text of the
+  keystore's base64 representation (e.g. starting with the text
+  "MIIKZg..."), not the actual decoded binary. Proof: the Gradle error
+  was `KeytoolException: ... toDerInputStream rejects tag type 77` —
+  77 is the decimal ASCII code for the letter 'M', the first character
+  of that base64 text, confirming keytool was trying to parse text as
+  binary DER.
+- This happened because the keystore was originally committed through
+  a file-upload path that base64-encoded the (already-base64) content
+  a second time without ever decoding back to real binary — another
+  instance of the general "file uploads/commits don't take effect as
+  expected" failure mode already known for this repo.
+- **Fix process (worth knowing for next time):** the standard
+  `create_or_update_file` GitHub action available through the Zapier
+  connector does NOT reliably accept raw/data-URI binary content —
+  passing a `data:...;base64,` URI as content just got stored as
+  *more* literal text (made it worse on the first fix attempt). The
+  reliable fix was writing a small custom Zapier code action
+  (`commit_raw_base64_file`) that calls GitHub's Contents API PUT
+  endpoint directly, passing the base64 string verbatim as the API's
+  `content` field with no re-encoding. That produced a file of the
+  correct byte size (2666 bytes, matching a real debug keystore) for
+  the first time.
+- After the fix, a fresh build was triggered directly via GitHub's
+  workflow_dispatch API (not by another commit) — **run #48**,
+  https://github.com/drtanghatari-ctrl/ariyan-geo-ai-v01/actions/runs/33187315292
+  — was in progress as of this write. Status not yet confirmed complete
+  at time of writing; check it first thing on resume.
+
+## New tooling now available (custom Zapier/GitHub code actions)
+
+Discovered/created this session — the GitHub connector previously
+seemed limited to basic CRUD, but it actually has (or now has) custom
+code actions for real GitHub Actions visibility:
+
+- `list_workflow_runs` (owner, repo, per_page) — lists recent workflow
+  runs with id/status/conclusion/branch/commit — use this first to find
+  a run_id.
+- `get_workflow_run_status` (run_id) — quick status/conclusion check.
+- `get_workflow_run_jobs` (run_id) — per-job, per-step status — use to
+  find which exact step failed.
+- `get_job_log_text` (job_id) — fetches the actual error log text
+  (searches for "* What went wrong:" marker) — use this to get the
+  real Gradle/build error, not just "failure."
+- `trigger_build_apk_workflow` (no params) — dispatches build-apk.yml
+  on main directly via workflow_dispatch, without needing a commit.
+- `update_build_apk_workflow` (exists, not yet used/inspected this
+  session).
+- `commit_raw_base64_file` (owner, repo, path, branch, message,
+  content_base64, sha?) — NEW this session — the reliable way to commit
+  binary files (keystores, images, APKs, etc.) without the text
+  double-encoding problem the standard `create_file` action has. **Use
+  this instead of `create_file` for any non-text file going forward.**
+
+## Also discovered, not yet investigated
+
+A second, unfamiliar workflow named **"Python Package using Conda"**
+is also present in this repo and is ALSO failing on every push (runs
+#42-#46 all failure). This is not a workflow we intentionally added —
+origin unknown (possibly an old template/default file). It doesn't
+block the real APK build, but it's a stray failing workflow worth
+cleaning up or investigating: check `.github/workflows/` for a file
+other than `build-apk.yml` and decide whether to fix or delete it.
 
 ## Debate Engine — what happened and current state
 
@@ -69,19 +129,21 @@ should roadmap item (3) be re-marked fully complete.
   (byte-for-byte diff on `debate_engine.py`, content match on the other
   two) — confirmed correctly committed at the right paths.
 - **What remains unverified:** actual on-device/compiled-APK behavior.
-  This commit triggers that build.
+  Run #48 (see above) is the first build attempt since the keystore fix
+  — check its result first on resume.
 
-## Known bugs — both fixed and verified
+## Known bugs — fixed and verified
 
 1. **Degenerate DEM candidate** (area=0, |z|=NaN, empty polarity slipping
    through the detector) — root cause was a real NDVI core/halo result
    (different schema than `AnomalyCandidate`) being merged into the same
    `anomalies[]` list that `MainActivity.kt` reads assuming uniform
    fields. Fixed in `evidence_record.py` + `investigation_multi_mobile.py`.
-2. **APK reinstall signature mismatch** (each CI build machine generated
-   its own random debug signing key) — fixed by committing a pinned
-   `app/debug.keystore` and wiring `signingConfigs.debug` in
-   `build.gradle.kts`. All future CI builds now share one signing key.
+2. **APK reinstall signature mismatch** — originally "fixed" by
+   committing a pinned `app/debug.keystore` and wiring
+   `signingConfigs.debug` in `build.gradle.kts` — but that commit
+   itself corrupted the keystore file (see "LATEST SESSION" above),
+   which is now properly re-fixed with real binary content.
 
 ## Cleanup — paused, not yet done
 
@@ -93,6 +155,8 @@ should roadmap item (3) be re-marked fully complete.
 - `activity_main-2.xml` (10113 bytes, repo root) — never inspected.
 - Root `README.md` — checked, trivial ("# ariyan-geo-ai-v01"), low
   priority.
+- Stray "Python Package using Conda" workflow (see above) — not yet
+  investigated.
 
 ## Real-DEM path (roadmap item 1 foundation)
 
@@ -157,34 +221,40 @@ Detailed scoping already agreed, waiting on GPR hardware purchase:
 ## Working infrastructure notes
 
 - GitHub is accessed via a connected Zapier GitHub connector (account:
-  `drtanghatari-ctrl`) — this works for reading/writing repo files
-  (including verified binary commits via SHA comparison) even though
-  there's no direct GitHub MCP connector.
-- No `workflow_dispatch` action is exposed through the Zapier GitHub
-  actions currently available — builds are triggered by pushing to
-  `main` (this workflow listens on both `push: branches: [main]` and
-  `workflow_dispatch`).
+  `drtanghatari-ctrl`). Standard actions (branch/get_file_contents/
+  repository_v2/repo_issue/repo_pull/user/create_file/etc.) plus a
+  growing set of custom code actions for GitHub Actions visibility (see
+  "New tooling" above).
+- **For any binary file commit, use `commit_raw_base64_file`, not
+  `create_file`.** The latter double-encodes text-ish content and will
+  corrupt binaries.
 - Recurring past failure mode (now avoided): file uploads/commits
   historically failed silently via drag-and-drop, once resulting in
-  placeholder chat text getting committed as real code, and once in two
-  files' contents getting swapped under the wrong filenames. Standing
-  practice: commit via API/web editor (not drag-and-drop), and re-verify
-  file content after every commit — never assume a commit "took."
+  placeholder chat text getting committed as real code, once in two
+  files' contents getting swapped under the wrong filenames, and now
+  once in a keystore binary being stored as literal base64 text.
+  Standing practice: commit via API (not drag-and-drop), and re-verify
+  file content/size after every commit — never assume a commit "took."
 
 ## Resume-here checklist (read this first after any interruption)
 
-1. Check whether the GitHub Actions build triggered by this commit
-   succeeded (repo → Actions tab, or ask to pull the latest workflow run
-   status).
+1. Check the status of build run #48
+   (https://github.com/drtanghatari-ctrl/ariyan-geo-ai-v01/actions/runs/33187315292)
+   — use `get_workflow_run_status` with run_id 33187315292, or just
+   check the Actions tab.
 2. If it succeeded: get the APK artifact, sideload it, run an
    investigation with real DEM + real NDVI enabled at a known location,
    confirm the Debate Engine section renders with real debate JSON
    (4 perspectives, a synthesis with agreement_level + steward_note).
-3. If confirmed working: mark roadmap item (3) fully complete in this
-   file.
-4. Then: resume the paused cleanup (delete the two confirmed-stale
+3. If it FAILED again: use `get_workflow_run_jobs` then
+   `get_job_log_text` on the failed job to find the new root cause —
+   don't assume it's the same keystore issue, verify the actual error.
+4. If step 2 confirmed working: mark roadmap item (3) fully complete in
+   this file.
+5. Then: resume the paused cleanup (delete the two confirmed-stale
    duplicate `investigation_multi_mobile` files; inspect
-   `activity_main-2.xml`).
-5. After that: item (4) depth estimation remains the only open roadmap
+   `activity_main-2.xml`; investigate/clean up the stray "Python
+   Package using Conda" workflow).
+6. After that: item (4) depth estimation remains the only open roadmap
    item, blocked on GPR hardware purchase — check in on whether that's
    changed, otherwise no action needed there yet.
