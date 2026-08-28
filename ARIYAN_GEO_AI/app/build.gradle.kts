@@ -8,6 +8,26 @@ android {
     namespace = "com.ariyan.geoai"
     compileSdk = 35
 
+    signingConfigs {
+        getByName("debug") {
+            // Pinned debug keystore checked into the repo (app/debug.keystore)
+            // so every GitHub Actions build machine signs the debug APK with
+            // the SAME key. Without this, each fresh CI runner has no
+            // ~/.android/debug.keystore, so AGP silently generates a brand-new
+            // random one per build -- meaning every new APK download has a
+            // different signature than the previously installed one, and
+            // Android refuses to install-over-update it ("App signature
+            // doesn't match"), forcing an uninstall before every reinstall.
+            // This is a debug-only key (password "android", the standard
+            // Android tooling convention, never used for release signing) --
+            // committing it is standard practice and not a security concern.
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.ariyan.geoai"
         minSdk = 24
@@ -28,6 +48,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
