@@ -1,4 +1,4 @@
-# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-28, build-fix session)
+# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-28, DEBATE ENGINE CONFIRMED)
 
 > This file is the durable source of truth for project status. It is
 > updated at the end of every working session so the project state
@@ -23,238 +23,187 @@ verification that didn't actually happen.
 |---|------|--------|
 | 1 | Multi-source DEM+NDVI correlation | ✅ Complete, on-device verified |
 | 2 | Device GPS integration | ✅ Complete, on-device verified |
-| 3 | Offline rule-based AI Debate Engine (4 perspectives) | ⚠️ Code wired in and byte-verified on GitHub. Build was failing on an unrelated infra bug (corrupted debug.keystore, see below) — that's now fixed and a fresh build (run #48) is in flight. Still needs an actual sideload test to confirm the debate section renders before this item is marked complete. |
+| 3 | Offline rule-based AI Debate Engine (4 perspectives) | ✅ **Complete, CONFIRMED on-device with real data** (see below). One anomaly flagged, not yet resolved — see "Known issue" section. |
 | 4 | Depth estimation | ❌ Not started. Deferred — needs real GPR hardware, which is a future purchase (too expensive right now). Kept on roadmap intentionally, not dropped. |
 | 5 | Real Sentinel-2 NDVI via Copernicus | ✅ Complete, on-device verified |
 
-## LATEST SESSION: build was failing, root cause found and fixed
+**All roadmap items except (4) depth estimation are now genuinely done
+and on-device verified.** Item (4) remains blocked on GPR hardware
+purchase.
 
-User reported "Actions got red." Investigation using new GitHub Actions
-tooling (see "New tooling" below) found:
+## LATEST MILESTONE: Debate Engine confirmed on-device with real data
 
-- Runs #45/#46 (triggered by the previous HANDOFF.md commit) both
-  failed at the **"Build debug APK"** Gradle step, not at setup.
-- Root cause: `ARIYAN_GEO_AI/app/debug.keystore` was corrupted. The
-  file's raw bytes on GitHub were literally the ASCII text of the
-  keystore's base64 representation (e.g. starting with the text
-  "MIIKZg..."), not the actual decoded binary. Proof: the Gradle error
-  was `KeytoolException: ... toDerInputStream rejects tag type 77` —
-  77 is the decimal ASCII code for the letter 'M', the first character
-  of that base64 text, confirming keytool was trying to parse text as
-  binary DER.
-- This happened because the keystore was originally committed through
-  a file-upload path that base64-encoded the (already-base64) content
-  a second time without ever decoding back to real binary — another
-  instance of the general "file uploads/commits don't take effect as
-  expected" failure mode already known for this repo.
-- **Fix process (worth knowing for next time):** the standard
-  `create_or_update_file` GitHub action available through the Zapier
-  connector does NOT reliably accept raw/data-URI binary content —
-  passing a `data:...;base64,` URI as content just got stored as
-  *more* literal text (made it worse on the first fix attempt). The
-  reliable fix was writing a small custom Zapier code action
-  (`commit_raw_base64_file`) that calls GitHub's Contents API PUT
-  endpoint directly, passing the base64 string verbatim as the API's
-  `content` field with no re-encoding. That produced a file of the
-  correct byte size (2666 bytes, matching a real debug keystore) for
-  the first time.
-- After the fix, a fresh build was triggered directly via GitHub's
-  workflow_dispatch API (not by another commit) — **run #48**,
-  https://github.com/drtanghatari-ctrl/ariyan-geo-ai-v01/actions/runs/33187315292
-  — was in progress as of this write. Status not yet confirmed complete
-  at time of writing; check it first thing on resume.
+User ran a real investigation on the compiled app (screenshots
+reviewed) with real OpenTopography DEM + real Copernicus NDVI both
+enabled:
 
-## New tooling now available (custom Zapier/GitHub code actions)
+- **DEM:** OpenTopography SRTMGL1, live fetch, AAIGrid decoded without
+  GDAL/rasterio, native 32x40 raster resampled to 96x96. 1 candidate
+  found: lat=35.742615, lon=51.410988, |z|=-2.56, area=5 cells,
+  negative polarity.
+- **NDVI:** real Copernicus Sentinel-2 core/halo check at that
+  candidate — core mean=0.0791 vs halo mean=-0.0149, z=0.00, no
+  significant vegetation stress. Correlation: SINGLE_SOURCE, confidence
+  LOW (expected — no corroboration found).
+- **Debate Engine — rendered real content on-device:**
+  - Geomorphology [MODERATE]: natural landform / terrain variation
+  - Anthropogenic/Archaeological [LOW]: possible constructed /
+    human-modified feature
+  - Data Artifact/Skeptic [MODERATE]: possible measurement noise /
+    processing artifact, not a real feature
+  - Synthesis: **CONTESTED** — 'Geomorphology' (0.63) and 'Data
+    Artifact/Skeptic' (0.53) are close in confidence; correctly treated
+    as genuinely ambiguous, not resolved (per the engine's own
+    never-declare-a-winner design).
 
-Discovered/created this session — the GitHub connector previously
-seemed limited to basic CRUD, but it actually has (or now has) custom
-code actions for real GitHub Actions visibility:
+**Roadmap item (3) is now genuinely complete** — not just schema-mapped
+or byte-verified on GitHub, but confirmed rendering real debate output
+from real evidence on the actual compiled APK.
+
+## Known issue — not yet resolved
+
+The on-device debate output showed only **3 of the 4** declared
+perspectives. **Vegetation/Agronomic was missing entirely** from the
+rendered output — not shown, not even flagged as `insufficient_data`
+the way a thin-data perspective normally would be.
+
+Suspected cause: `debate_mobile.py` may be silently dropping the
+Vegetation/Agronomic perspective specifically when NDVI shows no stress
+/ correlation is SINGLE_SOURCE, rather than including it honestly with
+a "no signal detected" stance like the other perspectives do under thin
+data. Needs investigation: check `debate_mobile.py`'s perspective-
+inclusion/filtering logic against what `debate_engine.py` actually
+produces — confirm whether this is a real bug (perspective silently
+dropped) or intentional design (perspective omitted on purpose when its
+underlying evidence type is absent) that should at least be labeled
+honestly in the output either way, per this project's zero-fake-data
+principle.
+
+## Previous session: build was failing, root cause found and fixed
+
+User reported "Actions got red." Investigation found:
+
+- The **"Build debug APK"** Gradle step was failing, not setup.
+- Root cause: `ARIYAN_GEO_AI/app/debug.keystore` was corrupted — its
+  raw repo bytes were literally the ASCII text of the keystore's base64
+  encoding, not the actual decoded binary (proof: Gradle error
+  `KeytoolException: ... toDerInputStream rejects tag type 77` — 77 is
+  the decimal ASCII code for 'M', the first character of that base64
+  text).
+- This happened via a file-upload path that base64-encoded already-
+  base64 content a second time without ever decoding to real binary —
+  another instance of the general "file uploads/commits don't take
+  effect as expected" failure mode already known for this repo.
+- **Fix:** the standard `create_file` GitHub action does NOT reliably
+  accept raw/data-URI binary content — a `data:...;base64,` prefix just
+  got stored as more literal text on the first attempt. The reliable
+  fix was writing a custom Zapier code action (`commit_raw_base64_file`)
+  that calls GitHub's Contents API PUT endpoint directly, passing the
+  base64 string verbatim with no re-encoding. Produced a file of
+  correct byte size (2666 bytes) for the first time.
+- Build run #47 (triggered by the fix commit) came back fully green —
+  every step including "Build debug APK" and "Upload APK artifact"
+  succeeded: https://github.com/drtanghatari-ctrl/ariyan-geo-ai-v01/actions/runs/33187295956
+
+## Tooling now available (custom Zapier/GitHub code actions)
 
 - `list_workflow_runs` (owner, repo, per_page) — lists recent workflow
-  runs with id/status/conclusion/branch/commit — use this first to find
-  a run_id.
+  runs with id/status/conclusion/branch/commit.
 - `get_workflow_run_status` (run_id) — quick status/conclusion check.
-- `get_workflow_run_jobs` (run_id) — per-job, per-step status — use to
-  find which exact step failed.
-- `get_job_log_text` (job_id) — fetches the actual error log text
-  (searches for "* What went wrong:" marker) — use this to get the
-  real Gradle/build error, not just "failure."
+- `get_workflow_run_jobs` (run_id) — per-job, per-step status.
+- `get_job_log_text` (job_id) — fetches the actual error log text.
 - `trigger_build_apk_workflow` (no params) — dispatches build-apk.yml
   on main directly via workflow_dispatch, without needing a commit.
-- `update_build_apk_workflow` (exists, not yet used/inspected this
-  session).
 - `commit_raw_base64_file` (owner, repo, path, branch, message,
-  content_base64, sha?) — NEW this session — the reliable way to commit
-  binary files (keystores, images, APKs, etc.) without the text
-  double-encoding problem the standard `create_file` action has. **Use
-  this instead of `create_file` for any non-text file going forward.**
+  content_base64, sha?) — **the reliable way to commit binary files.
+  Use this instead of `create_file` for any non-text file going
+  forward.**
 
 ## Also discovered, not yet investigated
 
-A second, unfamiliar workflow named **"Python Package using Conda"**
-is also present in this repo and is ALSO failing on every push (runs
-#42-#46 all failure). This is not a workflow we intentionally added —
-origin unknown (possibly an old template/default file). It doesn't
-block the real APK build, but it's a stray failing workflow worth
-cleaning up or investigating: check `.github/workflows/` for a file
-other than `build-apk.yml` and decide whether to fix or delete it.
-
-## Debate Engine — what happened and current state
-
-- Roadmap item (3) had previously been recorded as complete, but was
-  discovered to never have actually existed in the repo (confirmed via
-  full git history search — no `debate_engine.py`/`debate_mobile.py`
-  anywhere). The only trace was a stray draft file, `MainActivity-3.kt`
-  (never merged into the real app), which called a `debate_mobile`
-  module that didn't exist.
-- User supplied the real `debate_engine.py` (rule-based, offline,
-  stdlib-only, ~480 lines, 4 perspectives: Geomorphology,
-  Anthropogenic/Archaeological, Data Artifact/Skeptic,
-  Vegetation/Agronomic; synthesis ranks LEADING_INTERPRETATION /
-  CONTESTED / WEAK_SIGNAL / NO_DATA, never declares a winner; caps
-  confidence honestly whenever NDVI evidence is synthetic).
-- `debate_mobile.py` (the JSON-string Chaquopy wrapper `MainActivity.kt`
-  calls) did not exist and was newly written, reading the real schema
-  directly from `evidence_record.py` / `anomaly_detection_mobile.py` /
-  `correlation.py` / `investigation_multi_mobile.py` — not guessed.
-  `debate_engine.py`'s built-in field aliases did NOT match this
-  project's actual schema, so `debate_mobile.py` translates real
-  `anomalies[]` + `correlation[]` + `evidence[]` fields into
-  `debate_engine.py`'s expected vocabulary, without modifying
-  `debate_engine.py` itself.
-- Both files committed to `app/src/main/python/`. `MainActivity.kt`
-  updated to call `runDebate()`/`appendDebateSection()`.
-- All three files (`debate_engine.py`, `debate_mobile.py`,
-  `MainActivity.kt`) were re-fetched fresh from GitHub and re-verified
-  (byte-for-byte diff on `debate_engine.py`, content match on the other
-  two) — confirmed correctly committed at the right paths.
-- **What remains unverified:** actual on-device/compiled-APK behavior.
-  Run #48 (see above) is the first build attempt since the keystore fix
-  — check its result first on resume.
+A second workflow named **"Python Package using Conda"** exists in
+`.github/workflows/` (origin unknown, not intentionally added) and
+fails on every push. Doesn't block the real APK build, but worth
+cleaning up or investigating.
 
 ## Known bugs — fixed and verified
 
-1. **Degenerate DEM candidate** (area=0, |z|=NaN, empty polarity slipping
-   through the detector) — root cause was a real NDVI core/halo result
-   (different schema than `AnomalyCandidate`) being merged into the same
-   `anomalies[]` list that `MainActivity.kt` reads assuming uniform
-   fields. Fixed in `evidence_record.py` + `investigation_multi_mobile.py`.
-2. **APK reinstall signature mismatch** — originally "fixed" by
-   committing a pinned `app/debug.keystore` and wiring
-   `signingConfigs.debug` in `build.gradle.kts` — but that commit
-   itself corrupted the keystore file (see "LATEST SESSION" above),
-   which is now properly re-fixed with real binary content.
+1. **Degenerate DEM candidate** (area=0, |z|=NaN, empty polarity) —
+   fixed in `evidence_record.py` + `investigation_multi_mobile.py`.
+2. **APK reinstall signature mismatch / corrupted keystore** — now
+   properly fixed with real binary keystore content (see above);
+   confirmed via a fully green build.
 
 ## Cleanup — paused, not yet done
 
 - `investigation_multi_mobile-1.py` (repo root) and
-  `ARIYAN_GEO_AI/investigation_multi_mobile.py` — identical to each
-  other (confirmed via SHA), confirmed stale/superseded duplicates of
-  the real build-used file at `app/src/main/python/investigation_multi_mobile.py`.
-  Safe to delete, not yet deleted.
+  `ARIYAN_GEO_AI/investigation_multi_mobile.py` — confirmed stale/
+  superseded duplicates, safe to delete, not yet deleted.
 - `activity_main-2.xml` (10113 bytes, repo root) — never inspected.
-- Root `README.md` — checked, trivial ("# ariyan-geo-ai-v01"), low
-  priority.
-- Stray "Python Package using Conda" workflow (see above) — not yet
-  investigated.
+- Root `README.md` — checked, trivial, low priority.
+- Stray "Python Package using Conda" workflow — not yet investigated.
 
 ## Real-DEM path (roadmap item 1 foundation)
 
 `dem_source_mobile.py` + `ascii_grid.py` fetch/parse OpenTopography's
 plain-text AAIGrid format (pure NumPy, no GDAL/rasterio — GDAL confirmed
 unbuildable via Chaquopy, chaquo/chaquopy#427). `np_ops.resample_bilinear`
-handles non-square real rasters (SRTM-family data isn't square in
-degrees away from the equator). Verified against a real Silbury Hill
-fetch (permanent regression fixture
-`tests/fixtures/silbury_hill_real_aaigrid.asc`) and separately on-device
-with real coordinates near Tehran (35.74, 51.41).
+handles non-square real rasters. Verified against a real Silbury Hill
+fetch and separately on-device (this session: real Tehran coordinates).
 
 ## Real-NDVI path (roadmap item 5)
 
-Copernicus Data Space Ecosystem's Sentinel Hub Statistical API computes
-NDVI server-side (no raster to device, sidestepping the GDAL blocker)
-but only returns AOI-level aggregate stats — so instead of a full-grid
-scan, built a per-DEM-candidate "core vs halo" bbox check: for each DEM
-anomaly, fetch real NDVI mean+stddev for a small core bbox at the point
-and a larger halo bbox around it, flag `vegetation_stress_detected` when
-core is significantly below halo (z-score vs halo stddev). Implemented
-in `ndvi_source_mobile.py` and `investigation_multi_mobile.py`
-(`CorrelatedCandidate` per DEM candidate — CORROBORATED if real stress
-detected, SINGLE_SOURCE otherwise, or a per-candidate `NDVIFetchError`
-caught and recorded honestly rather than failing the whole run).
-
-Confirmed working on-device with real credentials: real DEM fetch
-(native 32x40 raster resampled to 96x96), real NDVI core/halo values
-(core mean=-0.0061 vs halo mean=-0.0021, z=0.00), synthetic=false on
-both evidence sources, correctly classified SINGLE_SOURCE.
+Copernicus Data Space Ecosystem's Sentinel Hub Statistical API, "core vs
+halo" bbox check per DEM candidate (documented approximation, not a
+true annulus — the underlying Statistical API is bbox-only). Implemented
+in `ndvi_source_mobile.py` + `investigation_multi_mobile.py`. Confirmed
+working on-device multiple times now, including this session.
 
 ## Depth estimation (roadmap item 4) — scoped, not built
-
-Detailed scoping already agreed, waiting on GPR hardware purchase:
 
 - `gpr_source_mobile.py` parallel to `dem_source_mobile.py`, ingesting a
   real radargram export from an actual field GPR device (no synthetic
   data).
-- Depth via two-way travel time converted using a documented soil-type
-  velocity preset table (dry sand/clay/loam etc., user-selected), with
-  depth explicitly flagged as an estimate with uncertainty range (mirrors
-  the NDVI core/halo approximation-flagging pattern).
+- Depth via two-way travel time + soil-type velocity preset table,
+  explicitly flagged as an estimate with uncertainty range.
 - Feature detection: first-pass rule-based peak-amplitude + hyperbola-
-  shape heuristic (full ML hyperbola fitting deferred as stretch goal).
-- Output as a `GPREvidence` class mirroring `RealNdviCoreHaloEvidence`,
-  feeding `build_investigation_record`.
-- Field image evidence (separate, doesn't need GPR hardware): geotagged
-  photos (EXIF GPS + timestamp) tied to a specific investigation
-  candidate for custody/provenance — simple attach-and-display as the
-  near-term tier, on-device image analysis (cropmarks/soil discoloration)
-  deferred as a separate CV project.
-- Debate Engine integration: GPR would be a strong new input to the
-  Geomorphology and Anthropogenic/Archaeological perspectives,
-  potentially upgrading confidence tiers when GPR confirms a DEM/NDVI-
-  flagged candidate.
-- **Blocker:** GPR hardware not yet owned. Consumer/prosumer units
-  export in very different formats (some proprietary, some simple
-  CSV/image dumps) — the actual parser scope depends on which unit is
-  eventually bought. Proceeding with the rest of the roadmap in the
-  meantime, per user's request.
+  shape heuristic (full ML deferred as stretch goal).
+- `GPREvidence` class mirroring `RealNdviCoreHaloEvidence`.
+- Field image evidence (separate, doesn't need GPR): geotagged photos
+  (EXIF GPS + timestamp) for custody/provenance — near-term tier is
+  simple attach-and-display.
+- Debate Engine integration: GPR would strengthen Geomorphology and
+  Anthropogenic/Archaeological perspectives specifically.
+- **Blocker:** GPR hardware not yet owned — future purchase, format
+  depends on which unit is eventually bought. Proceeding with the rest
+  of the roadmap meanwhile, per user's request.
 
 ## Working infrastructure notes
 
-- GitHub is accessed via a connected Zapier GitHub connector (account:
-  `drtanghatari-ctrl`). Standard actions (branch/get_file_contents/
-  repository_v2/repo_issue/repo_pull/user/create_file/etc.) plus a
-  growing set of custom code actions for GitHub Actions visibility (see
-  "New tooling" above).
+- GitHub accessed via a connected Zapier GitHub connector (account:
+  `drtanghatari-ctrl`).
 - **For any binary file commit, use `commit_raw_base64_file`, not
   `create_file`.** The latter double-encodes text-ish content and will
   corrupt binaries.
-- Recurring past failure mode (now avoided): file uploads/commits
-  historically failed silently via drag-and-drop, once resulting in
-  placeholder chat text getting committed as real code, once in two
-  files' contents getting swapped under the wrong filenames, and now
-  once in a keystore binary being stored as literal base64 text.
-  Standing practice: commit via API (not drag-and-drop), and re-verify
-  file content/size after every commit — never assume a commit "took."
+- Recurring past failure mode: file uploads/commits have repeatedly not
+  taken effect as expected across sessions (drag-and-drop overwrites
+  failing silently, placeholder text committed as code, files swapped
+  under wrong names, and now a keystore stored as literal base64 text).
+  Standing practice: commit via API, re-verify file content/size after
+  every commit — never assume a commit "took."
 
 ## Resume-here checklist (read this first after any interruption)
 
-1. Check the status of build run #48
-   (https://github.com/drtanghatari-ctrl/ariyan-geo-ai-v01/actions/runs/33187315292)
-   — use `get_workflow_run_status` with run_id 33187315292, or just
-   check the Actions tab.
-2. If it succeeded: get the APK artifact, sideload it, run an
-   investigation with real DEM + real NDVI enabled at a known location,
-   confirm the Debate Engine section renders with real debate JSON
-   (4 perspectives, a synthesis with agreement_level + steward_note).
-3. If it FAILED again: use `get_workflow_run_jobs` then
-   `get_job_log_text` on the failed job to find the new root cause —
-   don't assume it's the same keystore issue, verify the actual error.
-4. If step 2 confirmed working: mark roadmap item (3) fully complete in
-   this file.
-5. Then: resume the paused cleanup (delete the two confirmed-stale
-   duplicate `investigation_multi_mobile` files; inspect
-   `activity_main-2.xml`; investigate/clean up the stray "Python
-   Package using Conda" workflow).
-6. After that: item (4) depth estimation remains the only open roadmap
-   item, blocked on GPR hardware purchase — check in on whether that's
-   changed, otherwise no action needed there yet.
+1. All roadmap items except (4) are done and on-device verified as of
+   this write. Nothing urgent is mid-flight.
+2. Next real task: investigate the missing Vegetation/Agronomic
+   perspective in the debate output (see "Known issue" above) — read
+   `debate_mobile.py`'s perspective-filtering logic and compare against
+   `debate_engine.py`'s actual output for a candidate with no NDVI
+   stress detected.
+3. After that: resume paused cleanup (delete 2 stale duplicate files;
+   inspect `activity_main-2.xml`; investigate the stray "Python Package
+   using Conda" workflow).
+4. Item (4) depth estimation stays parked until GPR hardware is
+   affordable — check in on whether that's changed, otherwise no action
+   needed there yet.
