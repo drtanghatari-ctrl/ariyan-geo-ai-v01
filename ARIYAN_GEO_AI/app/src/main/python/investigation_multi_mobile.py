@@ -53,7 +53,12 @@ class NdviCoreHaloResult:
     """One real per-candidate NDVI core/halo check result (or a recorded
     failure), used as a `second_anomalies` entry when use_real_ndvi=True.
     Kept as a plain dataclass so evidence_record.py's asdict() call works
-    on it exactly like it does on AnomalyCandidate."""
+    on it exactly like it does on AnomalyCandidate. NOTE: this has a
+    DIFFERENT schema than AnomalyCandidate (core_mean/halo_mean/z_score,
+    not area_cells/peak_zscore/polarity) -- evidence_record.py routes it
+    into second_evidence_detail rather than the anomalies[] list because
+    of that, see build_investigation_record's second_anomalies_are_candidates
+    parameter."""
     lat: float
     lon: float
     core_mean: float | None
@@ -266,6 +271,7 @@ def run_investigation_multi_json(
             second_anomalies=ndvi_results,
             second_evidence_type="NDVI",
             correlation_results=correlation_results,
+            second_anomalies_are_candidates=False,
         )
         record.limitations.append(
             "Real NDVI in this run is a TARGETED PER-CANDIDATE check "
