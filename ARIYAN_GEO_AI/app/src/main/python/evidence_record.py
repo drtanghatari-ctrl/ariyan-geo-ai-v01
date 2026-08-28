@@ -36,6 +36,7 @@ class InvestigationRecord:
     limitations: list[str]
     confidence_statement: str
     correlation: list[dict] = field(default_factory=list)
+    second_evidence_detail: list[dict] = field(default_factory=list)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(asdict(self), indent=indent, default=str)
@@ -51,7 +52,31 @@ def build_investigation_record(
     second_anomalies: list | None = None,
     second_evidence_type: str | None = None,
     correlation_results: list | None = None,
+    second_anomalies_are_candidates: bool = True,
 ) -> InvestigationRecord:
+    """Build the InvestigationRecord JSON payload.
+
+    second_anomalies_are_candidates controls how `second_anomalies` is
+    merged into the `anomalies` list:
+
+    - True (default): `second_anomalies` are AnomalyCandidate instances
+      with the SAME schema as the DEM `anomalies` (e.g. NDVI raster
+      candidates from detect_raster_anomalies in the synthetic-NDVI
+      path). Safe to concatenate into a single uniform `anomalies` list.
+
+    - False: `second_anomalies` are a structurally DIFFERENT record type
+      (e.g. NdviCoreHaloResult from the real-NDVI per-candidate check --
+      core_mean/halo_mean/z_score fields, no area_cells/peak_zscore/
+      polarity). These are kept OUT of `anomalies` and reported in the
+      separate `second_evidence_detail` field instead. Mixing them into
+      `anomalies` previously caused downstream consumers (including
+      MainActivity.kt's renderResult(), which reads every anomalies[]
+      entry assuming AnomalyCandidate fields) to silently default
+      missing fields to fake values -- area=0, |z|=NaN, polarity="" --
+      which looked exactly like a degenerate/empty DEM candidate but
+      was actually a real NDVI check result being read through the
+      wrong schema.
+    """
     evidence = [dem.as_evidence_record()]
     derived_products = [{
         "product": "local relief residual + z-score anomaly map",
@@ -61,6 +86,7 @@ def build_investigation_record(
         "zscore_threshold": zscore_threshold,
     }]
     anomaly_dicts = [asdict(a) for a in anomalies]
+    second_evidence_detail: list[dict] = []
 
     limitations = [
         "Anomalies reflect statistical deviation from local terrain/spectral "
@@ -99,12 +125,29 @@ def build_investigation_record(
             "kernel_sigma_cells": kernel_sigma_cells,
             "zscore_threshold": zscore_threshold,
         })
-        anomaly_dicts.extend([
-            {**asdict(a), "evidence_type": second_evidence_type}
-            for a in (second_anomalies or [])
-        ])
-        for a in anomaly_dicts[:len(anomalies)]:
-            a.setdefault("evidence_type", "DEM")
+
+        if second_anomalies_are_candidates:
+            # second_anomalies really are AnomalyCandidate instances
+            # (same schema as the DEM anomalies) -- safe to merge into
+            # one uniform list.
+            anomaly_dicts.extend([
+                {**asdict(a), "evidence_type": second_evidence_type}
+                for a in (second_anomalies or [])
+            ])
+            for a in anomaly_dicts[:len(anomalies)]:
+                a.setdefault("evidence_type", "DEM")
+        else:
+            # second_anomalies have a DIFFERENT schema (e.g. the real-NDVI
+            # per-candidate core/halo check). Keep them out of `anomalies`
+            # so nothing downstream defaults missing AnomalyCandidate
+            # fields to fake 0 / NaN / "" values -- report them in their
+            # own field instead.
+            for a in anomaly_dicts:
+                a.setdefault("evidence_type", "DEM")
+            second_evidence_detail = [
+                {**asdict(a), "evidence_type": second_evidence_type}
+                for a in (second_anomalies or [])
+            ]
 
     correlation_dicts = []
     if correlation_results:
@@ -162,5 +205,7 @@ def build_investigation_record(
     )
     if correlation_dicts:
         record_kwargs["correlation"] = correlation_dicts
+    if second_evidence_detail:
+        record_kwargs["second_evidence_detail"] = second_evidence_detail
 
     return InvestigationRecord(**record_kwargs)
