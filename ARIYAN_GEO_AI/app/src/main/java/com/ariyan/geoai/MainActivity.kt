@@ -46,9 +46,21 @@ import org.json.JSONObject
  *    Copernicus OAuth client ID/secret, entered in-app and held only in
  *    memory for this session -- never written to disk.
  *
- * There is still no AI Debate Engine wired into this entry point and no
- * depth estimation in this build; see HANDOFF.md for the honest current
- * state and what's next.
+ * After a successful investigation, the AI Debate Engine
+ * (debate_mobile.run_debate_json()) is called and, if it succeeds, its
+ * per-candidate positions/synthesis are appended to the results view.
+ * The call is defensive: a debate-engine failure (including the module
+ * not being present at all) never blocks showing the investigation
+ * results themselves -- it is caught and simply omits the debate
+ * section.
+ *
+ * HONEST STATE (do not remove this note until it stops being true):
+ * as of this commit, debate_engine.py / debate_mobile.py do NOT exist
+ * in app/src/main/python/, so this call will currently always fail and
+ * no debate section will render. This wiring is forward-prep for when
+ * the real debate engine source is added to app/src/main/python/ --
+ * see HANDOFF.md for the honest current state. There is no depth
+ * estimation in this build.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -140,7 +152,20 @@ class MainActivity : AppCompatActivity() {
                         includeNdvi, useRealNdvi, ndviClientId, ndviClientSecret
                     )
                 }
-                renderResult(json)
+                // The debate engine is intended to be rule-based, offline, and
+                // stdlib-only (debate_engine.py) -- it should never touch the
+                // network, so it is safe to call automatically after every
+                // investigation. Still wrapped defensively: a debate-engine
+                // failure (or the module simply not existing yet) must never
+                // hide the investigation result the user already has.
+                val debateJson = withContext(Dispatchers.Default) {
+                    try {
+                        runDebate(json)
+                    } catch (e: PyException) {
+                        null
+                    }
+                }
+                renderResult(json, debateJson)
             } catch (e: PyException) {
                 // Surface the real Python error rather than a generic
                 // "something went wrong" -- this app is a scientific
@@ -229,7 +254,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun renderResult(jsonText: String) {
+    /** Runs on a background thread, same constraint as runInvestigation().
+     * Calls debate_mobile.run_debate_json(). Per the intended contract that
+     * module should never raise on its own (it should catch internally and
+     * return {"error": "..."} JSON) -- but this still runs inside a
+     * try/catch upstream in case Chaquopy itself throws, which today it
+     * always will, since debate_mobile.py does not exist yet in
+     * app/src/main/python/ (module-not-found is itself a PyException). */
+    private fun runDebate(investigationJson: String): String {
+        val module = python.getModule("debate_mobile")
+        val result = module.callAttr("run_debate_json", investigationJson)
+        return result.toString()
+    }
+
+    private fun renderResult(jsonText: String, debateJsonText: String?) {
         val record = JSONObject(jsonText)
         val confidence = record.optString("confidence_statement", "")
         binding.textConfidence.text = confidence
@@ -284,7 +322,52 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        appendDebateSection(sb, debateJsonText)
+
         binding.textResults.text = sb.toString()
+    }
+
+    /** Renders the AI Debate Engine's output (debate_mobile.run_debate_json())
+     * if it succeeded. Intended to be a ranked heuristic opinion across four
+     * rule-based perspectives, not a verified conclusion -- rendered as such.
+     * Silently renders nothing if debateJsonText is null/blank, unparsable,
+     * or contains an "error" key -- which today is always the case, since
+     * debate_mobile.py does not exist yet. */
+    private fun appendDebateSection(sb: StringBuilder, debateJsonText: String?) {
+        if (debateJsonText.isNullOrBlank()) return
+        val debateResult = try {
+            JSONObject(debateJsonText)
+        } catch (e: Exception) {
+            return
+        }
+        if (debateResult.has("error")) return
+
+        val debates = debateResult.optJSONArray("debates")
+        if (debates == null || debates.length() == 0) return
+
+        sb.append("\nAI Debate (offline, rule-based -- not a verified conclusion):\n")
+        for (i in 0 until debates.length()) {
+            val debate = debates.getJSONObject(i)
+            val candidateId = debate.optString("candidate_id", "#${i + 1}")
+            sb.append("  Candidate ").append(candidateId).append(":\n")
+
+            val positions = debate.optJSONArray("positions")
+            if (positions != null) {
+                for (j in 0 until positions.length()) {
+                    val p = positions.getJSONObject(j)
+                    if (p.optBoolean("insufficient_data", false)) continue
+                    sb.append("    - ").append(p.optString("perspective"))
+                        .append(" [").append(p.optString("confidence_label")).append("]: ")
+                        .append(p.optString("stance")).append("\n")
+                }
+            }
+
+            val synthesis = debate.optJSONObject("synthesis")
+            if (synthesis != null) {
+                sb.append("    Synthesis (").append(synthesis.optString("agreement_level")).append("): ")
+                sb.append(synthesis.optString("steward_note")).append("\n")
+            }
+        }
     }
 
     private fun setRunning(running: Boolean) {
