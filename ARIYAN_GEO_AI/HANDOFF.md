@@ -1,4 +1,4 @@
-# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-28, DEBATE ENGINE CONFIRMED)
+# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-30, DEBATE ENGINE CONFIRMED)
 
 > This file is the durable source of truth for project status. It is
 > updated at the end of every working session so the project state
@@ -118,13 +118,24 @@ User reported "Actions got red." Investigation found:
   content_base64, sha?) — **the reliable way to commit binary files.
   Use this instead of `create_file` for any non-text file going
   forward.**
+- `commit_text_file` (path, branch, message, content_text, sha?) — the
+  reliable way to commit plain-text files (like this one); handles
+  base64 encoding automatically.
 
-## Also discovered, not yet investigated
+## Stray "Python Package using Conda" workflow — permanently deprioritized (2026-08-30)
 
 A second workflow named **"Python Package using Conda"** exists in
 `.github/workflows/` (origin unknown, not intentionally added) and
-fails on every push. Doesn't block the real APK build, but worth
-cleaning up or investigating.
+fails on every push (`EnvironmentFileNotFound` — references a
+non-existent `environment.yml`). It does **not** block the real APK
+build and is unrelated to the actual Chaquopy/Kotlin+Python build path.
+
+**User decision (2026-08-30): permanently ignore this. Do not
+investigate, fix, or flag it again in future sessions.** It had
+required reauthorizing the Zapier GitHub connection with "Contents:
+Read and write" permission to delete/fix — user declined to pursue
+this, since the workflow is cosmetic noise only (fails independently,
+no functional impact).
 
 ## Known bugs — fixed and verified
 
@@ -141,7 +152,10 @@ cleaning up or investigating.
   superseded duplicates, safe to delete, not yet deleted.
 - `activity_main-2.xml` (10113 bytes, repo root) — never inspected.
 - Root `README.md` — checked, trivial, low priority.
-- Stray "Python Package using Conda" workflow — not yet investigated.
+
+(Stray "Python Package using Conda" workflow removed from this list —
+see dedicated section above; permanently deprioritized, not part of
+cleanup scope.)
 
 ## Real-DEM path (roadmap item 1 foundation)
 
@@ -184,7 +198,8 @@ working on-device multiple times now, including this session.
   `drtanghatari-ctrl`).
 - **For any binary file commit, use `commit_raw_base64_file`, not
   `create_file`.** The latter double-encodes text-ish content and will
-  corrupt binaries.
+  corrupt binaries. For plain-text files, `commit_text_file` is the
+  reliable option.
 - Recurring past failure mode: file uploads/commits have repeatedly not
   taken effect as expected across sessions (drag-and-drop overwrites
   failing silently, placeholder text committed as code, files swapped
@@ -202,8 +217,9 @@ working on-device multiple times now, including this session.
    `debate_engine.py`'s actual output for a candidate with no NDVI
    stress detected.
 3. After that: resume paused cleanup (delete 2 stale duplicate files;
-   inspect `activity_main-2.xml`; investigate the stray "Python Package
-   using Conda" workflow).
+   inspect `activity_main-2.xml`). Do NOT investigate the "Python
+   Package using Conda" workflow — permanently deprioritized per user
+   decision (2026-08-30), see dedicated section above.
 4. Item (4) depth estimation stays parked until GPR hardware is
    affordable — check in on whether that's changed, otherwise no action
    needed there yet.
