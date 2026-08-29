@@ -1,4 +1,4 @@
-# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-30, BUILD #71 GREEN, AWAITING ON-DEVICE RE-VERIFICATION)
+# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-30, VEGETATION/AGRONOMIC BUG FIXED + ON-DEVICE VERIFIED)
 
 > This file is the durable source of truth for project status. It is
 > updated at the end of every working session so the project state
@@ -23,7 +23,7 @@ verification that didn't actually happen.
 |---|------|--------|
 | 1 | Multi-source DEM+NDVI correlation | ✅ Complete, on-device verified |
 | 2 | Device GPS integration | ✅ Complete, on-device verified |
-| 3 | Offline rule-based AI Debate Engine (4 perspectives) | ✅ **Complete, CONFIRMED on-device with real data.** Vegetation/Agronomic mislabeling bug fixed in source (2026-08-30, commit `85e99a1`) and rebuilt (build #71, green) — APK artifact ready; sideload + on-device re-run still pending. See "Known issue" section. |
+| 3 | Offline rule-based AI Debate Engine (4 perspectives) | ✅ **Complete, CONFIRMED on-device with real data, including the Vegetation/Agronomic fix.** All 4 perspectives now render correctly for every candidate, with honest reasoning. No open issues. |
 | 4 | Depth estimation | ❌ Not started. Deferred — needs real GPR hardware, which is a future purchase (too expensive right now). Kept on roadmap intentionally, not dropped. |
 | 5 | Real Sentinel-2 NDVI via Copernicus | ✅ Complete, on-device verified |
 
@@ -31,40 +31,52 @@ verification that didn't actually happen.
 and on-device verified.** Item (4) remains blocked on GPR hardware
 purchase.
 
-## LATEST MILESTONE: Debate Engine confirmed on-device with real data
+## LATEST MILESTONE: Vegetation/Agronomic fix CONFIRMED on-device (build #71)
 
-User ran a real investigation on the compiled app (screenshots
-reviewed) with real OpenTopography DEM + real Copernicus NDVI both
-enabled:
+User sideloaded build #71's APK and re-ran a real investigation (real
+OpenTopography DEM + real Copernicus NDVI + a real GPR field pick,
+screenshots reviewed). Result: **the fix works as designed.**
 
-- **DEM:** OpenTopography SRTMGL1, live fetch, AAIGrid decoded without
-  GDAL/rasterio, native 32x40 raster resampled to 96x96. 1 candidate
-  found: lat=35.742615, lon=51.410988, |z|=-2.56, area=5 cells,
-  negative polarity.
-- **NDVI:** real Copernicus Sentinel-2 core/halo check at that
-  candidate — core mean=0.0791 vs halo mean=-0.0149, z=0.00, no
-  significant vegetation stress. Correlation: SINGLE_SOURCE, confidence
-  LOW (expected — no corroboration found).
-- **Debate Engine — rendered real content on-device:**
-  - Geomorphology [MODERATE]: natural landform / terrain variation
-  - Anthropogenic/Archaeological [LOW]: possible constructed /
-    human-modified feature
-  - Data Artifact/Skeptic [MODERATE]: possible measurement noise /
-    processing artifact, not a real feature
-  - Synthesis: **CONTESTED** — 'Geomorphology' (0.63) and 'Data
-    Artifact/Skeptic' (0.53) are close in confidence; correctly treated
-    as genuinely ambiguous, not resolved (per the engine's own
-    never-declare-a-winner design).
+- **2 candidates detected** across 3 evidence sources, both
+  SINGLE_SOURCE (DEM only), confidence LOW as expected — no false
+  corroboration claimed.
+  - #1: lat=34.981926, lon=57.723699, |z|=3.25, area=13 cells, positive
+    polarity. Real NDVI core/halo check: core mean=0.0370 vs halo
+    mean=0.0236, z=0.00 — no vegetation stress.
+  - #2: lat=34.977700, lon=57.726209, |z|=-2.76, area=12 cells, negative
+    polarity. Real NDVI: core mean=0.0452 vs halo mean=0.0324, z=0.00
+    — no vegetation stress.
+- **All 4 perspectives now render for BOTH candidates**, including
+  Vegetation/Agronomic — no longer missing, and no longer wrongly
+  claiming "no vegetation evidence present." Correct honest wording
+  shown for both: *"NDVI (vegetation) evidence is present for this
+  candidate... Vegetation signal is not corroborated by elevation data,
+  which is consistent with a vegetation-only cause (e.g. soil moisture,
+  crop stress) with no underlying earthwork."* — exactly the intended
+  fix behavior (checked-but-no-corroboration, correctly distinguished
+  from never-checked).
+  - Candidate #1 synthesis: **CONTESTED** — Geomorphology (0.64) vs
+    Vegetation/Agronomic (0.50), correctly left unresolved.
+  - Candidate #2 synthesis: **LEADING_INTERPRETATION** — Geomorphology
+    (0.66), with the steward's usual "ranked heuristic opinion, not
+    proof" caveat.
+- **GPR:** a real GPR field pick was present for this investigation but
+  no DEM candidate was within 42m of the pick location, so it was
+  honestly reported as "not applied to any candidate's debate" (the
+  `gpr_note` path) rather than silently ignored or falsely applied.
+- Confidence-scoring/statistical-behavior notes in the app's own
+  "Limitations" section were also visible and correctly worded (e.g.
+  the z≥2.5 threshold's expected false-positive rate, NDVI's
+  bbox-based "not a true annulus" caveat).
 
-**Roadmap item (3) is now genuinely complete** — not just schema-mapped
-or byte-verified on GitHub, but confirmed rendering real debate output
-from real evidence on the actual compiled APK.
+**Roadmap item (3) and the Vegetation/Agronomic bug are both now fully
+resolved and on-device confirmed.** No open debate-engine issues remain.
 
-## Known issue — FIXED IN SOURCE + REBUILT (2026-08-30), on-device re-verification still pending
+## Bug history: Vegetation/Agronomic "no vegetation evidence present" mislabeling — FULLY RESOLVED (2026-08-30)
 
-**Original symptom:** the on-device debate output above showed only
-**3 of the 4** declared perspectives. Vegetation/Agronomic did not
-appear at all.
+**Original symptom:** an earlier on-device run showed only 3 of the 4
+declared perspectives — Vegetation/Agronomic did not appear at all for
+a SINGLE_SOURCE candidate with real NDVI checked and no stress found.
 
 **Root cause found by tracing the full chain (`debate_mobile.py` →
 `debate_engine.py` → `MainActivity.kt`):**
@@ -90,16 +102,16 @@ appear at all.
 - Net effect: `_vegetation_position()` saw `sources = ["DEM"]`,
   concluded `"NDVI" not in sources`, and returned an honestly-labeled
   `insufficient_data` position with stance "no vegetation evidence
-  present for this candidate" — which was **factually wrong** for this
-  candidate, since real Copernicus NDVI data genuinely was fetched and
-  evaluated at that exact location. An honest "checked, no signal"
-  finding was mislabeled as "not checked at all" — a violation of this
-  project's own zero-fake-data / honest-labeling principle, just in the
-  opposite direction from what was originally suspected (this was never
-  a silent-drop bug; it was a mislabeling bug).
+  present for this candidate" — which was **factually wrong**, since
+  real Copernicus NDVI data genuinely was fetched and evaluated at that
+  exact location. An honest "checked, no signal" finding was mislabeled
+  as "not checked at all" — a violation of this project's own
+  zero-fake-data / honest-labeling principle, just in the opposite
+  direction from what was originally suspected (this was never a
+  silent-drop bug; it was a mislabeling bug).
 
-**Fix applied (commit `85e99a1`, 2026-08-30):** `_build_candidate()` now
-takes an explicit `checked_sources` parameter (the investigation-level
+**Fix (commit `85e99a1`, 2026-08-30):** `_build_candidate()` now takes
+an explicit `checked_sources` parameter (the investigation-level
 `context["sources"]`) and sets `candidate["sources"]` to the
 order-preserving union of `supporting_sources` and `checked_sources`,
 rather than `supporting_sources` alone. A checked-but-no-signal source
@@ -107,22 +119,12 @@ can no longer be silently indistinguishable from an unchecked one.
 `run_debate_json()` was updated to pass `context.get("sources")` through
 at the call site.
 
-**Rebuilt (2026-08-30):** build **#71** dispatched off the fix commit,
-completed with conclusion `success`, and produced a fresh debug APK
-artifact (`ariyan-geo-ai-debug-apk`, ~35.8 MB):
+**Rebuilt:** build **#71**, conclusion `success`:
 https://github.com/drtanghatari-ctrl/ariyan-geo-ai-v01/actions/runs/33274843173
 
-**Still pending — on-device re-verification:** the fix and rebuild are
-both done, but nobody has sideloaded run #71's APK onto the physical
-phone yet or re-run a real investigation against it. Next session (or
-later this session): sideload it, re-run the same/a similar
-investigation (real DEM + real NDVI, single DEM candidate, no
-vegetation stress), and confirm the on-device output now shows
-Vegetation/Agronomic as `[insufficient data]: NDVI evidence checked for
-this candidate but showed no significant stress signal` (or similar
-honest wording) — NOT the old "no vegetation evidence present" stance,
-and NOT absent from the list. Do not mark roadmap item (3) or this bug
-as fully resolved until that on-device confirmation actually happens.
+**Verified on-device (2026-08-30):** see "LATEST MILESTONE" above —
+sideloaded, re-run with real DEM+NDVI+GPR, confirmed correct behavior
+for 2 independent candidates. Status: **CLOSED.**
 
 ## Previous session: build was failing, root cause found and fixed
 
@@ -199,14 +201,11 @@ no functional impact).
 2. **APK reinstall signature mismatch / corrupted keystore** — now
    properly fixed with real binary keystore content (see above);
    confirmed via a fully green build.
-
-## Known bugs — fixed in source + rebuilt, awaiting on-device re-verification
-
 3. **Vegetation/Agronomic "no vegetation evidence present" mislabeling**
-   — see "Known issue" section above. Fixed in `debate_mobile.py`
-   (commit `85e99a1`, 2026-08-30); rebuilt cleanly as build #71
-   (green, APK artifact ready). Not yet sideloaded/re-run on a physical
-   device.
+   — see dedicated "Bug history" section above. Fixed in
+   `debate_mobile.py` (commit `85e99a1`), rebuilt (build #71), and
+   **confirmed on-device** across 2 independent real candidates
+   (2026-08-30). Closed.
 
 ## Cleanup — paused, not yet done
 
@@ -226,7 +225,8 @@ cleanup scope.)
 plain-text AAIGrid format (pure NumPy, no GDAL/rasterio — GDAL confirmed
 unbuildable via Chaquopy, chaquo/chaquopy#427). `np_ops.resample_bilinear`
 handles non-square real rasters. Verified against a real Silbury Hill
-fetch and separately on-device (this session: real Tehran coordinates).
+fetch and separately on-device (real Tehran coordinates, then real
+northern Iran coordinates in this session's build #71 re-run).
 
 ## Real-NDVI path (roadmap item 5)
 
@@ -234,7 +234,8 @@ Copernicus Data Space Ecosystem's Sentinel Hub Statistical API, "core vs
 halo" bbox check per DEM candidate (documented approximation, not a
 true annulus — the underlying Statistical API is bbox-only). Implemented
 in `ndvi_source_mobile.py` + `investigation_multi_mobile.py`. Confirmed
-working on-device multiple times now, including this session.
+working on-device multiple times now, including the build #71
+Vegetation/Agronomic fix re-verification.
 
 ## Depth estimation (roadmap item 4) — scoped, not built
 
@@ -250,7 +251,10 @@ working on-device multiple times now, including this session.
   (EXIF GPS + timestamp) for custody/provenance — near-term tier is
   simple attach-and-display.
 - Debate Engine integration: GPR would strengthen Geomorphology and
-  Anthropogenic/Archaeological perspectives specifically.
+  Anthropogenic/Archaeological perspectives specifically. Confirmed
+  on-device (build #71 re-run) that when no candidate is close enough
+  to a real GPR pick, this is honestly reported via `gpr_note` rather
+  than silently ignored or misapplied.
 - **Blocker:** GPR hardware not yet owned — future purchase, format
   depends on which unit is eventually bought. Proceeding with the rest
   of the roadmap meanwhile, per user's request.
@@ -272,24 +276,16 @@ working on-device multiple times now, including this session.
 
 ## Resume-here checklist (read this first after any interruption)
 
-1. Roadmap items (1), (2), (5) are done and on-device verified. Item
-   (3) the Debate Engine is functionally complete; its
-   Vegetation/Agronomic mislabeling bug was fixed in source (2026-08-30,
-   commit `85e99a1`) AND rebuilt (build #71, green, APK artifact ready)
-   — **but nobody has sideloaded it or re-run a real investigation on
-   the new build yet.** Item (4) stays parked (see below).
-2. Next real task: sideload build #71's APK
-   (https://github.com/drtanghatari-ctrl/ariyan-geo-ai-v01/actions/runs/33274843173)
-   onto the physical phone, then re-run a real investigation (real DEM
-   + real NDVI, a candidate with no vegetation stress) to confirm
-   Vegetation/Agronomic now renders an honest "NDVI checked, no signal"
-   position rather than either the old wrong "no vegetation evidence
-   present" stance or being absent. Only mark this fully resolved once
-   that on-device confirmation actually happens.
-3. After that: resume paused cleanup (delete 2 stale duplicate files;
-   inspect `activity_main-2.xml`). Do NOT investigate the "Python
-   Package using Conda" workflow — permanently deprioritized per user
-   decision (2026-08-30), see dedicated section above.
-4. Item (4) depth estimation stays parked until GPR hardware is
+1. Roadmap items (1), (2), (3), (5) are ALL done and on-device verified
+   as of this write — including the Vegetation/Agronomic fix, confirmed
+   working across 2 independent real candidates on build #71. Nothing
+   urgent is mid-flight. Only item (4) remains, parked on GPR hardware.
+2. Next real task: resume the paused cleanup (delete 2 stale duplicate
+   files — `investigation_multi_mobile-1.py` and
+   `ARIYAN_GEO_AI/investigation_multi_mobile.py`; inspect
+   `activity_main-2.xml`). Do NOT investigate the "Python Package using
+   Conda" workflow — permanently deprioritized per user decision
+   (2026-08-30), see dedicated section above.
+3. Item (4) depth estimation stays parked until GPR hardware is
    affordable — check in on whether that's changed, otherwise no action
    needed there yet.
