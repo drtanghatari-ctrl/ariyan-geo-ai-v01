@@ -93,12 +93,12 @@ import org.json.JSONObject
  * result this project does not hide. GPR manual-pick entry has been
  * CONFIRMED WORKING ON-DEVICE as a third evidence source (real DEM +
  * real NDVI + a real manual pick, depth section rendered correctly).
- * GPR-INTO-DEBATE-ENGINE INTEGRATION IS NEW THIS COMMIT AND NOT YET
- * ON-DEVICE VERIFIED: debate_mobile.py now matches the GPR pick to
- * nearby DEM candidates (by distance, using the AOI's own cell size as
- * the proximity tolerance -- see debate_mobile._gpr_colocation_distance_m())
- * and, when close enough, adds real subsurface-confirmation reasoning to
- * three of the four perspectives (debate_engine.py's Geomorphology,
+ * GPR-INTO-DEBATE-ENGINE INTEGRATION: debate_mobile.py now matches the
+ * GPR pick to nearby DEM candidates (by distance, using the AOI's own
+ * cell size as the proximity tolerance -- see
+ * debate_mobile._gpr_colocation_distance_m()) and, when close enough,
+ * adds real subsurface-confirmation reasoning to three of the four
+ * perspectives (debate_engine.py's Geomorphology,
  * Anthropogenic/Archaeological, and Data Artifact/Skeptic positions).
  * Verified so far only with local Python-side tests against synthetic
  * JSON payloads shaped like a real investigation record -- NOT yet run
@@ -107,6 +107,18 @@ import org.json.JSONObject
  * labels/stances actually shift as designed. There is no automatic GPR
  * device-export parsing in this build (manual pick entry only -- see
  * gpr_source_mobile.py's own honest-state docstring).
+ * CANDIDATE-ID BUG FIXED (this commit): the AI Debate section previously
+ * rendered "Candidate null:" as the header for every debated candidate.
+ * Root cause was org.json's JSONObject.optString(name, fallback): it
+ * only substitutes the fallback when the KEY IS ABSENT, not when the key
+ * is present holding a JSON null (which is exactly what debate_engine.py
+ * previously returned for candidate_id, since nothing upstream ever set
+ * a real id). Fixed at the root in debate_mobile.py (every debated
+ * candidate now gets a real, non-null id -- its own 1-based position in
+ * this run's anomalies[] list, matching the "Candidates: #N" list above
+ * it), with this Activity's own optString call also hardened below
+ * (isNull() checked explicitly) as a defensive backstop in case any
+ * future caller of debate_engine.py still omits a real id.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -461,7 +473,15 @@ class MainActivity : AppCompatActivity() {
      * just present in the underlying JSON). A top-level "gpr_note" is
      * rendered too, when debate_mobile.py reports that real GPR evidence
      * existed for this investigation but wasn't close enough to any
-     * candidate to be used in its debate. */
+     * candidate to be used in its debate.
+     * candidateId: debate_mobile.py now always assigns a real, non-null
+     * "candidate_id" (see debate_mobile._build_candidate()'s "id" field),
+     * but this still checks isNull() explicitly rather than relying only
+     * on optString()'s fallback -- org.json's optString(name, fallback)
+     * only substitutes the fallback when the key is ABSENT, not when the
+     * key is present holding a JSON null, which is exactly how the
+     * earlier "Candidate null:" bug happened. This is a defensive
+     * backstop, not the primary fix. */
     private fun appendDebateSection(sb: StringBuilder, debateJsonText: String?) {
         if (debateJsonText.isNullOrBlank()) return
         val debateResult = try {
@@ -477,7 +497,11 @@ class MainActivity : AppCompatActivity() {
         sb.append("\nAI Debate (offline, rule-based -- not a verified conclusion):\n")
         for (i in 0 until debates.length()) {
             val debate = debates.getJSONObject(i)
-            val candidateId = debate.optString("candidate_id", "#${i + 1}")
+            val candidateId = if (debate.isNull("candidate_id")) {
+                "#${i + 1}"
+            } else {
+                debate.optString("candidate_id", "#${i + 1}")
+            }
             sb.append("  Candidate ").append(candidateId).append(":\n")
 
             val positions = debate.optJSONArray("positions")
