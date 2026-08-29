@@ -51,6 +51,31 @@ REAL SCHEMA NOTES (why this file looks the way it does):
   and a close match for CORROBORATED ones (centroid of co-located points
   within colocation_distance_m by construction). Nearest-match is
   therefore correct, not a guess, across both modes.
+- "sources" on a candidate (consumed by debate_engine.py's
+  _sources_present()) must mean "which evidence TYPES were actually
+  evaluated for this candidate" (e.g. DEM elevation + NDVI vegetation),
+  not merely "which sources happened to corroborate it".
+  BUG HISTORY (fixed): earlier versions of this file set
+  candidate["sources"] directly from correlation_entry["supporting_sources"]
+  alone. For a SINGLE_SOURCE correlation entry, supporting_sources only
+  lists the source that positively detected the anomaly (e.g. ["DEM"]) --
+  it does NOT include a source like NDVI that was genuinely checked at
+  this candidate's exact location but simply found no corroborating
+  signal. Because debate_engine.py's _sources_present() returns the
+  candidate-level "sources" the moment it is non-empty (never falling
+  back to the broader context-level list), this caused
+  debate_engine.py's Vegetation/Agronomic perspective to wrongly report
+  "no vegetation evidence present for this candidate" (insufficient_data)
+  even when real Copernicus NDVI evidence had actually been fetched and
+  checked for that exact candidate and simply showed no stress signal --
+  an honest "checked, no signal" finding was mislabeled as "not checked
+  at all", exactly the kind of mislabeling this project's zero-fake-data
+  principle exists to prevent. Fixed at the root here: candidate
+  ["sources"] is now the union of correlation_entry's supporting_sources
+  AND the investigation-level list of evidence types that were actually
+  gathered (context["sources"], built in _build_context() from the
+  top-level evidence[] list) -- so a checked-but-no-signal source is
+  never silently indistinguishable from an unchecked one.
 - SCOPE: only anomalies[] entries with evidence_type == "DEM" (or no
   evidence_type at all -- single-source runs) are debated. In synthetic-
   NDVI mode, anomalies[] can also hold NDVI-raster-detected candidates
@@ -209,6 +234,7 @@ def _attach_gpr(
 def _build_candidate(
     anomaly: dict,
     correlation_entry: Optional[dict],
+    checked_sources: Optional[list[str]] = None,
     original_index: Optional[int] = None,
 ) -> dict:
     """Translate one real anomalies[] entry into the field-name vocabulary
@@ -223,7 +249,16 @@ def _build_candidate(
     becomes the candidate's "id", which debate_engine.run_debate() copies
     into the result's top-level "candidate_id" field. This is always a
     real, non-null value when original_index is provided -- see the
-    module docstring's BUG HISTORY note for why that matters."""
+    module docstring's BUG HISTORY note for why that matters.
+
+    checked_sources is the investigation-level list of evidence TYPES
+    actually gathered this run (e.g. ["DEM","NDVI"] -- see
+    _build_context()). candidate["sources"] is the union of this and
+    correlation_entry's supporting_sources, NOT supporting_sources alone
+    -- see the module docstring's second BUG HISTORY note for why using
+    supporting_sources alone previously made a genuinely-checked-but-
+    no-signal source (typically NDVI) indistinguishable from a source
+    that was never checked at all."""
     candidate: dict[str, Any] = {
         "location": {"lat": anomaly.get("lat"), "lon": anomaly.get("lon")},
     }
@@ -233,11 +268,24 @@ def _build_candidate(
         candidate["z_score"] = anomaly["peak_zscore"]
     if anomaly.get("peak_residual_m") is not None:
         candidate["elevation_delta_m"] = anomaly["peak_residual_m"]
+
+    supporting_sources = []
     if correlation_entry is not None:
         if correlation_entry.get("status"):
             candidate["correlation_status"] = correlation_entry["status"]
         if correlation_entry.get("supporting_sources"):
-            candidate["sources"] = correlation_entry["supporting_sources"]
+            supporting_sources = list(correlation_entry["supporting_sources"])
+
+    # Union, order-preserving, de-duplicated: every evidence type actually
+    # gathered for this investigation (checked_sources) PLUS anything
+    # supporting_sources names that checked_sources might not have caught.
+    # This is what fixes the Vegetation/Agronomic "no vegetation evidence
+    # present" mislabeling -- see the module docstring's second BUG
+    # HISTORY note.
+    merged_sources = list(dict.fromkeys([*supporting_sources, *(checked_sources or [])]))
+    if merged_sources:
+        candidate["sources"] = merged_sources
+
     return candidate
 
 
@@ -284,7 +332,9 @@ def run_debate_json(investigation_json: str) -> str:
                 n_skipped_non_dem += 1
                 continue
             correlation_entry = _nearest_correlation_entry(anomaly, correlation)
-            candidate = _build_candidate(anomaly, correlation_entry, original_index)
+            candidate = _build_candidate(
+                anomaly, correlation_entry, context.get("sources"), original_index
+            )
             if _attach_gpr(candidate, anomaly, gpr_item, gpr_max_distance_m):
                 any_gpr_confirmed = True
             debates.append(run_debate(candidate, context))
