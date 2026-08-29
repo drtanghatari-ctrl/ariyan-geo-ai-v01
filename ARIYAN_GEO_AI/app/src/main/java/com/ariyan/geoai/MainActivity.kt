@@ -58,12 +58,21 @@ import org.json.JSONObject
  * Anthropogenic/Archaeological, Data Artifact/Skeptic, Vegetation/
  * Agronomic) and debate_mobile.py (the JSON-string wrapper this Activity
  * calls, which translates the real anomalies[]/correlation[]/evidence[]
- * schema into debate_engine.py's field vocabulary) now both exist in
- * app/src/main/python/, committed on 2026-08-28. This has NOT yet been
- * verified on an actual compiled APK on a physical device -- only
- * schema-mapped against the real Kotlin/Python source by direct file
- * inspection. Treat the debate section as unverified until a real
- * on-device run confirms it renders correctly. There is no depth
+ * schema into debate_engine.py's field vocabulary) both exist in
+ * app/src/main/python/ and have been CONFIRMED WORKING on an actual
+ * compiled APK on a physical device (real OpenTopography DEM + real
+ * Copernicus Sentinel-2 NDVI; synthesis correctly landed on CONTESTED
+ * for a genuinely ambiguous candidate). One bug was found afterward and
+ * is fixed by this same commit: appendDebateSection() below used to
+ * silently skip ANY perspective whose "insufficient_data" flag was true
+ * -- most commonly Vegetation/Agronomic, which debate_engine.py
+ * correctly marks insufficient_data whenever NDVI evidence was gathered
+ * but showed no vegetation-stress signal at that location (a real,
+ * honestly-reported "no signal" finding, not missing data). Silently
+ * hiding that finding contradicted this project's own repeated design
+ * principle of never hiding an honest absence-of-evidence result.
+ * Fixed to render insufficient-data positions explicitly labeled
+ * "[insufficient data]" instead of omitting them. There is no depth
  * estimation in this build.
  */
 class MainActivity : AppCompatActivity() {
@@ -332,7 +341,11 @@ class MainActivity : AppCompatActivity() {
      * if it succeeded. This is a ranked heuristic opinion across four rule-
      * based perspectives, not a verified conclusion -- rendered as such,
      * matching debate_engine.py's own synthesis framing
-     * (LEADING_INTERPRETATION / CONTESTED / WEAK_SIGNAL / NO_DATA). */
+     * (LEADING_INTERPRETATION / CONTESTED / WEAK_SIGNAL / NO_DATA). All four
+     * perspectives are always shown, including any marked insufficient_data
+     * by debate_engine.py (labeled "[insufficient data]" rather than
+     * silently omitted) -- an honest "this perspective had no evidence to
+     * argue from" is itself a real finding this project does not hide. */
     private fun appendDebateSection(sb: StringBuilder, debateJsonText: String?) {
         if (debateJsonText.isNullOrBlank()) return
         val debateResult = try {
@@ -355,10 +368,10 @@ class MainActivity : AppCompatActivity() {
             if (positions != null) {
                 for (j in 0 until positions.length()) {
                     val p = positions.getJSONObject(j)
-                    if (p.optBoolean("insufficient_data", false)) continue
-                    sb.append("    - ").append(p.optString("perspective"))
-                        .append(" [").append(p.optString("confidence_label")).append("]: ")
-                        .append(p.optString("stance")).append("\n")
+                    val insufficient = p.optBoolean("insufficient_data", false)
+                    sb.append("    - ").append(p.optString("perspective")).append(" [")
+                    sb.append(if (insufficient) "insufficient data" else p.optString("confidence_label"))
+                    sb.append("]: ").append(p.optString("stance")).append("\n")
                 }
             }
 
