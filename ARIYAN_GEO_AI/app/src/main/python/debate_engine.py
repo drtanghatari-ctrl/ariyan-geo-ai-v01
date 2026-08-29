@@ -27,6 +27,18 @@ If your actual evidence-record schema uses different key names than the
 aliases tried here, see the "SCHEMA MISMATCH" note in the README delivered
 alongside this file -- update the alias tuples in _get() calls below; the
 rule logic itself does not need to change.
+
+GPR (ground-penetrating radar) FIELD-PICK EXTENSION: candidates may
+optionally carry gpr_confirmed (bool), gpr_distance_m, gpr_depth_min_m,
+gpr_depth_max_m -- set by debate_mobile.py only when a real GPR field
+pick (see gpr_source_mobile.py) was matched close enough to this
+candidate's location to count as independent subsurface confirmation.
+Unlike the schema-mapping aliases above, this DID require new rule logic
+(see _gpr_confirmation() below and its use in the Geomorphology,
+Anthropogenic/Archaeological, and Data Artifact/Skeptic perspectives) --
+GPR is a genuinely new kind of evidence (a real subsurface measurement,
+not another surface-level proxy like elevation or NDVI), so it earns its
+own treatment rather than being folded into an existing alias.
 """
 
 from __future__ import annotations
@@ -93,6 +105,23 @@ def _elevation_relief_m(candidate: dict) -> Optional[float]:
         return float(val) if val is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _gpr_confirmation(candidate: dict) -> Optional[dict]:
+    """Return {"distance_m", "depth_min_m", "depth_max_m"} if a real GPR
+    field pick was matched close enough to this candidate to count as
+    independent subsurface confirmation, else None. This module does not
+    do its own distance matching -- it only reads what debate_mobile.py
+    already decided was close enough (see debate_mobile._attach_gpr()),
+    since debate_engine.py has no access to the AOI/grid geometry needed
+    to judge proximity itself."""
+    if not _get(candidate, "gpr_confirmed"):
+        return None
+    return {
+        "distance_m": _get(candidate, "gpr_distance_m"),
+        "depth_min_m": _get(candidate, "gpr_depth_min_m"),
+        "depth_max_m": _get(candidate, "gpr_depth_max_m"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +219,18 @@ def _geomorphology_position(candidate: dict, context: dict) -> Position:
                 "micro-relief, which weakens a natural-only explanation."
             )
 
+    gpr = _gpr_confirmation(candidate)
+    if gpr is not None:
+        score -= 0.15
+        reasoning.append(
+            "A real ground-penetrating radar field pick recorded an actual "
+            "subsurface reflector close to this candidate's location -- "
+            "evidence the anomaly is not purely a surface phenomenon, which "
+            "weakens (but does not rule out) a natural-terrain-only "
+            "explanation. This is a single manual field pick, not a "
+            "full-area GPR survey."
+        )
+
     score = max(0.0, min(1.0, score))
     return Position(
         "Geomorphology",
@@ -258,6 +299,30 @@ def _anthropogenic_position(candidate: dict, context: dict) -> Position:
         # not enough if the number still reads as strong evidence.
         score = min(score, 0.55)
 
+    gpr = _gpr_confirmation(candidate)
+    if gpr is not None:
+        # Applied AFTER the synthetic-NDVI cap above, deliberately: a real
+        # GPR subsurface reflector is genuine independent evidence and
+        # should not be capped just because this run's NDVI happened to be
+        # synthetic -- those are two unrelated honesty concerns.
+        score += 0.20
+        depth_note = ""
+        if gpr["depth_min_m"] is not None and gpr["depth_max_m"] is not None:
+            depth_note = (
+                f" at an estimated depth of {gpr['depth_min_m']:.2f}-"
+                f"{gpr['depth_max_m']:.2f} m"
+            )
+        reasoning.append(
+            "A real ground-penetrating radar field pick recorded an actual "
+            f"subsurface reflector{depth_note}, close to this candidate's "
+            "location. This is direct subsurface confirmation (not a "
+            "surface-only proxy like elevation or vegetation), and this "
+            "project treats it as stronger independent evidence than "
+            "surface corroboration alone. This is a single manual field "
+            "pick, not a full-area GPR survey."
+        )
+        score = max(0.0, min(1.0, score))
+
     return Position(
         "Anthropogenic / Archaeological",
         "possible constructed / human-modified feature",
@@ -309,6 +374,16 @@ def _artifact_skeptic_position(candidate: dict, context: dict) -> Position:
         reasoning.append(
             "Independent corroboration across sources makes a shared artifact "
             "(e.g. a coincidental error in two unrelated datasets) less likely."
+        )
+
+    gpr = _gpr_confirmation(candidate)
+    if gpr is not None:
+        score -= 0.15
+        reasoning.append(
+            "A real ground-penetrating radar field pick independently "
+            "confirmed an actual subsurface reflector at this location, "
+            "which makes a shared measurement/processing artifact across "
+            "unrelated instruments (DEM/NDVI and GPR) less likely."
         )
 
     score = max(0.0, min(1.0, score))
