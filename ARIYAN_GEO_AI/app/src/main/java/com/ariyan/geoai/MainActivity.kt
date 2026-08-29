@@ -26,8 +26,9 @@ import org.json.JSONObject
  *
  * Calls investigation_mobile.run_investigation_json() (single-source DEM)
  * or investigation_multi_mobile.run_investigation_multi_json()
- * (DEM + NDVI correlation) depending on the "Include NDVI correlation"
- * switch, and renders the returned evidence record.
+ * (DEM + NDVI correlation, optionally + a third GPR evidence entry)
+ * depending on the "Include NDVI correlation" switch, and renders the
+ * returned evidence record.
  *
  * Two DEM sources are available:
  *  - Synthetic (default): offline, no network, every result explicitly
@@ -46,6 +47,27 @@ import org.json.JSONObject
  *    Copernicus OAuth client ID/secret, entered in-app and held only in
  *    memory for this session -- never written to disk.
  *
+ * Optional GPR field pick (opt-in via switchGpr, ADDED THIS SESSION):
+ * a single real manual pick -- a two-way radar travel time a human has
+ * read directly off a real radargram, plus the site's chosen soil type
+ * -- converted to a depth estimate (with explicit min/max uncertainty
+ * range, never a single precise number) via gpr_source_mobile.py /
+ * gpr_depth_model.py, and attached as a THIRD, independent evidence
+ * entry (evidence_record.py's third_evidence slot, rendered here from
+ * the record's "third_evidence_detail" field). This is field-
+ * verification evidence anchored at the single site under investigation,
+ * not an independent full-area scan like DEM or NDVI. It is ONLY
+ * supported by investigation_multi_mobile.run_investigation_multi_json()
+ * -- the single-source investigation_mobile module has no GPR
+ * parameters -- so switchGpr requires switchNdviCorrelation to also be
+ * on; onRunClicked() below validates this explicitly rather than
+ * silently ignoring a GPR pick the user thought they were submitting.
+ * GPR is NOT yet fed into the AI Debate Engine (debate_mobile.py) --
+ * that integration is deliberately deferred until this UI wiring itself
+ * has been confirmed working on a real compiled build with a real
+ * manual pick, per this project's own "verify one real step before
+ * building the next" practice.
+ *
  * After a successful investigation, the AI Debate Engine
  * (debate_mobile.run_debate_json()) is called and, if it succeeds, its
  * per-candidate positions/synthesis are appended to the results view.
@@ -62,18 +84,19 @@ import org.json.JSONObject
  * app/src/main/python/ and have been CONFIRMED WORKING on an actual
  * compiled APK on a physical device (real OpenTopography DEM + real
  * Copernicus Sentinel-2 NDVI; synthesis correctly landed on CONTESTED
- * for a genuinely ambiguous candidate). One bug was found afterward and
- * is fixed by this same commit: appendDebateSection() below used to
- * silently skip ANY perspective whose "insufficient_data" flag was true
- * -- most commonly Vegetation/Agronomic, which debate_engine.py
- * correctly marks insufficient_data whenever NDVI evidence was gathered
- * but showed no vegetation-stress signal at that location (a real,
- * honestly-reported "no signal" finding, not missing data). Silently
- * hiding that finding contradicted this project's own repeated design
- * principle of never hiding an honest absence-of-evidence result.
- * Fixed to render insufficient-data positions explicitly labeled
- * "[insufficient data]" instead of omitting them. There is no depth
- * estimation in this build.
+ * for a genuinely ambiguous candidate). insufficient-data positions
+ * (most commonly Vegetation/Agronomic when NDVI shows no stress signal)
+ * render explicitly labeled "[insufficient data]" rather than being
+ * silently omitted -- an honest "no signal" finding is itself a real
+ * result this project does not hide. GPR manual-pick entry has now been
+ * wired into this Activity (this commit) and into
+ * investigation_multi_mobile.run_investigation_multi_json() (prior
+ * commit, build-confirmed green) as a third, independent evidence
+ * source -- rendered in the results text when present, but NOT YET
+ * VERIFIED ON AN ACTUAL COMPILED APK ON-DEVICE with a real manual pick,
+ * and NOT YET fed into the AI Debate Engine. There is no automatic GPR
+ * device-export parsing in this build (manual pick entry only -- see
+ * gpr_source_mobile.py's own honest-state docstring).
  */
 class MainActivity : AppCompatActivity() {
 
@@ -106,6 +129,11 @@ class MainActivity : AppCompatActivity() {
         }
         setRealNdviUiVisible(false)
 
+        binding.switchGpr.setOnCheckedChangeListener { _, checked ->
+            setGprUiVisible(checked)
+        }
+        setGprUiVisible(false)
+
         binding.buttonRun.setOnClickListener { onRunClicked() }
         binding.buttonUseLocation.setOnClickListener { onUseLocationClicked() }
     }
@@ -123,6 +151,13 @@ class MainActivity : AppCompatActivity() {
         binding.textRealNdviNotice.visibility = if (useRealNdvi) View.VISIBLE else View.GONE
     }
 
+    private fun setGprUiVisible(useGpr: Boolean) {
+        binding.layoutGprSoilPreset.visibility = if (useGpr) View.VISIBLE else View.GONE
+        binding.layoutGprTwoWayTime.visibility = if (useGpr) View.VISIBLE else View.GONE
+        binding.layoutGprDeviceNote.visibility = if (useGpr) View.VISIBLE else View.GONE
+        binding.textRealGprNotice.visibility = if (useGpr) View.VISIBLE else View.GONE
+    }
+
     private fun onRunClicked() {
         val coordsParts = binding.inputCoords.text?.toString()?.trim().orEmpty().split(",").map { it.trim() }
         val lat = coordsParts.getOrNull(0)?.toDoubleOrNull()
@@ -137,6 +172,10 @@ class MainActivity : AppCompatActivity() {
         val useRealNdvi = binding.switchRealNdvi.isChecked
         val ndviClientId = binding.inputNdviClientId.text?.toString()?.trim().orEmpty()
         val ndviClientSecret = binding.inputNdviClientSecret.text?.toString()?.trim().orEmpty()
+        val useGpr = binding.switchGpr.isChecked
+        val gprSoilPresetKey = binding.inputGprSoilPreset.text?.toString()?.trim().orEmpty()
+        val gprTwoWayTimeNs = binding.inputGprTwoWayTime.text?.toString()?.trim()?.toDoubleOrNull()
+        val gprDeviceNote = binding.inputGprDeviceNote.text?.toString()?.trim().orEmpty()
 
         if (lat == null || lat < -90.0 || lat > 90.0 || lon == null || lon < -180.0 || lon > 180.0) {
             toast("Enter coordinates as \"lat, lon\", e.g. 51.1789, -1.8262"); return
@@ -153,6 +192,15 @@ class MainActivity : AppCompatActivity() {
         if (includeNdvi && useRealNdvi && (ndviClientId.isEmpty() || ndviClientSecret.isEmpty())) {
             toast("Enter your Copernicus client ID and secret, or turn off \"Use real Copernicus NDVI\""); return
         }
+        if (useGpr && !includeNdvi) {
+            toast("GPR only attaches via the multi-evidence path -- turn on \"Include NDVI correlation\" above too, or turn off \"Attach GPR field pick\""); return
+        }
+        if (useGpr && gprSoilPresetKey.isEmpty()) {
+            toast("Enter a soil preset key for the GPR pick, or turn off \"Attach GPR field pick\""); return
+        }
+        if (useGpr && (gprTwoWayTimeNs == null || gprTwoWayTimeNs <= 0.0)) {
+            toast("Enter a positive two-way travel time (ns) for the GPR pick"); return
+        }
 
         setRunning(true)
 
@@ -162,7 +210,8 @@ class MainActivity : AppCompatActivity() {
                     runInvestigation(
                         lat, lon, radius, grid,
                         useRealDem, apiKey, demType,
-                        includeNdvi, useRealNdvi, ndviClientId, ndviClientSecret
+                        includeNdvi, useRealNdvi, ndviClientId, ndviClientSecret,
+                        useGpr, gprSoilPresetKey, gprTwoWayTimeNs, gprDeviceNote
                     )
                 }
                 // The debate engine is rule-based, offline, and stdlib-only
@@ -182,10 +231,10 @@ class MainActivity : AppCompatActivity() {
                 // Surface the real Python error rather than a generic
                 // "something went wrong" -- this app is a scientific
                 // instrument, not a consumer toy, and dem_source_mobile.py
-                // / ndvi_source_mobile.py already produce human-readable
-                // messages for every network/HTTP/parsing failure. Show
-                // just that message, not the full traceback noise Chaquopy
-                // appends.
+                // / ndvi_source_mobile.py / gpr_source_mobile.py already
+                // produce human-readable messages for every network/HTTP/
+                // parsing/depth-model failure. Show just that message, not
+                // the full traceback noise Chaquopy appends.
                 binding.textConfidence.text = "Investigation failed"
                 binding.textResults.text = cleanErrorMessage(e.message)
             } finally {
@@ -238,7 +287,9 @@ class MainActivity : AppCompatActivity() {
         lat: Double, lon: Double, radiusM: Double, gridSize: Int,
         useRealDem: Boolean, apiKey: String, demType: String,
         includeNdvi: Boolean, useRealNdvi: Boolean,
-        ndviClientId: String, ndviClientSecret: String
+        ndviClientId: String, ndviClientSecret: String,
+        useGpr: Boolean, gprSoilPresetKey: String, gprTwoWayTimeNs: Double?,
+        gprDeviceNote: String
     ): String {
         return if (includeNdvi) {
             val module = python.getModule("investigation_multi_mobile")
@@ -250,7 +301,12 @@ class MainActivity : AppCompatActivity() {
                 Kwarg("demtype", demType),
                 Kwarg("use_real_ndvi", useRealNdvi),
                 Kwarg("ndvi_client_id", ndviClientId),
-                Kwarg("ndvi_client_secret", ndviClientSecret)
+                Kwarg("ndvi_client_secret", ndviClientSecret),
+                Kwarg("use_gpr", useGpr),
+                Kwarg("gpr_soil_preset_key", gprSoilPresetKey),
+                Kwarg("gpr_two_way_time_ns", gprTwoWayTimeNs),
+                Kwarg("gpr_entry_method", "manual"),
+                Kwarg("gpr_device_note", gprDeviceNote)
             )
             result.toString()
         } else {
@@ -324,6 +380,9 @@ class MainActivity : AppCompatActivity() {
                 sb.append("\n ").append(c.optString("note")).append("\n")
             }
         }
+
+        appendGprSection(sb, record)
+
         val limitations = record.optJSONArray("limitations")
         if (limitations != null && limitations.length() > 0) {
             sb.append("\nLimitations:\n")
@@ -337,6 +396,45 @@ class MainActivity : AppCompatActivity() {
         binding.textResults.text = sb.toString()
     }
 
+    /** Renders evidence_record.py's optional "third_evidence_detail" array
+     * -- currently only ever populated by a real GPR manual field pick
+     * (see gpr_source_mobile.GPREvidence.as_evidence_record()). Absent
+     * entirely when switchGpr was off, or when the GPR depth-model
+     * conversion itself failed for this run (that failure instead shows
+     * up as an honest entry in "limitations", not here -- see
+     * investigation_multi_mobile._build_gpr_evidence()). Depth values are
+     * always rendered as an explicit min/max range, matching this
+     * project's existing honesty conventions for approximated evidence
+     * (same pattern as the real-NDVI core/halo notices above). */
+    private fun appendGprSection(sb: StringBuilder, record: JSONObject) {
+        val thirdEvidenceDetail = record.optJSONArray("third_evidence_detail")
+        if (thirdEvidenceDetail == null || thirdEvidenceDetail.length() == 0) return
+
+        sb.append("\nGPR (single-site field verification, not a full-area scan):\n")
+        for (i in 0 until thirdEvidenceDetail.length()) {
+            val g = thirdEvidenceDetail.getJSONObject(i)
+            sb.append("  soil preset: ").append(g.optString("soil_preset"))
+            sb.append("  entry: ").append(g.optString("entry_method")).append("\n")
+            val depths = g.optJSONArray("depth_estimates_m")
+            if (depths != null) {
+                for (j in 0 until depths.length()) {
+                    val d = depths.getJSONObject(j)
+                    sb.append(String.format(
+                        "  depth ≈ %.2f m (range %.2f–%.2f m) from two-way time %.1f ns\n",
+                        d.optDouble("depth_m"),
+                        d.optDouble("depth_min_m"),
+                        d.optDouble("depth_max_m"),
+                        d.optDouble("two_way_time_ns")
+                    ))
+                }
+            }
+            val note = g.optString("note", "")
+            if (note.isNotEmpty()) {
+                sb.append("  ").append(note).append("\n")
+            }
+        }
+    }
+
     /** Renders the AI Debate Engine's output (debate_mobile.run_debate_json())
      * if it succeeded. This is a ranked heuristic opinion across four rule-
      * based perspectives, not a verified conclusion -- rendered as such,
@@ -345,7 +443,9 @@ class MainActivity : AppCompatActivity() {
      * perspectives are always shown, including any marked insufficient_data
      * by debate_engine.py (labeled "[insufficient data]" rather than
      * silently omitted) -- an honest "this perspective had no evidence to
-     * argue from" is itself a real finding this project does not hide. */
+     * argue from" is itself a real finding this project does not hide.
+     * GPR evidence is not yet fed into the debate engine, so it never
+     * appears in this section (see class docstring). */
     private fun appendDebateSection(sb: StringBuilder, debateJsonText: String?) {
         if (debateJsonText.isNullOrBlank()) return
         val debateResult = try {
