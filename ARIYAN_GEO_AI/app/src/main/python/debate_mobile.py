@@ -44,6 +44,22 @@ REAL SCHEMA NOTES (why this file looks the way it does):
   written around "elevation anomaly magnitude" would not be a faithful
   use of the tool, so they're skipped and reported as a count instead of
   silently dropped.
+
+GPR (ground-penetrating radar) EXTENSION (added when GPR was wired into
+the debate engine): a real GPR field pick (evidence_record.py's third
+evidence slot, see gpr_source_mobile.GPREvidence.as_evidence_record()) is
+anchored at the investigation's own (lat, lon) -- it is a single
+site-anchored check, not a per-candidate one like NDVI core/halo. This
+module therefore matches the GPR pick to whichever DEM candidate(s) are
+close enough (within a distance tolerance derived from the AOI's cell
+size, same reasoning as investigation_multi_mobile.py's own default
+colocation_distance_m) to plausibly be about the same physical location,
+and attaches gpr_confirmed/gpr_distance_m/gpr_depth_min_m/gpr_depth_max_m
+to just those candidates. A candidate that's too far from the GPR pick
+gets nothing added -- GPR wasn't informative for it, which is the honest
+state, not a guess either way. If GPR evidence exists but no candidate
+was close enough to use it, that is reported in the result's "gpr_note"
+field rather than silently discarded.
 """
 from __future__ import annotations
 
@@ -97,6 +113,81 @@ def _ndvi_synthetic_flag(evidence: list[dict]) -> Optional[bool]:
     return None
 
 
+def _gpr_evidence_item(evidence: list[dict]) -> Optional[dict]:
+    """Return this investigation's GPR evidence record (see
+    gpr_source_mobile.GPREvidence.as_evidence_record()), if a real GPR
+    field pick was attached to this run, else None."""
+    for item in evidence or []:
+        if item.get("evidence_type") == "GPR":
+            return item
+    return None
+
+
+def _gpr_colocation_distance_m(investigation: dict) -> float:
+    """How close (in meters) the GPR pick's location must be to a DEM
+    candidate to count as informative about that specific candidate.
+    Reuses investigation_multi_mobile.py's own default colocation_distance_m
+    formula (scale with the AOI's cell size, floor of 30m) -- GPR is a
+    single site-anchored pick, not a raster, but this keeps the "how close
+    counts as the same physical location" reasoning consistent with the
+    rest of the project rather than inventing an unrelated constant."""
+    aoi = investigation.get("aoi") or {}
+    cell_size_m = aoi.get("cell_size_m")
+    try:
+        cell_size_m = float(cell_size_m) if cell_size_m is not None else None
+    except (TypeError, ValueError):
+        cell_size_m = None
+    if cell_size_m is None:
+        return 50.0
+    return max(30.0, cell_size_m * 4)
+
+
+def _attach_gpr(
+    candidate: dict,
+    anomaly: dict,
+    gpr_item: Optional[dict],
+    max_distance_m: float,
+) -> bool:
+    """If a real GPR field pick exists for this investigation and its
+    location is within max_distance_m of this specific anomaly, mark the
+    candidate as gpr_confirmed with distance + depth range so
+    debate_engine.py's perspectives can factor in real subsurface
+    confirmation. Returns True if attached, False otherwise. Left entirely
+    ABSENT (not set to False) when GPR evidence doesn't exist or isn't
+    close enough -- debate_engine.py's _get() already treats an absent key
+    as "no signal", which is the honest state here (GPR wasn't
+    informative for this candidate, not that it was checked and found
+    absent)."""
+    if gpr_item is None:
+        return False
+    try:
+        anomaly_point = GeoPoint(anomaly["lat"], anomaly["lon"])
+        gpr_point = GeoPoint(gpr_item["lat"], gpr_item["lon"])
+        distance = haversine_distance_m(anomaly_point, gpr_point)
+    except (KeyError, TypeError):
+        return False
+    if distance > max_distance_m:
+        return False
+
+    depth_estimates = gpr_item.get("depth_estimates_m") or []
+    depth_mins = [
+        d["depth_min_m"] for d in depth_estimates
+        if d.get("depth_min_m") is not None
+    ]
+    depth_maxs = [
+        d["depth_max_m"] for d in depth_estimates
+        if d.get("depth_max_m") is not None
+    ]
+
+    candidate["gpr_confirmed"] = True
+    candidate["gpr_distance_m"] = round(distance, 1)
+    if depth_mins:
+        candidate["gpr_depth_min_m"] = round(min(depth_mins), 3)
+    if depth_maxs:
+        candidate["gpr_depth_max_m"] = round(max(depth_maxs), 3)
+    return True
+
+
 def _build_candidate(anomaly: dict, correlation_entry: Optional[dict]) -> dict:
     """Translate one real anomalies[] entry into the field-name vocabulary
     debate_engine.py's _get() aliases already understand. Only sets keys
@@ -146,10 +237,15 @@ def run_debate_json(investigation_json: str) -> str:
         investigation = json.loads(investigation_json)
         anomalies = investigation.get("anomalies") or []
         correlation = investigation.get("correlation") or []
+        evidence = investigation.get("evidence") or []
         context = _build_context(investigation)
+
+        gpr_item = _gpr_evidence_item(evidence)
+        gpr_max_distance_m = _gpr_colocation_distance_m(investigation)
 
         debates = []
         n_skipped_non_dem = 0
+        any_gpr_confirmed = False
         for anomaly in anomalies:
             evidence_type = anomaly.get("evidence_type", "DEM")
             if evidence_type != "DEM":
@@ -157,6 +253,8 @@ def run_debate_json(investigation_json: str) -> str:
                 continue
             correlation_entry = _nearest_correlation_entry(anomaly, correlation)
             candidate = _build_candidate(anomaly, correlation_entry)
+            if _attach_gpr(candidate, anomaly, gpr_item, gpr_max_distance_m):
+                any_gpr_confirmed = True
             debates.append(run_debate(candidate, context))
 
         result: dict[str, Any] = {"debates": debates}
@@ -164,6 +262,13 @@ def run_debate_json(investigation_json: str) -> str:
             result["note"] = (
                 f"{n_skipped_non_dem} NDVI-raster-detected candidate(s) were "
                 f"not individually debated -- see debate_mobile.py's SCOPE note."
+            )
+        if gpr_item is not None and not any_gpr_confirmed:
+            result["gpr_note"] = (
+                f"Real GPR field-pick evidence was present for this "
+                f"investigation, but no DEM candidate was within "
+                f"{gpr_max_distance_m:.0f}m of the GPR pick location, so it "
+                f"was not applied to any candidate's debate."
             )
         return json.dumps(result)
     except Exception as exc:  # must never raise across the Chaquopy boundary
