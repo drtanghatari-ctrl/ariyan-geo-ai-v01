@@ -37,6 +37,7 @@ class InvestigationRecord:
     confidence_statement: str
     correlation: list[dict] = field(default_factory=list)
     second_evidence_detail: list[dict] = field(default_factory=list)
+    third_evidence_detail: list[dict] = field(default_factory=list)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(asdict(self), indent=indent, default=str)
@@ -53,6 +54,8 @@ def build_investigation_record(
     second_evidence_type: str | None = None,
     correlation_results: list | None = None,
     second_anomalies_are_candidates: bool = True,
+    third_evidence: Any = None,
+    third_evidence_type: str | None = None,
 ) -> InvestigationRecord:
     """Build the InvestigationRecord JSON payload.
 
@@ -76,6 +79,15 @@ def build_investigation_record(
       which looked exactly like a degenerate/empty DEM candidate but
       was actually a real NDVI check result being read through the
       wrong schema.
+
+    third_evidence (optional) is a further, structurally-independent
+    evidence source appended to `evidence` and reported in its own
+    `third_evidence_detail` field (never merged into `anomalies`, same
+    reasoning as the `second_anomalies_are_candidates=False` path above
+    -- e.g. GPREvidence from gpr_source_mobile.py, whose schema
+    (depth_estimates_m, soil_preset, entry_method) has nothing in common
+    with AnomalyCandidate). third_evidence must implement
+    .as_evidence_record() the same way every other evidence source does.
     """
     evidence = [dem.as_evidence_record()]
     derived_products = [{
@@ -87,6 +99,7 @@ def build_investigation_record(
     }]
     anomaly_dicts = [asdict(a) for a in anomalies]
     second_evidence_detail: list[dict] = []
+    third_evidence_detail: list[dict] = []
 
     limitations = [
         "Anomalies reflect statistical deviation from local terrain/spectral "
@@ -149,6 +162,19 @@ def build_investigation_record(
                 for a in (second_anomalies or [])
             ]
 
+    if third_evidence is not None:
+        third_record = third_evidence.as_evidence_record()
+        evidence.append(third_record)
+        limitations.append(
+            f"{third_evidence_type} evidence in this run is a single, "
+            f"site-anchored field-verification check (not an independent "
+            f"full-area scan like DEM/NDVI) and uses a documented "
+            f"approximate reference range rather than a site-calibrated "
+            f"measurement -- see the evidence item's own record above for "
+            f"the real numbers and uncertainty range."
+        )
+        third_evidence_detail = [third_record]
+
     correlation_dicts = []
     if correlation_results:
         for r in correlation_results:
@@ -207,5 +233,7 @@ def build_investigation_record(
         record_kwargs["correlation"] = correlation_dicts
     if second_evidence_detail:
         record_kwargs["second_evidence_detail"] = second_evidence_detail
+    if third_evidence_detail:
+        record_kwargs["third_evidence_detail"] = third_evidence_detail
 
     return InvestigationRecord(**record_kwargs)
