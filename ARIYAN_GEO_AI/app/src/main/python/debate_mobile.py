@@ -9,21 +9,36 @@ dicts, not JSON strings, and expects candidate dicts using its own alias
 vocabulary (z_score, elevation_delta_m, correlation_status, sources,
 ndvi_synthetic -- see debate_engine.py's module docstring and _get()
 helper). This module is the translation layer between the two: it does
-NOT modify debate_engine.py's rule logic (per that file's own docstring
-recommendation -- "the rule logic itself does not need to change"), it
-only maps this project's REAL InvestigationRecord schema (confirmed by
-reading evidence_record.py, anomaly_detection_mobile.py, correlation.py,
-and investigation_multi_mobile.py directly, not guessed) onto the field
-names debate_engine.py already knows how to read.
+NOT modify debate_engine.py's core rule logic for existing fields (per
+that file's own docstring recommendation -- "the rule logic itself does
+not need to change"), it only maps this project's REAL InvestigationRecord
+schema (confirmed by reading evidence_record.py, anomaly_detection_mobile.py,
+correlation.py, and investigation_multi_mobile.py directly, not guessed)
+onto the field names debate_engine.py already knows how to read.
 
 REAL SCHEMA NOTES (why this file looks the way it does):
 - anomalies[] entries are AnomalyCandidate dicts: row, col, lat, lon,
   area_cells, peak_residual_m, mean_residual_m, peak_zscore, polarity
   (+ "evidence_type": "DEM"/"NDVI" in multi-source runs; ABSENT entirely
-  in single-source investigation_mobile.py output). There is no id /
-  candidate_id field anywhere in this schema -- debate_engine.py handles
-  that gracefully (candidate_id comes back None; MainActivity.kt already
-  falls back to "#<index>" when rendering).
+  in single-source investigation_mobile.py output). There is no natural
+  id/candidate_id field anywhere in this schema, so this module assigns
+  one itself: each debated candidate gets "id" set to its own 1-based
+  position in THIS RUN'S OWN anomalies[] list (e.g. the first anomaly
+  entry becomes "#1", matching the numbering MainActivity.kt's
+  renderResult() already shows in its "Candidates: #N ..." listing).
+  BUG HISTORY (fixed): earlier versions of this file left candidate_id
+  entirely unset, relying on debate_engine.py returning
+  candidate_id=None and assuming MainActivity.kt would fall back to a
+  generated "#<index>" label. That assumption was wrong in practice --
+  org.json's JSONObject.optString(name, fallback) only uses the
+  fallback when the KEY IS ABSENT, not when the key is present with a
+  JSON null value (which is exactly what a Python None serializes to).
+  So the JSON always had a literal "candidate_id": null, and Kotlin's
+  optString() returned the literal string "null", rendering "Candidate
+  null:" in the UI instead of a real label. This is fixed at the root
+  here (a real, non-null id is now always assigned), with a matching
+  defensive fix in MainActivity.kt's appendDebateSection() in case any
+  future caller of debate_engine.py still doesn't supply one.
 - correlation[] entries (when present) are CorrelatedCandidate dicts:
   lat, lon, status ("CORROBORATED"/"SINGLE_SOURCE"), supporting_sources,
   distance_between_peaks_m, note. In real-NDVI mode
@@ -43,7 +58,10 @@ REAL SCHEMA NOTES (why this file looks the way it does):
   against a specific DEM candidate; debating those through perspectives
   written around "elevation anomaly magnitude" would not be a faithful
   use of the tool, so they're skipped and reported as a count instead of
-  silently dropped.
+  silently dropped. Skipped candidates are NOT counted when assigning
+  "id" to the debated ones -- id is always the anomaly's own position in
+  the full anomalies[] list, so it stays aligned with the "Candidates:"
+  section's own #N numbering regardless of how many others were skipped.
 
 GPR (ground-penetrating radar) EXTENSION (added when GPR was wired into
 the debate engine): a real GPR field pick (evidence_record.py's third
@@ -188,15 +206,29 @@ def _attach_gpr(
     return True
 
 
-def _build_candidate(anomaly: dict, correlation_entry: Optional[dict]) -> dict:
+def _build_candidate(
+    anomaly: dict,
+    correlation_entry: Optional[dict],
+    original_index: Optional[int] = None,
+) -> dict:
     """Translate one real anomalies[] entry into the field-name vocabulary
     debate_engine.py's _get() aliases already understand. Only sets keys
     that are actually known; missing information is left absent so
     debate_engine.py's own graceful degradation (insufficient_data) does
-    the right thing rather than this module guessing."""
+    the right thing rather than this module guessing.
+
+    original_index, when given, is this anomaly's own 1-based position in
+    THIS RUN'S OWN anomalies[] list (not the post-filter debates[] list --
+    see the module docstring's SCOPE note on why those can differ). It
+    becomes the candidate's "id", which debate_engine.run_debate() copies
+    into the result's top-level "candidate_id" field. This is always a
+    real, non-null value when original_index is provided -- see the
+    module docstring's BUG HISTORY note for why that matters."""
     candidate: dict[str, Any] = {
         "location": {"lat": anomaly.get("lat"), "lon": anomaly.get("lon")},
     }
+    if original_index is not None:
+        candidate["id"] = f"#{original_index + 1}"
     if anomaly.get("peak_zscore") is not None:
         candidate["z_score"] = anomaly["peak_zscore"]
     if anomaly.get("peak_residual_m") is not None:
@@ -246,13 +278,13 @@ def run_debate_json(investigation_json: str) -> str:
         debates = []
         n_skipped_non_dem = 0
         any_gpr_confirmed = False
-        for anomaly in anomalies:
+        for original_index, anomaly in enumerate(anomalies):
             evidence_type = anomaly.get("evidence_type", "DEM")
             if evidence_type != "DEM":
                 n_skipped_non_dem += 1
                 continue
             correlation_entry = _nearest_correlation_entry(anomaly, correlation)
-            candidate = _build_candidate(anomaly, correlation_entry)
+            candidate = _build_candidate(anomaly, correlation_entry, original_index)
             if _attach_gpr(candidate, anomaly, gpr_item, gpr_max_distance_m):
                 any_gpr_confirmed = True
             debates.append(run_debate(candidate, context))
