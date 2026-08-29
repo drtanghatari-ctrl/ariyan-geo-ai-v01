@@ -1,4 +1,4 @@
-# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-30, DEBATE ENGINE CONFIRMED)
+# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-30, VEGETATION/AGRONOMIC BUG FIXED)
 
 > This file is the durable source of truth for project status. It is
 > updated at the end of every working session so the project state
@@ -23,7 +23,7 @@ verification that didn't actually happen.
 |---|------|--------|
 | 1 | Multi-source DEM+NDVI correlation | ✅ Complete, on-device verified |
 | 2 | Device GPS integration | ✅ Complete, on-device verified |
-| 3 | Offline rule-based AI Debate Engine (4 perspectives) | ✅ **Complete, CONFIRMED on-device with real data** (see below). One anomaly flagged, not yet resolved — see "Known issue" section. |
+| 3 | Offline rule-based AI Debate Engine (4 perspectives) | ✅ **Complete, CONFIRMED on-device with real data.** Vegetation/Agronomic mislabeling bug fixed in source (2026-08-30) — see "Known issue" section; not yet re-verified on a rebuilt APK. |
 | 4 | Depth estimation | ❌ Not started. Deferred — needs real GPR hardware, which is a future purchase (too expensive right now). Kept on roadmap intentionally, not dropped. |
 | 5 | Real Sentinel-2 NDVI via Copernicus | ✅ Complete, on-device verified |
 
@@ -60,24 +60,63 @@ enabled:
 or byte-verified on GitHub, but confirmed rendering real debate output
 from real evidence on the actual compiled APK.
 
-## Known issue — not yet resolved
+## Known issue — FIXED IN SOURCE (2026-08-30), not yet re-verified on-device
 
-The on-device debate output showed only **3 of the 4** declared
-perspectives. **Vegetation/Agronomic was missing entirely** from the
-rendered output — not shown, not even flagged as `insufficient_data`
-the way a thin-data perspective normally would be.
+**Original symptom:** the on-device debate output above showed only
+**3 of the 4** declared perspectives. Vegetation/Agronomic did not
+appear at all.
 
-Suspected cause: `debate_mobile.py` may be silently dropping the
-Vegetation/Agronomic perspective specifically when NDVI shows no stress
-/ correlation is SINGLE_SOURCE, rather than including it honestly with
-a "no signal detected" stance like the other perspectives do under thin
-data. Needs investigation: check `debate_mobile.py`'s perspective-
-inclusion/filtering logic against what `debate_engine.py` actually
-produces — confirm whether this is a real bug (perspective silently
-dropped) or intentional design (perspective omitted on purpose when its
-underlying evidence type is absent) that should at least be labeled
-honestly in the output either way, per this project's zero-fake-data
-principle.
+**Root cause found by tracing the full chain (`debate_mobile.py` →
+`debate_engine.py` → `MainActivity.kt`):**
+
+- `MainActivity.kt`'s `appendDebateSection()` was confirmed innocent —
+  it unconditionally renders every entry in the `positions[]` array,
+  including any marked `insufficient_data`, labeled `[insufficient
+  data]`. It never filters or drops anything.
+- `debate_engine.py`'s `_PERSPECTIVES` tuple always calls all 4
+  perspective functions, so `run_debate()` always returns exactly 4
+  `Position` objects. It cannot silently omit one either.
+- The actual bug was in `debate_mobile.py`'s `_build_candidate()`: for
+  a `SINGLE_SOURCE` correlation entry, `correlation_entry["supporting_
+  sources"]` only lists the source that *positively detected* the
+  anomaly (e.g. `["DEM"]`) — it does NOT include a source like NDVI
+  that was genuinely checked at that exact candidate location but
+  simply found no corroborating signal. This narrower list was written
+  straight into `candidate["sources"]`, which then **overwrote/shadowed**
+  the correct, broader investigation-level list (`context["sources"]`,
+  which correctly included `"NDVI"`) inside `debate_engine.py`'s
+  `_sources_present()` — that function returns the candidate-level list
+  the moment it's non-empty, never falling back to context.
+- Net effect: `_vegetation_position()` saw `sources = ["DEM"]`,
+  concluded `"NDVI" not in sources`, and returned an honestly-labeled
+  `insufficient_data` position with stance "no vegetation evidence
+  present for this candidate" — which was **factually wrong** for this
+  candidate, since real Copernicus NDVI data genuinely was fetched and
+  evaluated at that exact location. An honest "checked, no signal"
+  finding was mislabeled as "not checked at all" — a violation of this
+  project's own zero-fake-data / honest-labeling principle, just in the
+  opposite direction from what was originally suspected (this was never
+  a silent-drop bug; it was a mislabeling bug).
+
+**Fix applied (commit `85e99a1`, 2026-08-30):** `_build_candidate()` now
+takes an explicit `checked_sources` parameter (the investigation-level
+`context["sources"]`) and sets `candidate["sources"]` to the
+order-preserving union of `supporting_sources` and `checked_sources`,
+rather than `supporting_sources` alone. A checked-but-no-signal source
+can no longer be silently indistinguishable from an unchecked one.
+`run_debate_json()` was updated to pass `context.get("sources")` through
+at the call site.
+
+**Not yet verified:** this fix has only been reasoned through against
+the current source, matching the exact SINGLE_SOURCE/real-NDVI scenario
+from the milestone above. It has **not yet been rebuilt and re-run
+on-device**. Next session (or once the current build finishes): re-run
+the same/a similar investigation (real DEM + real NDVI, single DEM
+candidate, no vegetation stress) and confirm the on-device output now
+shows Vegetation/Agronomic as `[insufficient data]: NDVI evidence
+checked for this candidate but showed no significant stress signal` (or
+similar honest wording) — NOT the old "no vegetation evidence present"
+stance, and NOT absent from the list.
 
 ## Previous session: build was failing, root cause found and fixed
 
@@ -121,6 +160,14 @@ User reported "Actions got red." Investigation found:
 - `commit_text_file` (path, branch, message, content_text, sha?) — the
   reliable way to commit plain-text files (like this one); handles
   base64 encoding automatically.
+- `find_commits_touching_path` (path_query) — code-search + commit
+  history for a filename fragment; used this session to locate
+  `debate_mobile.py`/`debate_engine.py`/`MainActivity.kt` without
+  knowing their exact repo paths.
+- `get_file_text` (path) — fetch a text file's full decoded content
+  directly (no manual base64 decoding needed).
+- `get_file_text_grep` (path, pattern) — fetch a text file plus grep-
+  style matches with surrounding context; useful for large files.
 
 ## Stray "Python Package using Conda" workflow — permanently deprioritized (2026-08-30)
 
@@ -144,6 +191,13 @@ no functional impact).
 2. **APK reinstall signature mismatch / corrupted keystore** — now
    properly fixed with real binary keystore content (see above);
    confirmed via a fully green build.
+
+## Known bugs — fixed in source, awaiting on-device re-verification
+
+3. **Vegetation/Agronomic "no vegetation evidence present" mislabeling**
+   — see "Known issue" section above. Fixed in `debate_mobile.py`
+   (commit `85e99a1`, 2026-08-30). Not yet rebuilt/re-run on a physical
+   device.
 
 ## Cleanup — paused, not yet done
 
@@ -209,13 +263,17 @@ working on-device multiple times now, including this session.
 
 ## Resume-here checklist (read this first after any interruption)
 
-1. All roadmap items except (4) are done and on-device verified as of
-   this write. Nothing urgent is mid-flight.
-2. Next real task: investigate the missing Vegetation/Agronomic
-   perspective in the debate output (see "Known issue" above) — read
-   `debate_mobile.py`'s perspective-filtering logic and compare against
-   `debate_engine.py`'s actual output for a candidate with no NDVI
-   stress detected.
+1. Roadmap items (1), (2), (5) are done and on-device verified. Item
+   (3) the Debate Engine is functionally complete but its
+   Vegetation/Agronomic mislabeling bug was only just fixed in source
+   (2026-08-30, commit `85e99a1`) — **not yet rebuilt or re-run
+   on-device.** Item (4) stays parked (see below).
+2. Next real task: trigger a fresh build off the current `main` HEAD,
+   sideload the resulting APK, and re-run a real investigation (real
+   DEM + real NDVI, a candidate with no vegetation stress) to confirm
+   Vegetation/Agronomic now renders an honest "NDVI checked, no signal"
+   position rather than either the old wrong "no vegetation evidence
+   present" stance or being absent.
 3. After that: resume paused cleanup (delete 2 stale duplicate files;
    inspect `activity_main-2.xml`). Do NOT investigate the "Python
    Package using Conda" workflow — permanently deprioritized per user
