@@ -33,6 +33,22 @@ NDVI HAS TWO MODES NOW:
    the real error message rather than failing the whole investigation).
    Requires a real Copernicus Data Space Ecosystem OAuth client
    (client_id + client_secret).
+
+GPR (roadmap item 4, ADDED THIS SESSION, additive/optional):
+   When use_gpr=True, a single real GPR manual pick (a human-read
+   two-way travel time + chosen soil preset, see gpr_source_mobile.py)
+   anchored at this investigation's (lat, lon) is converted into a
+   depth estimate and attached as a THIRD, independent evidence entry
+   (evidence_record.py's third_evidence slot) -- reported honestly with
+   its own uncertainty range, never merged into the DEM/NDVI anomalies
+   list (different schema, same reasoning as the real-NDVI core/halo
+   path). This is field-verification evidence for the single site
+   under investigation, not an independent full-area scan like DEM or
+   NDVI. NOT YET fed into the AI Debate Engine (debate_mobile.py) --
+   that integration is deferred until this Python-side wiring itself
+   has been confirmed working on a real compiled build with a real
+   manual pick, per this project's own "verify one real step before
+   building the next" practice.
 """
 from __future__ import annotations
 
@@ -46,6 +62,8 @@ from correlation import correlate_anomalies, CorrelatedCandidate
 from evidence_record import build_investigation_record
 import ndvi_source_mobile
 from ndvi_source_mobile import NDVIFetchError
+from gpr_source_mobile import GPRSurvey, GPRPick, estimate_depths, GPREvidence
+from gpr_depth_model import GPRDepthModelError
 
 
 @dataclass
@@ -188,6 +206,52 @@ def _real_ndvi_correlation_for_dem_candidates(
     return correlated, ndvi_results
 
 
+def _build_gpr_evidence(
+    lat: float,
+    lon: float,
+    use_gpr: bool,
+    gpr_soil_preset_key: str | None,
+    gpr_two_way_time_ns: float | None,
+    gpr_entry_method: str,
+    gpr_device_note: str,
+) -> tuple[object | None, str | None]:
+    """Build a GPREvidence from a single real manual pick anchored at
+    (lat, lon), if use_gpr=True. Returns (gpr_evidence_or_None,
+    limitation_message_or_None) -- a failure (bad soil preset key,
+    non-positive travel time) is recorded as an honest limitation
+    string rather than raised, so one bad GPR input never fails the
+    whole DEM/NDVI investigation it's attached to.
+
+    Raises ValueError only for the caller-programming-error case of
+    use_gpr=True with a missing soil preset or travel time -- the same
+    "required-args-when-enabled" contract already used by use_real_dem/
+    use_real_ndvi above.
+    """
+    if not use_gpr:
+        return None, None
+    if not gpr_soil_preset_key or gpr_two_way_time_ns is None:
+        raise ValueError(
+            "use_gpr=True requires both gpr_soil_preset_key and "
+            "gpr_two_way_time_ns"
+        )
+    survey = GPRSurvey(
+        lat=lat,
+        lon=lon,
+        soil_preset_key=gpr_soil_preset_key,
+        picks=[GPRPick(position_m=0.0, two_way_time_ns=gpr_two_way_time_ns)],
+        entry_method=gpr_entry_method,
+        device_note=gpr_device_note,
+    )
+    try:
+        depth_estimates = estimate_depths(survey)
+        return GPREvidence(survey, depth_estimates), None
+    except GPRDepthModelError as exc:
+        return None, (
+            f"Real GPR pick entry failed: {exc}. Recorded honestly; this "
+            f"investigation continues without GPR evidence for this run."
+        )
+
+
 def run_investigation_multi_json(
     lat: float,
     lon: float,
@@ -206,6 +270,11 @@ def run_investigation_multi_json(
     use_real_ndvi: bool = False,
     ndvi_client_id: str | None = None,
     ndvi_client_secret: str | None = None,
+    use_gpr: bool = False,
+    gpr_soil_preset_key: str | None = None,
+    gpr_two_way_time_ns: float | None = None,
+    gpr_entry_method: str = "manual",
+    gpr_device_note: str = "",
 ) -> str:
     """Run a two-source (DEM + NDVI) investigation and return the
     InvestigationRecord as a JSON string. This is the function
@@ -219,13 +288,25 @@ def run_investigation_multi_json(
     core/halo check) if use_real_ndvi=True + ndvi_client_id/secret given;
     otherwise ALWAYS SyntheticNDVISource -- see module docstring.
 
-    Raises ValueError if use_real_dem=True without api_key, or
-    use_real_ndvi=True without both ndvi_client_id and ndvi_client_secret.
-    Raises the underlying OpenTopographyFetchError / NDVIFetchError for
-    any real-DEM or real-NDVI network/HTTP/parse failure that isn't
-    per-candidate-recoverable (auth failures fail the whole run; a single
-    candidate's NDVI fetch failure does not -- see
-    _real_ndvi_correlation_for_dem_candidates).
+    GPR (optional, use_gpr=True): a single real manual pick (two-way
+    travel time + soil preset, see gpr_source_mobile.py) anchored at
+    this investigation's (lat, lon), attached as a third, independent
+    evidence entry. All new gpr_* parameters default to off/empty, so
+    existing callers (Kotlin code that doesn't pass them) are entirely
+    unaffected -- this is purely additive. See module docstring's GPR
+    section for what is and isn't wired yet.
+
+    Raises ValueError if use_real_dem=True without api_key,
+    use_real_ndvi=True without both ndvi_client_id and ndvi_client_secret,
+    or use_gpr=True without both gpr_soil_preset_key and
+    gpr_two_way_time_ns. Raises the underlying OpenTopographyFetchError /
+    NDVIFetchError for any real-DEM or real-NDVI network/HTTP/parse
+    failure that isn't per-candidate-recoverable (auth failures fail the
+    whole run; a single candidate's NDVI fetch failure does not -- see
+    _real_ndvi_correlation_for_dem_candidates). A GPR depth-conversion
+    failure (bad soil preset key, non-positive travel time) never raises
+    -- it is recorded as an honest limitations[] entry instead, see
+    _build_gpr_evidence.
     """
     center = GeoPoint(lat, lon)
     aoi = build_aoi(center, radius_m=radius_m, grid_size=grid_size)
@@ -247,6 +328,11 @@ def run_investigation_multi_json(
         kernel_sigma_cells=dem_kernel_sigma_cells,
         zscore_threshold=dem_zscore_threshold,
         min_area_cells=3,
+    )
+
+    gpr_evidence, gpr_limitation = _build_gpr_evidence(
+        lat, lon, use_gpr, gpr_soil_preset_key, gpr_two_way_time_ns,
+        gpr_entry_method, gpr_device_note,
     )
 
     if use_real_ndvi:
@@ -272,6 +358,8 @@ def run_investigation_multi_json(
             second_evidence_type="NDVI",
             correlation_results=correlation_results,
             second_anomalies_are_candidates=False,
+            third_evidence=gpr_evidence,
+            third_evidence_type="GPR",
         )
         record.limitations.append(
             "Real NDVI in this run is a TARGETED PER-CANDIDATE check "
@@ -291,6 +379,8 @@ def run_investigation_multi_json(
                 f"recorded as SINGLE_SOURCE with the real error message "
                 f"rather than silently dropped or faked."
             )
+        if gpr_limitation:
+            record.limitations.append(gpr_limitation)
         return record.to_json()
 
     # --- Synthetic-NDVI path (unchanged default behavior) ---
@@ -322,6 +412,8 @@ def run_investigation_multi_json(
         second_anomalies=ndvi_candidates,
         second_evidence_type="NDVI",
         correlation_results=correlation_results,
+        third_evidence=gpr_evidence,
+        third_evidence_type="GPR",
     )
     record.limitations.append(
         "NDVI evidence in this run is SYNTHETIC regardless of the DEM "
@@ -333,4 +425,6 @@ def run_investigation_multi_json(
         "two-real-source corroboration is available via use_real_ndvi=True "
         "(see the per-candidate Copernicus check above)."
     )
+    if gpr_limitation:
+        record.limitations.append(gpr_limitation)
     return record.to_json()
