@@ -47,26 +47,28 @@ import org.json.JSONObject
  *    Copernicus OAuth client ID/secret, entered in-app and held only in
  *    memory for this session -- never written to disk.
  *
- * Optional GPR field pick (opt-in via switchGpr, ADDED THIS SESSION):
- * a single real manual pick -- a two-way radar travel time a human has
- * read directly off a real radargram, plus the site's chosen soil type
- * -- converted to a depth estimate (with explicit min/max uncertainty
- * range, never a single precise number) via gpr_source_mobile.py /
- * gpr_depth_model.py, and attached as a THIRD, independent evidence
- * entry (evidence_record.py's third_evidence slot, rendered here from
- * the record's "third_evidence_detail" field). This is field-
- * verification evidence anchored at the single site under investigation,
- * not an independent full-area scan like DEM or NDVI. It is ONLY
- * supported by investigation_multi_mobile.run_investigation_multi_json()
- * -- the single-source investigation_mobile module has no GPR
- * parameters -- so switchGpr requires switchNdviCorrelation to also be
- * on; onRunClicked() below validates this explicitly rather than
- * silently ignoring a GPR pick the user thought they were submitting.
- * GPR is NOT yet fed into the AI Debate Engine (debate_mobile.py) --
- * that integration is deliberately deferred until this UI wiring itself
- * has been confirmed working on a real compiled build with a real
- * manual pick, per this project's own "verify one real step before
- * building the next" practice.
+ * Optional GPR field pick (opt-in via switchGpr): a single real manual
+ * pick -- a two-way radar travel time a human has read directly off a
+ * real radargram, plus the site's chosen soil type -- converted to a
+ * depth estimate (with explicit min/max uncertainty range, never a
+ * single precise number) via gpr_source_mobile.py / gpr_depth_model.py,
+ * and attached as a THIRD, independent evidence entry
+ * (evidence_record.py's third_evidence slot, rendered here from the
+ * record's "third_evidence_detail" field). This is field-verification
+ * evidence anchored at the single site under investigation, not an
+ * independent full-area scan like DEM or NDVI. It is ONLY supported by
+ * investigation_multi_mobile.run_investigation_multi_json() -- the
+ * single-source investigation_mobile module has no GPR parameters -- so
+ * switchGpr requires switchNdviCorrelation to also be on; onRunClicked()
+ * below validates this explicitly rather than silently ignoring a GPR
+ * pick the user thought they were submitting. GPR manual-pick entry has
+ * been CONFIRMED WORKING ON-DEVICE (real DEM + real NDVI + a real manual
+ * pick, depth section rendered correctly) and is now also fed into the
+ * AI Debate Engine (debate_mobile.py matches the GPR pick to nearby DEM
+ * candidates by distance and factors real subsurface confirmation into
+ * the Geomorphology / Anthropogenic-Archaeological / Data-Artifact-
+ * Skeptic perspectives) -- see HONEST STATE below for what is and isn't
+ * yet verified about that specific integration.
  *
  * After a successful investigation, the AI Debate Engine
  * (debate_mobile.run_debate_json()) is called and, if it succeeds, its
@@ -88,13 +90,21 @@ import org.json.JSONObject
  * (most commonly Vegetation/Agronomic when NDVI shows no stress signal)
  * render explicitly labeled "[insufficient data]" rather than being
  * silently omitted -- an honest "no signal" finding is itself a real
- * result this project does not hide. GPR manual-pick entry has now been
- * wired into this Activity (this commit) and into
- * investigation_multi_mobile.run_investigation_multi_json() (prior
- * commit, build-confirmed green) as a third, independent evidence
- * source -- rendered in the results text when present, but NOT YET
- * VERIFIED ON AN ACTUAL COMPILED APK ON-DEVICE with a real manual pick,
- * and NOT YET fed into the AI Debate Engine. There is no automatic GPR
+ * result this project does not hide. GPR manual-pick entry has been
+ * CONFIRMED WORKING ON-DEVICE as a third evidence source (real DEM +
+ * real NDVI + a real manual pick, depth section rendered correctly).
+ * GPR-INTO-DEBATE-ENGINE INTEGRATION IS NEW THIS COMMIT AND NOT YET
+ * ON-DEVICE VERIFIED: debate_mobile.py now matches the GPR pick to
+ * nearby DEM candidates (by distance, using the AOI's own cell size as
+ * the proximity tolerance -- see debate_mobile._gpr_colocation_distance_m())
+ * and, when close enough, adds real subsurface-confirmation reasoning to
+ * three of the four perspectives (debate_engine.py's Geomorphology,
+ * Anthropogenic/Archaeological, and Data Artifact/Skeptic positions).
+ * Verified so far only with local Python-side tests against synthetic
+ * JSON payloads shaped like a real investigation record -- NOT yet run
+ * on a real compiled APK with a real manual GPR pick close enough to an
+ * actual DEM candidate to confirm the debate section's confidence
+ * labels/stances actually shift as designed. There is no automatic GPR
  * device-export parsing in this build (manual pick entry only -- see
  * gpr_source_mobile.py's own honest-state docstring).
  */
@@ -444,8 +454,14 @@ class MainActivity : AppCompatActivity() {
      * by debate_engine.py (labeled "[insufficient data]" rather than
      * silently omitted) -- an honest "this perspective had no evidence to
      * argue from" is itself a real finding this project does not hide.
-     * GPR evidence is not yet fed into the debate engine, so it never
-     * appears in this section (see class docstring). */
+     * Each perspective's reasoning bullet points are also rendered (they
+     * previously were computed by debate_engine.py but never shown here --
+     * now surfaced so a real GPR-confirmation effect, or any other
+     * perspective's reasoning, is actually visible/testable on-device, not
+     * just present in the underlying JSON). A top-level "gpr_note" is
+     * rendered too, when debate_mobile.py reports that real GPR evidence
+     * existed for this investigation but wasn't close enough to any
+     * candidate to be used in its debate. */
     private fun appendDebateSection(sb: StringBuilder, debateJsonText: String?) {
         if (debateJsonText.isNullOrBlank()) return
         val debateResult = try {
@@ -472,6 +488,13 @@ class MainActivity : AppCompatActivity() {
                     sb.append("    - ").append(p.optString("perspective")).append(" [")
                     sb.append(if (insufficient) "insufficient data" else p.optString("confidence_label"))
                     sb.append("]: ").append(p.optString("stance")).append("\n")
+
+                    val reasoning = p.optJSONArray("reasoning")
+                    if (reasoning != null) {
+                        for (k in 0 until reasoning.length()) {
+                            sb.append("        · ").append(reasoning.optString(k)).append("\n")
+                        }
+                    }
                 }
             }
 
@@ -480,6 +503,11 @@ class MainActivity : AppCompatActivity() {
                 sb.append("    Synthesis (").append(synthesis.optString("agreement_level")).append("): ")
                 sb.append(synthesis.optString("steward_note")).append("\n")
             }
+        }
+
+        val gprNote = debateResult.optString("gpr_note", "")
+        if (gprNote.isNotEmpty()) {
+            sb.append("  ").append(gprNote).append("\n")
         }
     }
 
