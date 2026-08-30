@@ -1,4 +1,4 @@
-# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-30, VEGETATION/AGRONOMIC BUG FIXED + ON-DEVICE VERIFIED)
+# ARIYAN GEO AI — Status & Roadmap (updated 2026-08-30, GPR-INTO-DEBATE CONFIRMED ON-DEVICE)
 
 > This file is the durable source of truth for project status. It is
 > updated at the end of every working session so the project state
@@ -23,189 +23,108 @@ verification that didn't actually happen.
 |---|------|--------|
 | 1 | Multi-source DEM+NDVI correlation | ✅ Complete, on-device verified |
 | 2 | Device GPS integration | ✅ Complete, on-device verified |
-| 3 | Offline rule-based AI Debate Engine (4 perspectives) | ✅ **Complete, CONFIRMED on-device with real data, including the Vegetation/Agronomic fix.** All 4 perspectives now render correctly for every candidate, with honest reasoning. No open issues. |
-| 4 | Depth estimation | ❌ Not started. Deferred — needs real GPR hardware, which is a future purchase (too expensive right now). Kept on roadmap intentionally, not dropped. |
+| 3 | Offline rule-based AI Debate Engine (4 perspectives) | ✅ Complete, on-device verified, including the Vegetation/Agronomic mislabeling fix and GPR-into-debate confirmation logic. No open issues. |
+| 4 | Depth estimation | 🟡 Partially done. Manual GPR field-pick entry (soil preset + two-way time → depth estimate with uncertainty range), GPR-as-third-evidence-source, and GPR-into-debate confidence adjustments are all built and **confirmed on-device**. Still not started: automated GPR device-export parsing (`parse_gpr_export_file()` is an explicit not-yet-implemented placeholder — no real device export sample to build against yet) and any CV-based feature detection from radargrams. Blocked on GPR hardware purchase (deferred, too expensive right now — kept on roadmap intentionally). |
 | 5 | Real Sentinel-2 NDVI via Copernicus | ✅ Complete, on-device verified |
 
-**All roadmap items except (4) depth estimation are now genuinely done
-and on-device verified.** Item (4) remains blocked on GPR hardware
-purchase.
+**All of roadmap items (1)-(3) and (5) are fully done. Item (4) has its
+hardware-independent half (manual-pick GPR evidence + GPR-into-debate)
+fully built and on-device confirmed; only automated device-export
+parsing remains, and that is blocked on owning real GPR hardware.**
 
-## LATEST MILESTONE: Vegetation/Agronomic fix CONFIRMED on-device (build #71)
+## LATEST MILESTONE: GPR-into-debate CONFIRMED on-device — closes the final GPR integration item (2026-08-30)
 
-User sideloaded build #71's APK and re-ran a real investigation (real
-OpenTopography DEM + real Copernicus NDVI + a real GPR field pick,
-screenshots reviewed). Result: **the fix works as designed.**
+This was the last unverified piece of the GPR work. Confirmed today
+after several earlier non-informative test runs.
 
-- **2 candidates detected** across 3 evidence sources, both
-  SINGLE_SOURCE (DEM only), confidence LOW as expected — no false
-  corroboration claimed.
-  - #1: lat=34.981926, lon=57.723699, |z|=3.25, area=13 cells, positive
-    polarity. Real NDVI core/halo check: core mean=0.0370 vs halo
-    mean=0.0236, z=0.00 — no vegetation stress.
-  - #2: lat=34.977700, lon=57.726209, |z|=-2.76, area=12 cells, negative
-    polarity. Real NDVI: core mean=0.0452 vs halo mean=0.0324, z=0.00
-    — no vegetation stress.
-- **All 4 perspectives now render for BOTH candidates**, including
-  Vegetation/Agronomic — no longer missing, and no longer wrongly
-  claiming "no vegetation evidence present." Correct honest wording
-  shown for both: *"NDVI (vegetation) evidence is present for this
-  candidate... Vegetation signal is not corroborated by elevation data,
-  which is consistent with a vegetation-only cause (e.g. soil moisture,
-  crop stress) with no underlying earthwork."* — exactly the intended
-  fix behavior (checked-but-no-corroboration, correctly distinguished
-  from never-checked).
-  - Candidate #1 synthesis: **CONTESTED** — Geomorphology (0.64) vs
-    Vegetation/Agronomic (0.50), correctly left unresolved.
-  - Candidate #2 synthesis: **LEADING_INTERPRETATION** — Geomorphology
-    (0.66), with the steward's usual "ranked heuristic opinion, not
-    proof" caveat.
-- **GPR:** a real GPR field pick was present for this investigation but
-  no DEM candidate was within 42m of the pick location, so it was
-  honestly reported as "not applied to any candidate's debate" (the
-  `gpr_note` path) rather than silently ignored or falsely applied.
-- Confidence-scoring/statistical-behavior notes in the app's own
-  "Limitations" section were also visible and correctly worded (e.g.
-  the z≥2.5 threshold's expected false-positive rate, NDVI's
-  bbox-based "not a true annulus" caveat).
+**What was built (this session and prior sessions, now all verified
+together):**
 
-**Roadmap item (3) and the Vegetation/Agronomic bug are both now fully
-resolved and on-device confirmed.** No open debate-engine issues remain.
+- `debate_engine.py` gained `_gpr_confirmation()`: when a real manual
+  GPR pick is within a colocation radius (`max(30m, cell_size_m*4)`,
+  ~42m at the usual 500m-radius/96-grid settings) of a DEM candidate —
+  Geomorphology gets -0.15 confidence (a real subsurface reflector
+  weakens a pure-natural-terrain explanation), Anthropogenic/
+  Archaeological gets +0.20 (applied *after* any synthetic-NDVI
+  confidence cap, so real GPR evidence is never capped by an unrelated
+  synthetic-NDVI concern), Data Artifact/Skeptic gets -0.15 (a real
+  subsurface hit makes a shared cross-instrument artifact less likely).
+  Vegetation/Agronomic is deliberately untouched — GPR isn't
+  vegetation-related.
+- `debate_mobile.py` haversine-matches the GPR pick's single site-
+  anchored (lat, lon) to nearby DEM candidates (GPR is not per-candidate
+  like NDVI core/halo, so distant candidates correctly get nothing
+  added) and adds a top-level `gpr_note` when the pick wasn't close
+  enough to any candidate to be used — an honest "not informative"
+  state, never a silent guess.
+- A related rendering bug in `MainActivity.kt`'s `appendDebateSection()`
+  was fixed at the same time: it was computing each position's
+  `reasoning[]` list but never displaying it, which would have made the
+  new GPR reasoning text invisible on-device even once the logic
+  worked. Reasoning bullets now render under each perspective.
+- Verified first in a local Python sandbox test (a synthetic co-located
+  candidate correctly flipped from Geomorphology-leading to
+  Anthropogenic/Archaeological-leading once GPR confirmation was added;
+  a distant candidate was correctly unaffected), then build-confirmed
+  green on GitHub Actions (runs #63/#64/#65).
 
-## Bug history: Vegetation/Agronomic "no vegetation evidence present" mislabeling — FULLY RESOLVED (2026-08-30)
+**On-device confirmation (2026-08-30):** several real test runs after
+build #65 were non-informative — DEM candidates were detected but the
+GPR pick (tied to the investigation's overall center coordinate) landed
+just outside the ~42m colocation radius each time. Re-centering an
+investigation exactly on a prior candidate's own coordinates also
+turned out not to reliably reproduce a candidate there, since the DEM
+anomaly detector flags deviation from the *local statistical trend
+within that run's own AOI window* — it is not a fixed-feature detector,
+so the same real terrain can register differently once the window
+shifts. A small nudge (~20m, not a full recenter) finally landed a real
+GPR pick within range of a real DEM candidate:
 
-**Original symptom:** an earlier on-device run showed only 3 of the 4
-declared perspectives — Vegetation/Agronomic did not appear at all for
-a SINGLE_SOURCE candidate with real NDVI checked and no stress found.
+- Center (34.97986, 52.72541) → 2 candidates. GPR pick (loam_dry,
+  42.0 ns → depth ≈1.79 m, range 1.47-2.10 m) landed ~43.1 m from
+  candidate #1 — 1 m outside the 42m radius. Non-informative but useful:
+  confirmed the colocation logic is genuinely working to a ~meter
+  tolerance, not just roughly.
+- A ~20m nudge to (34.980100, 52.725350) → 3 candidates, one of which
+  (lat=34.980194, lon=52.725236) landed within range. **Debate output
+  visibly shifted as designed:**
+  - Geomorphology [MODERATE]: reasoning explicitly noted the GPR-
+    detected subsurface reflector "weakens (but does not rule out) a
+    natural-terrain-only explanation."
+  - Anthropogenic/Archaeological [MODERATE]: reasoning cited the GPR
+    pick as "direct subsurface confirmation... treated as stronger
+    independent evidence than surface corroboration alone."
+  - Data Artifact/Skeptic: reasoning noted the GPR confirmation "makes
+    a shared measurement/processing artifact across unrelated
+    instruments (DEM/NDVI and GPR) less likely."
+  - Synthesis: **CONTESTED** — Anthropogenic/Archaeological (0.53) vs
+    Vegetation/Agronomic (0.50). Geomorphology no longer led once GPR
+    confirmation was factored in — exactly the intended effect.
+  - Other candidates in the same run, too far from the GPR pick, were
+    correctly left unaffected (no GPR mention in their reasoning).
 
-**Root cause found by tracing the full chain (`debate_mobile.py` →
-`debate_engine.py` → `MainActivity.kt`):**
+**Status: CLOSED.** GPR-as-third-evidence-source and GPR-into-debate
+are both genuinely on-device verified end-to-end, matching this
+project's standing practice for every other evidence source.
 
-- `MainActivity.kt`'s `appendDebateSection()` was confirmed innocent —
-  it unconditionally renders every entry in the `positions[]` array,
-  including any marked `insufficient_data`, labeled `[insufficient
-  data]`. It never filters or drops anything.
-- `debate_engine.py`'s `_PERSPECTIVES` tuple always calls all 4
-  perspective functions, so `run_debate()` always returns exactly 4
-  `Position` objects. It cannot silently omit one either.
-- The actual bug was in `debate_mobile.py`'s `_build_candidate()`: for
-  a `SINGLE_SOURCE` correlation entry, `correlation_entry["supporting_
-  sources"]` only lists the source that *positively detected* the
-  anomaly (e.g. `["DEM"]`) — it does NOT include a source like NDVI
-  that was genuinely checked at that exact candidate location but
-  simply found no corroborating signal. This narrower list was written
-  straight into `candidate["sources"]`, which then **overwrote/shadowed**
-  the correct, broader investigation-level list (`context["sources"]`,
-  which correctly included `"NDVI"`) inside `debate_engine.py`'s
-  `_sources_present()` — that function returns the candidate-level list
-  the moment it's non-empty, never falling back to context.
-- Net effect: `_vegetation_position()` saw `sources = ["DEM"]`,
-  concluded `"NDVI" not in sources`, and returned an honestly-labeled
-  `insufficient_data` position with stance "no vegetation evidence
-  present for this candidate" — which was **factually wrong**, since
-  real Copernicus NDVI data genuinely was fetched and evaluated at that
-  exact location. An honest "checked, no signal" finding was mislabeled
-  as "not checked at all" — a violation of this project's own
-  zero-fake-data / honest-labeling principle, just in the opposite
-  direction from what was originally suspected (this was never a
-  silent-drop bug; it was a mislabeling bug).
-
-**Fix (commit `85e99a1`, 2026-08-30):** `_build_candidate()` now takes
-an explicit `checked_sources` parameter (the investigation-level
-`context["sources"]`) and sets `candidate["sources"]` to the
-order-preserving union of `supporting_sources` and `checked_sources`,
-rather than `supporting_sources` alone. A checked-but-no-signal source
-can no longer be silently indistinguishable from an unchecked one.
-`run_debate_json()` was updated to pass `context.get("sources")` through
-at the call site.
-
-**Rebuilt:** build **#71**, conclusion `success`:
-https://github.com/drtanghatari-ctrl/ariyan-geo-ai-v01/actions/runs/33274843173
-
-**Verified on-device (2026-08-30):** see "LATEST MILESTONE" above —
-sideloaded, re-run with real DEM+NDVI+GPR, confirmed correct behavior
-for 2 independent candidates. Status: **CLOSED.**
-
-## Previous session: build was failing, root cause found and fixed
-
-User reported "Actions got red." Investigation found:
-
-- The **"Build debug APK"** Gradle step was failing, not setup.
-- Root cause: `ARIYAN_GEO_AI/app/debug.keystore` was corrupted — its
-  raw repo bytes were literally the ASCII text of the keystore's base64
-  encoding, not the actual decoded binary (proof: Gradle error
-  `KeytoolException: ... toDerInputStream rejects tag type 77` — 77 is
-  the decimal ASCII code for 'M', the first character of that base64
-  text).
-- This happened via a file-upload path that base64-encoded already-
-  base64 content a second time without ever decoding to real binary —
-  another instance of the general "file uploads/commits don't take
-  effect as expected" failure mode already known for this repo.
-- **Fix:** the standard `create_file` GitHub action does NOT reliably
-  accept raw/data-URI binary content — a `data:...;base64,` prefix just
-  got stored as more literal text on the first attempt. The reliable
-  fix was writing a custom Zapier code action (`commit_raw_base64_file`)
-  that calls GitHub's Contents API PUT endpoint directly, passing the
-  base64 string verbatim with no re-encoding. Produced a file of
-  correct byte size (2666 bytes) for the first time.
-- Build run #47 (triggered by the fix commit) came back fully green —
-  every step including "Build debug APK" and "Upload APK artifact"
-  succeeded: https://github.com/drtanghatari-ctrl/ariyan-geo-ai-v01/actions/runs/33187295956
-
-## Tooling now available (custom Zapier/GitHub code actions)
-
-- `list_workflow_runs` (owner, repo, per_page) — lists recent workflow
-  runs with id/status/conclusion/branch/commit.
-- `get_workflow_run_status` (run_id) — quick status/conclusion check;
-  also returns `artifacts[]` (id, name, size_in_bytes, download URL)
-  once a run has completed.
-- `get_workflow_run_jobs` (run_id) — per-job, per-step status.
-- `get_job_log_text` (job_id) — fetches the actual error log text.
-- `trigger_build_apk_workflow` (no params) — dispatches build-apk.yml
-  on main directly via workflow_dispatch, without needing a commit.
-- `commit_raw_base64_file` (owner, repo, path, branch, message,
-  content_base64, sha?) — **the reliable way to commit binary files.
-  Use this instead of `create_file` for any non-text file going
-  forward.**
-- `commit_text_file` (path, branch, message, content_text, sha?) — the
-  reliable way to commit plain-text files (like this one); handles
-  base64 encoding automatically.
-- `find_commits_touching_path` (path_query) — code-search + commit
-  history for a filename fragment; used this session to locate
-  `debate_mobile.py`/`debate_engine.py`/`MainActivity.kt` without
-  knowing their exact repo paths.
-- `get_file_text` (path) — fetch a text file's full decoded content
-  directly (no manual base64 decoding needed).
-- `get_file_text_grep` (path, pattern) — fetch a text file plus grep-
-  style matches with surrounding context; useful for large files.
-
-## Stray "Python Package using Conda" workflow — permanently deprioritized (2026-08-30)
-
-A second workflow named **"Python Package using Conda"** exists in
-`.github/workflows/` (origin unknown, not intentionally added) and
-fails on every push (`EnvironmentFileNotFound` — references a
-non-existent `environment.yml`). It does **not** block the real APK
-build and is unrelated to the actual Chaquopy/Kotlin+Python build path.
-
-**User decision (2026-08-30): permanently ignore this. Do not
-investigate, fix, or flag it again in future sessions.** It had
-required reauthorizing the Zapier GitHub connection with "Contents:
-Read and write" permission to delete/fix — user declined to pursue
-this, since the workflow is cosmetic noise only (fails independently,
-no functional impact).
-
-## Known bugs — fixed and verified
+## Known bugs
 
 1. **Degenerate DEM candidate** (area=0, |z|=NaN, empty polarity) —
    fixed in `evidence_record.py` + `investigation_multi_mobile.py`.
-2. **APK reinstall signature mismatch / corrupted keystore** — now
-   properly fixed with real binary keystore content (see above);
-   confirmed via a fully green build.
+   Closed.
+2. **APK reinstall signature mismatch / corrupted keystore** — fixed
+   with a real binary keystore + pinned `signingConfigs.debug`. Closed.
 3. **Vegetation/Agronomic "no vegetation evidence present" mislabeling**
-   — see dedicated "Bug history" section above. Fixed in
-   `debate_mobile.py` (commit `85e99a1`), rebuilt (build #71), and
-   **confirmed on-device** across 2 independent real candidates
-   (2026-08-30). Closed.
+   — fixed in `debate_mobile.py` (`_build_candidate()` now unions
+   `supporting_sources` with the investigation-level `checked_sources`
+   instead of letting the narrower list shadow it). Confirmed on-device
+   across 2 independent real candidates. Closed.
+4. **"Candidate null" intermittent header bug** — the AI Debate section
+   occasionally renders "Candidate null:" instead of the real candidate
+   number. Confirmed intermittent (most runs render "Candidate #1"/"#2"
+   correctly, including every run in the GPR-into-debate testing
+   sequence above). Root cause not yet found. **Deprioritized by user
+   ("not a big deal for now") — not being actively worked on.**
 
 ## Cleanup — paused, not yet done
 
@@ -215,9 +134,34 @@ no functional impact).
 - `activity_main-2.xml` (10113 bytes, repo root) — never inspected.
 - Root `README.md` — checked, trivial, low priority.
 
-(Stray "Python Package using Conda" workflow removed from this list —
-see dedicated section above; permanently deprioritized, not part of
-cleanup scope.)
+(Stray "Python Package using Conda" workflow is NOT part of this list —
+see dedicated section below; permanently deprioritized per user
+decision, do not re-flag.)
+
+## Stray "Python Package using Conda" workflow — permanently deprioritized
+
+A second workflow named **"Python Package using Conda"** exists in
+`.github/workflows/` (origin unknown, not intentionally added) and
+fails on every push (`EnvironmentFileNotFound` — references a
+non-existent `environment.yml`). Does **not** block the real APK build.
+
+**User decision: permanently ignore this. Do not investigate, fix, or
+flag it again in future sessions.** Fixing it would require
+reauthorizing the Zapier GitHub connection with "Contents: Read and
+write" permission — user declined, since the workflow is cosmetic noise
+only.
+
+## GPR hardware status
+
+User does not own GPR hardware yet — looked into pricing, found it too
+expensive right now. It's a future purchase plan, kept on the roadmap
+as deferred rather than dropped. Manual pick entry (a human reads a
+two-way travel time off any real radargram and types it in) is
+therefore the only real GPR data path in this build, and was built
+specifically to be hardware-independent for that reason. This has now
+been fully validated on-device, including its effect on the debate
+engine — so the app's GPR support is genuinely complete for what's
+possible without owning a device.
 
 ## Real-DEM path (roadmap item 1 foundation)
 
@@ -225,8 +169,8 @@ cleanup scope.)
 plain-text AAIGrid format (pure NumPy, no GDAL/rasterio — GDAL confirmed
 unbuildable via Chaquopy, chaquo/chaquopy#427). `np_ops.resample_bilinear`
 handles non-square real rasters. Verified against a real Silbury Hill
-fetch and separately on-device (real Tehran coordinates, then real
-northern Iran coordinates in this session's build #71 re-run).
+fetch and separately on-device across many real coordinate runs
+(Tehran, northern Iran, and the GPR-into-debate test sequence above).
 
 ## Real-NDVI path (roadmap item 5)
 
@@ -234,58 +178,94 @@ Copernicus Data Space Ecosystem's Sentinel Hub Statistical API, "core vs
 halo" bbox check per DEM candidate (documented approximation, not a
 true annulus — the underlying Statistical API is bbox-only). Implemented
 in `ndvi_source_mobile.py` + `investigation_multi_mobile.py`. Confirmed
-working on-device multiple times now, including the build #71
-Vegetation/Agronomic fix re-verification.
+working on-device many times, including throughout the GPR testing
+sequence above.
 
-## Depth estimation (roadmap item 4) — scoped, not built
+## Depth estimation (roadmap item 4) — hardware-independent half DONE, device-parsing not started
 
-- `gpr_source_mobile.py` parallel to `dem_source_mobile.py`, ingesting a
-  real radargram export from an actual field GPR device (no synthetic
-  data).
-- Depth via two-way travel time + soil-type velocity preset table,
-  explicitly flagged as an estimate with uncertainty range.
-- Feature detection: first-pass rule-based peak-amplitude + hyperbola-
-  shape heuristic (full ML deferred as stretch goal).
-- `GPREvidence` class mirroring `RealNdviCoreHaloEvidence`.
-- Field image evidence (separate, doesn't need GPR): geotagged photos
-  (EXIF GPS + timestamp) for custody/provenance — near-term tier is
-  simple attach-and-display.
-- Debate Engine integration: GPR would strengthen Geomorphology and
-  Anthropogenic/Archaeological perspectives specifically. Confirmed
-  on-device (build #71 re-run) that when no candidate is close enough
-  to a real GPR pick, this is honestly reported via `gpr_note` rather
-  than silently ignored or misapplied.
-- **Blocker:** GPR hardware not yet owned — future purchase, format
-  depends on which unit is eventually bought. Proceeding with the rest
-  of the roadmap meanwhile, per user's request.
+- `gpr_depth_model.py`: real, published GPR electromagnetic-velocity
+  ranges per soil/material type (Daniels; Conyers), explicitly flagged
+  as an approximation pending real site calibration. Converts a manual
+  two-way travel time into a depth ESTIMATE with explicit min/max range,
+  never a single precise number. **Done, on-device confirmed.**
+- `gpr_source_mobile.py`: `GPRPick`/`GPRSurvey` dataclasses + a
+  `GPREvidence` wrapper mirroring `RealNdviCoreHaloEvidence`. Supports a
+  real, hardware-independent MANUAL PICK ENTRY path. **Done, on-device
+  confirmed.**
+- Wired into `evidence_record.py`/`investigation_multi_mobile.py` as an
+  optional third_evidence slot (kept out of `anomalies[]` to avoid
+  repeating the earlier degenerate-candidate bug). **Done, on-device
+  confirmed.**
+- UI in `activity_main.xml`/`MainActivity.kt`: soil preset + two-way
+  time + optional device note, gated behind NDVI correlation also being
+  on. Renders a depth section with explicit uncertainty range. **Done,
+  on-device confirmed.**
+- GPR-into-debate confidence adjustments in `debate_engine.py` +
+  `debate_mobile.py`. **Done, on-device confirmed** — see LATEST
+  MILESTONE above.
+- `parse_gpr_export_file()` remains an explicit placeholder that always
+  raises `GPRSourceNotImplementedError` — deliberately not guessing at
+  any specific device's real export format without a real sample to
+  test against (would violate the project's no-fabrication rule).
+  **Not started, blocked on GPR hardware purchase.**
+- Field image evidence (separate, doesn't need GPR hardware): geotagged
+  photos (EXIF GPS + timestamp) for custody/provenance — near-term tier
+  is simple attach-and-display, on-device CV (cropmarks/soil
+  discoloration) deferred as a separate project. **Not started.**
+
+## Tooling available (custom Zapier/GitHub code actions)
+
+- `list_workflow_runs`, `get_workflow_run_status`, `get_workflow_run_jobs`,
+  `get_job_log_text`, `trigger_build_apk_workflow` — CI visibility/control,
+  since the connector has no native way to check Actions runs.
+- `commit_raw_base64_file` — the reliable way to commit binary files
+  (standard `create_file` double-encodes and corrupts binaries).
+- `commit_text_file` — the reliable way to commit plain-text files
+  (like this one); handles base64 encoding automatically.
+- `get_file_text`, `get_file_text_grep`, `list_dir`, `delete_file`,
+  `find_commits_touching_path` — reliable reads/deletes/history search,
+  since the standard `get_file_contents`/`repository_v2` actions became
+  unreliable partway through the project for this repo.
 
 ## Working infrastructure notes
 
 - GitHub accessed via a connected Zapier GitHub connector (account:
   `drtanghatari-ctrl`).
-- **For any binary file commit, use `commit_raw_base64_file`, not
-  `create_file`.** The latter double-encodes text-ish content and will
-  corrupt binaries. For plain-text files, `commit_text_file` is the
-  reliable option.
 - Recurring past failure mode: file uploads/commits have repeatedly not
   taken effect as expected across sessions (drag-and-drop overwrites
   failing silently, placeholder text committed as code, files swapped
-  under wrong names, and now a keystore stored as literal base64 text).
-  Standing practice: commit via API, re-verify file content/size after
-  every commit — never assume a commit "took."
+  under wrong names, a keystore once stored as literal base64 text).
+  Standing practice: commit via the custom code actions above, re-verify
+  file content/size after every commit — never assume a commit "took."
+- User's phone spontaneously restarts sometimes mid-session — this file
+  and chat memory both exist specifically so no progress is ever lost
+  to that.
 
 ## Resume-here checklist (read this first after any interruption)
 
-1. Roadmap items (1), (2), (3), (5) are ALL done and on-device verified
-   as of this write — including the Vegetation/Agronomic fix, confirmed
-   working across 2 independent real candidates on build #71. Nothing
-   urgent is mid-flight. Only item (4) remains, parked on GPR hardware.
-2. Next real task: resume the paused cleanup (delete 2 stale duplicate
-   files — `investigation_multi_mobile-1.py` and
+1. Roadmap items (1), (2), (3), (5) are ALL done and on-device verified.
+   Item (4)'s hardware-independent half (manual GPR pick entry,
+   GPR-as-evidence-source, GPR-into-debate) is ALSO now done and
+   on-device verified as of this write (2026-08-30). Nothing urgent is
+   mid-flight. Only automated GPR device-export parsing remains, parked
+   on hardware purchase.
+2. Two things the user has explicitly said they want to discuss in a
+   future session, not yet scoped: (a) some ambitious new ideas for the
+   project (unspecified — ask what they have in mind), and (b) a visual
+   "decorations"/polish pass (likely related to an earlier-shown
+   desktop-GIS mockup, "ARIYAN GEO AI Scientific Geospatial Laboratory",
+   with a 3D subsurface model among other polish features, deliberately
+   deferred until the technical roadmap was done — which it now
+   effectively is). Do not start either without asking for specifics
+   first.
+3. Lower-priority housekeeping still open, can be picked up any time:
+   resume the paused cleanup (delete 2 stale duplicate files —
+   `investigation_multi_mobile-1.py` and
    `ARIYAN_GEO_AI/investigation_multi_mobile.py`; inspect
-   `activity_main-2.xml`). Do NOT investigate the "Python Package using
-   Conda" workflow — permanently deprioritized per user decision
-   (2026-08-30), see dedicated section above.
-3. Item (4) depth estimation stays parked until GPR hardware is
-   affordable — check in on whether that's changed, otherwise no action
-   needed there yet.
+   `activity_main-2.xml`); the intermittent "Candidate null" bug
+   (deprioritized, not urgent). Do NOT investigate the "Python Package
+   using Conda" workflow — permanently deprioritized per user decision,
+   see dedicated section above.
+4. Item (4) automated GPR device parsing stays parked until GPR
+   hardware is affordable — check in on whether that's changed,
+   otherwise no action needed there yet.
