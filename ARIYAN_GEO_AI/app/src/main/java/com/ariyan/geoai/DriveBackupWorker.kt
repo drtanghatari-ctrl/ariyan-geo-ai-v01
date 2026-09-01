@@ -57,12 +57,13 @@ import java.net.URL
  * that documented shape.
  *
  * WHAT GETS BACKED UP (see collectBackupCandidates() for the authoritative
- * list and reasoning): dem_manifest.json, ndvi_manifest.json, every
- * dem/*.tif tile, every ndvi/*.npz composite cell. Deliberately NOT
- * backed up: offline_status.json (transient download-progress state, no
- * value once a download finishes) and ndvi_scenes_cache/ (large
- * disposable raw Sentinel-2 band downloads, already folded into the
- * final ndvi/*.npz composites, re-derivable by re-running the download).
+ * list and reasoning): dem_manifest.json, ndvi_manifest.json, every .tif
+ * tile under the dem folder, every .npz composite cell under the ndvi
+ * folder. Deliberately NOT backed up: offline_status.json (transient
+ * download-progress state, no value once a download finishes) and the
+ * ndvi_scenes_cache folder (large disposable raw Sentinel-2 band
+ * downloads, already folded into the final .npz composites under ndvi,
+ * re-derivable by re-running the download).
  *
  * IDEMPOTENCY / RESUME: tracks what's already been uploaded in a local
  * drive_backup_manifest.json (relative path -> Drive fileId + the local
