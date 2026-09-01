@@ -103,6 +103,17 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
+    // Offline mode (DriveBackupWorker.kt): background download+backup jobs.
+    implementation("androidx.work:work-runtime-ktx:2.11.2")
+    // Offline mode (DriveBackupWorker.kt): current (non-deprecated)
+    // AuthorizationClient API for requesting the narrow drive.file scope
+    // and obtaining a Drive access token -- deliberately NOT the older,
+    // heavier GoogleSignInClient/GoogleApiClient (Google Sign-In for
+    // Android is deprecated). Version + API surface confirmed against
+    // Google's current official Android Identity documentation before
+    // adding this.
+    implementation("com.google.android.gms:play-services-auth:21.5.1")
+
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
