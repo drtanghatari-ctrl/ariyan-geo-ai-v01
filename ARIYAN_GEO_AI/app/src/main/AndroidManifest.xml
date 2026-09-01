@@ -22,6 +22,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Not yet reachable from MainActivity's UI -- no nav button has
+             been added there yet (deliberately deferred per the agreed
+             build order: MainActivity.kt itself isn't touched until this
+             new offline-mode code is confirmed working on its own).
+             Launchable directly for testing via:
+             adb shell am start -n com.ariyan.geoai/.OfflineDataActivity -->
+        <activity
+            android:name=".OfflineDataActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize" />
     </application>
 
 </manifest>
