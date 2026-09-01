@@ -89,6 +89,15 @@ chaquopy {
             // particular cannot be compiled by Chaquopy at all).
             install("numpy")
             install("requests")
+
+            // TEMPORARY TEST -- added solely to check whether imagecodecs
+            // (a compiled Cython/C-extension package) can actually build
+            // under Chaquopy's Android cross-compilation toolchain, as part
+            // of deciding the offline-mode GeoTIFF reading approach. This
+            // line is expected to be REMOVED again right after this CI run
+            // completes, regardless of whether it succeeds or fails -- it
+            // is not meant to stay as a real dependency of the app.
+            install("imagecodecs")
         }
     }
 }
