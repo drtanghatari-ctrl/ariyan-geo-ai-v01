@@ -45,10 +45,9 @@ class CountryConfig:
     # degree beyond the country's actual extent on every side so a
     # coordinate near the border is never just outside the cached area.
     #
-    # NOTE: these four numbers should be visually sanity-checked against
-    # an actual map before the first real bulk download is triggered --
-    # they were not pulled from an authoritative GIS boundary file, and
-    # this project's standing rule is to verify before trusting.
+    # Visually confirmed by the user against real maps (Chabahar just
+    # inside the south edge, the Aras River/Azerbaijan border just inside
+    # the north edge, Tehran/Mashhad/Isfahan all well inside).
     south: float
     north: float
     west: float
@@ -65,6 +64,14 @@ class CountryConfig:
     # written) for the actual fetch logic. Deliberately NOT going through
     # OpenTopography's API here, to avoid its per-day call-count limits
     # (50/day for non-academic accounts, confirmed during planning).
+    #
+    # IMPORTANT, confirmed against the bucket's own documentation
+    # (copernicus-dem-30m.s3.amazonaws.com/readme.html): the resolution
+    # code embedded in the tile prefix is in ARC-SECONDS, not meters, and
+    # counter-intuitively "10" means the 30m dataset (GLO-30) and "30"
+    # means the 90m dataset (GLO-90). dem_dataset_prefix below was
+    # originally written as "Copernicus_DSM_COG_30" by assumption and has
+    # been corrected to "Copernicus_DSM_COG_10" after actually checking.
     dem_s3_bucket: str
     dem_dataset_prefix: str
 
@@ -99,15 +106,13 @@ _COUNTRIES: Dict[str, CountryConfig] = {
     "IR": CountryConfig(
         name="Iran",
         iso_code="IR",
-        # Approximate extent, padded outward from Iran's real borders.
-        # SANITY-CHECK BEFORE FIRST REAL DOWNLOAD (see note above).
         south=24.8,
         north=40.0,
         west=43.9,
         east=63.5,
         dem_resolution_m=30,
         dem_s3_bucket="copernicus-dem-30m",
-        dem_dataset_prefix="Copernicus_DSM_COG_30",
+        dem_dataset_prefix="Copernicus_DSM_COG_10",
         ndvi_s3_bucket="sentinel-cogs",
         ndvi_composite_window_days=30,
     ),
