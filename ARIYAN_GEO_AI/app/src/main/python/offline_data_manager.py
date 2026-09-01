@@ -105,6 +105,14 @@ actually-written .npz file -- all passed on first run. The real network
 calls (STAC search + band download against the live Earth Search API and
 sentinel-cogs bucket) are, like every other real-network piece of this
 project, unverified until the on-device/CI confirmation stage.
+
+MINOR FOLLOW-UP FIX (same session as offline_download_runner.py, below):
+an all-NaN composite pixel (every scene masked or out of that scene's
+real coverage at that point -- an ordinary, already-handled outcome, not
+a bug) was triggering a numpy RuntimeWarning on every occurrence. Now
+explicitly suppressed around the nanmedian call so real Logcat output
+isn't cluttered with noise for an outcome the code already handles
+correctly -- behavior is unchanged, this only silences a benign warning.
 """
 
 from __future__ import annotations
@@ -112,6 +120,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, List, Optional, Tuple
@@ -424,7 +433,12 @@ def _composite_one_cell(
                                    detail="scenes were found but none could be downloaded/decoded")
 
     stacked = np.stack(per_scene_grids, axis=0)
-    with np.errstate(invalid="ignore"):
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        # An all-NaN pixel (every scene masked/out-of-coverage there) is
+        # an ordinary, already-handled outcome -- nanmedian correctly
+        # returns NaN for it -- not a real problem worth surfacing as a
+        # runtime warning.
+        warnings.simplefilter("ignore", category=RuntimeWarning)
         composite = np.nanmedian(stacked, axis=0).astype(np.float32)
 
     _write_ndvi_cell(dest, composite, lat_min, lat_max, lon_min, lon_max, window_start, window_end, n_used)
