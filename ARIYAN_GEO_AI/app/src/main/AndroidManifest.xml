@@ -23,10 +23,10 @@
             </intent-filter>
         </activity>
 
-        <!-- Not yet reachable from MainActivity's UI -- no nav button has
+        <!-- Not yet reachable from MainActivity's UI: no nav button has
              been added there yet (deliberately deferred per the agreed
-             build order: MainActivity.kt itself isn't touched until this
-             new offline-mode code is confirmed working on its own).
+             build order; MainActivity.kt itself isn't touched until this
+             new offline mode code is confirmed working on its own).
              Launchable directly for testing via:
              adb shell am start -n com.ariyan.geoai/.OfflineDataActivity -->
         <activity
