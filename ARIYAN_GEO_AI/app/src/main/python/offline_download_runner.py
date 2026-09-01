@@ -3,52 +3,75 @@ offline_download_runner.py
 
 Part of ARIYAN GEO AI's OFFLINE MODE extension.
 
-The Chaquopy-facing JSON wrapper around offline_data_manager.py's two
-bulk downloaders (download_country_dem, download_country_ndvi), matching
-this project's existing convention of a thin *_json() wrapper module per
-Kotlin-callable entry point (investigation_mobile.py, debate_mobile.py,
-etc.). OfflineDataActivity.kt calls only the two functions below --
-never offline_data_manager.py's dataclass-returning functions directly.
+Thin JSON-string wrapper around offline_data_manager.py's real
+download_country_dem()/download_country_ndvi() functions, in the same
+style as investigation_mobile.run_investigation_json() and
+debate_mobile.run_debate_json() already used by MainActivity.kt --
+Kotlin calls these via Chaquopy with plain strings and gets back a JSON
+string, rather than marshaling Python dataclasses or callables across
+the Chaquopy boundary.
 
-THIS MODULE IS PART OF THE SEPARATE OFFLINE EXTENSION. It is never
-imported by any existing live-pipeline file and does not change how the
-live/online investigation flow behaves.
+SUPERSEDES AN EARLIER VERSION OF THIS FILE (from a previous session,
+never actually wired up to any Kotlin Activity -- OfflineDataActivity.kt
+did not exist yet when it was written). That earlier version is being
+deliberately replaced here, not silently discarded -- the two real
+differences, and why this version was chosen:
 
-Two entry points:
+  1. PROGRESS REPORTING: the earlier version ran both downloads fully
+     synchronously with no progress_callback wired in at all -- for a
+     whole-country download that can realistically take hours, that
+     means zero user-visible feedback the entire time. This version
+     reports live progress by writing a small JSON status file
+     (offline_status.json, per country folder) after every tile/cell,
+     using the progress_callback parameter both download_country_*
+     functions already support -- entirely on the Python side, no
+     Kotlin callback needs to cross the Chaquopy boundary.
+     OfflineDataActivity.kt polls that file periodically while the
+     download runs on a background thread. This reuses a mechanism
+     already proven in this project (dem_manifest.json /
+     ndvi_manifest.json) rather than inventing a new cross-language
+     callback path.
 
-  - run_offline_download_json(iso_code, offline_data_root): runs BOTH the
-    DEM and NDVI downloads for a country (DEM first, matching the agreed
-    build order) and returns a JSON summary. This is a long-running,
-    real-network call -- Kotlin must invoke it off the main thread (see
-    OfflineDataActivity.kt, same pattern as
-    MainActivity.runInvestigation()/runDebate()).
+  2. ERROR HANDLING: the earlier version wrapped every result in a JSON
+     object with an explicit "error" key (null on success, a string on
+     failure), reasoning from this project's real "Candidate null" bug
+     history (org.json's optString(key, fallback) only substitutes the
+     fallback when a key is ABSENT, not when it's present holding JSON
+     null -- see MainActivity.kt's debate-section history). That
+     reasoning is sound in general, but doesn't actually apply to this
+     file's JSON shape: none of the fields this module returns are ever
+     legitimately null on success (phase/done/total/detail,
+     dem_total/ndvi_total, dem_by_status/ndvi_by_status are always
+     populated), so there is no field here that pattern would protect.
+     This version instead follows a DIFFERENT precedent already
+     established in this same project for a user-initiated action whose
+     failure should be visible rather than swallowed:
+     investigation_mobile.run_investigation_json() lets a real Python
+     exception propagate as a Chaquopy PyException, caught by Kotlin's
+     existing try/catch around the call (see OfflineDataActivity.kt's
+     onDownloadClicked()) -- as opposed to
+     debate_mobile.run_debate_json()'s catch-and-return-JSON-null
+     convention, which exists specifically because a debate-engine
+     failure is optional supplementary output that must never hide the
+     investigation result underneath it. A download failure is not
+     optional supplementary output -- the user explicitly asked for
+     this operation's outcome -- so the run_investigation_json()
+     precedent is the correct one to follow here, not
+     run_debate_json()'s.
 
-  - get_offline_status_json(iso_code, offline_data_root): a fast,
-    NETWORK-FREE read of whatever manifest files already exist locally
-    (written by a previous run_offline_download_json call), so the UI
-    can show "already downloaded" status without re-downloading
-    anything. Returns an honest "manifest_present: false" status (never
-    a fabricated zero-progress summary) when no manifest exists yet.
+Neither download_country_dem nor download_country_ndvi is modified by
+this file -- both are called exactly as already committed and tested,
+unchanged.
 
-Both functions catch every real exception from the underlying downloader
-and return it as a JSON "error" field rather than letting a raw Chaquopy
-PyException/traceback surface to Kotlin -- matching
-debate_mobile.run_debate_json()'s existing defensive-JSON convention.
-Unlike that function, though, a download failure here IS surfaced to the
-user as a real error rather than silently omitted, since the user is
-explicitly asking for this operation's outcome.
-
-JSON SHAPE NOTE: every returned object always has an "error" key, either
-JSON null (success) or a string (failure) -- callers on the Kotlin side
-MUST check it with JSONObject.isNull("error"), not optString("error", "")
-with a fallback. This project already hit exactly this org.json pitfall
-once (optString's fallback only applies when a key is ABSENT, not when
-it's present holding JSON null) -- see MainActivity.kt's "Candidate
-null" bug history for the full story. Per-status counts are nested under
-a "counts" sub-object (get_offline_status_json) rather than spread as
-top-level keys, specifically so a real status string that happens to
-collide with another field name (e.g. a tile status of "downloaded")
-can never silently overwrite an unrelated field.
+TESTED in a local sandbox: list_offline_countries_json() against the
+real registry; get_offline_download_status_json()'s honest
+"not_started" case before any download has run; run_country_download_json()
+end-to-end against fake DEM/NDVI sessions (reusing the same fakes already
+proven for offline_data_manager.py's own tests), confirming real progress
+snapshots are written during the run (not just at the end) and the final
+summary JSON's per-status counts match the real results; and
+get_offline_country_summary_json() reading back the real manifests
+written by that run.
 
 HONEST STATE: only sandbox/control-flow tested so far, same honest gap
 as offline_data_manager.py itself -- the real network calls this wraps
@@ -60,125 +83,120 @@ from __future__ import annotations
 
 import json
 import os
-import time
-from typing import Any, Dict, List
 
-from offline_country_registry import get_country
+from offline_country_registry import get_country, list_countries
 from offline_data_manager import download_country_dem, download_country_ndvi
 
 
-def _summarize_dem(results: List) -> Dict[str, Any]:
-    counts: Dict[str, int] = {}
-    error_details = []
-    for r in results:
-        counts[r.status] = counts.get(r.status, 0) + 1
-        if r.status == "error" and len(error_details) < 5:
-            error_details.append({"lat": r.lat, "lon": r.lon, "detail": r.detail})
-    return {
-        "total_tiles": len(results),
-        "downloaded": counts.get("downloaded", 0),
-        "already_present": counts.get("already_present", 0),
-        "not_available": counts.get("not_available", 0),
-        "errors": counts.get("error", 0),
-        "error_details": error_details,
-    }
+def list_offline_countries_json() -> str:
+    """{"IR": "Iran", ...} for populating a country picker."""
+    return json.dumps(list_countries())
 
 
-def _summarize_ndvi(results: List) -> Dict[str, Any]:
-    counts: Dict[str, int] = {}
-    error_details = []
-    for r in results:
-        counts[r.status] = counts.get(r.status, 0) + 1
-        if r.status == "error" and len(error_details) < 5:
-            error_details.append({"lat": r.lat, "lon": r.lon, "detail": r.detail})
-    return {
-        "total_cells": len(results),
-        "composited": counts.get("composited", 0),
-        "already_present": counts.get("already_present", 0),
-        "empty_no_scenes": counts.get("empty_no_scenes", 0),
-        "errors": counts.get("error", 0),
-        "error_details": error_details,
-    }
+def _status_path(offline_data_root: str, country_iso: str) -> str:
+    return os.path.join(offline_data_root, country_iso.lower(), "offline_status.json")
 
 
-def run_offline_download(iso_code: str, offline_data_root: str) -> Dict[str, Any]:
-    """Real function (not JSON) -- run_offline_download_json below is the
-    Chaquopy-facing wrapper. Kept separate so this can also be exercised
-    from a plain Python test/script without JSON round-tripping."""
-    country = get_country(iso_code)
-    started_at = time.time()
-
-    dem_results = download_country_dem(country, offline_data_root)
-    ndvi_results = download_country_ndvi(country, offline_data_root)
-
-    finished_at = time.time()
-
-    return {
-        "country": {"iso_code": country.iso_code, "name": country.name},
-        "dem": _summarize_dem(dem_results),
-        "ndvi": _summarize_ndvi(ndvi_results),
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "duration_seconds": finished_at - started_at,
-    }
+def _write_status(offline_data_root, country_iso, phase, done, total, detail=""):
+    path = _status_path(offline_data_root, country_iso)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".part"
+    with open(tmp, "w") as f:
+        json.dump({"phase": phase, "done": done, "total": total, "detail": detail}, f)
+    os.replace(tmp, path)
 
 
-def run_offline_download_json(iso_code: str, offline_data_root: str) -> str:
-    try:
-        result = run_offline_download(iso_code, offline_data_root)
-        result["error"] = None
-    except Exception as exc:
-        result = {"error": f"{type(exc).__name__}: {exc}"}
-    return json.dumps(result)
-
-
-def _read_manifest(path: str):
+def get_offline_download_status_json(offline_data_root: str, country_iso: str) -> str:
+    """Reads the current progress status, or an honest 'not_started'
+    status if no download has ever been run for this country -- never
+    fabricates progress data."""
+    path = _status_path(offline_data_root, country_iso)
     if not os.path.isfile(path):
-        return None
-    with open(path, "r") as f:
-        return json.load(f)
+        return json.dumps({"phase": "not_started", "done": 0, "total": 0, "detail": ""})
+    with open(path) as f:
+        return f.read()
 
 
-def get_offline_status(iso_code: str, offline_data_root: str) -> Dict[str, Any]:
-    """Network-free. Reads whatever manifest files already exist on disk
-    from a previous real download -- never re-downloads anything and
-    never fabricates a status when no manifest exists yet."""
-    country = get_country(iso_code)
-    country_dir = os.path.join(offline_data_root, country.storage_folder)
-    dem_manifest = _read_manifest(os.path.join(country_dir, "dem_manifest.json"))
-    ndvi_manifest = _read_manifest(os.path.join(country_dir, "ndvi_manifest.json"))
+def get_offline_country_summary_json(offline_data_root: str, country_iso: str) -> str:
+    """Reads back dem_manifest.json / ndvi_manifest.json if they exist,
+    summarizing real counts per status -- used to show 'already
+    downloaded: X/Y DEM tiles, X/Y NDVI cells' without re-scanning every
+    file. Returns honest zero counts (not an error) if a manifest
+    doesn't exist yet -- matches this project's existing distinction
+    between 'no data yet' and 'a real error occurred'."""
+    country = get_country(country_iso)
+    root = os.path.join(offline_data_root, country.storage_folder)
 
-    dem_status: Dict[str, Any]
-    if dem_manifest is None:
-        dem_status = {"manifest_present": False}
-    else:
-        tiles = dem_manifest.get("tiles", [])
-        counts: Dict[str, int] = {}
-        for t in tiles:
-            counts[t["status"]] = counts.get(t["status"], 0) + 1
-        dem_status = {"manifest_present": True, "total_tiles": len(tiles), "counts": counts}
+    def _summarize(manifest_name, list_key):
+        path = os.path.join(root, manifest_name)
+        if not os.path.isfile(path):
+            return {"total": 0, "by_status": {}}
+        with open(path) as f:
+            manifest = json.load(f)
+        items = manifest.get(list_key, [])
+        by_status = {}
+        for item in items:
+            s = item.get("status", "unknown")
+            by_status[s] = by_status.get(s, 0) + 1
+        return {"total": len(items), "by_status": by_status}
 
-    ndvi_status: Dict[str, Any]
-    if ndvi_manifest is None:
-        ndvi_status = {"manifest_present": False}
-    else:
-        cells = ndvi_manifest.get("cells", [])
+    return json.dumps({
+        "country_iso": country.iso_code,
+        "country_name": country.name,
+        "dem": _summarize("dem_manifest.json", "tiles"),
+        "ndvi": _summarize("ndvi_manifest.json", "cells"),
+    })
+
+
+def run_country_download_json(offline_data_root: str, country_iso: str) -> str:
+    """Blocking call -- runs the real DEM download, then the real NDVI
+    download, for one country, writing live progress to
+    offline_status.json throughout (see module docstring). Meant to be
+    called from a background thread (Kotlin's
+    withContext(Dispatchers.Default), matching every other Chaquopy call
+    in this app -- see MainActivity.kt's runInvestigation()/runDebate()).
+
+    Returns a JSON summary of what actually happened -- real per-status
+    counts for both halves, never a fabricated 'success' -- so a
+    partially-failed real-world download (e.g. no network partway
+    through) is visible to the user rather than silently reported as
+    complete.
+
+    A real exception (e.g. a network failure) is deliberately NOT caught
+    here -- it propagates to Kotlin as a Chaquopy PyException, matching
+    investigation_mobile.run_investigation_json()'s precedent for a
+    user-initiated action whose failure should be visible, not
+    debate_mobile.run_debate_json()'s swallow-and-omit convention (see
+    module docstring for why that convention doesn't fit here).
+    """
+    country = get_country(country_iso)
+
+    def dem_progress(done, total, result):
+        _write_status(offline_data_root, country_iso, "dem", done, total,
+                      detail=f"{result.status} ({result.lat},{result.lon})")
+
+    def ndvi_progress(done, total, result):
+        _write_status(offline_data_root, country_iso, "ndvi", done, total,
+                      detail=f"{result.status} ({result.lat},{result.lon})")
+
+    _write_status(offline_data_root, country_iso, "starting", 0, 0)
+
+    dem_results = download_country_dem(country, offline_data_root, progress_callback=dem_progress)
+    ndvi_results = download_country_ndvi(country, offline_data_root, progress_callback=ndvi_progress)
+
+    def _count_by_status(results):
         counts = {}
-        for c in cells:
-            counts[c["status"]] = counts.get(c["status"], 0) + 1
-        ndvi_status = {"manifest_present": True, "total_cells": len(cells), "counts": counts}
+        for r in results:
+            counts[r.status] = counts.get(r.status, 0) + 1
+        return counts
 
-    return {
-        "country": {"iso_code": country.iso_code, "name": country.name},
-        "dem": dem_status,
-        "ndvi": ndvi_status,
-    }
+    total_done = len(dem_results) + len(ndvi_results)
+    _write_status(offline_data_root, country_iso, "done", total_done, total_done)
 
-
-def get_offline_status_json(iso_code: str, offline_data_root: str) -> str:
-    try:
-        result = get_offline_status(iso_code, offline_data_root)
-        result["error"] = None
-    except Exception as exc:
-        result = {"error": f"{type(exc).__name__}: {exc}"}
-    return json.dumps(result)
+    return json.dumps({
+        "country_iso": country.iso_code,
+        "dem_total": len(dem_results),
+        "dem_by_status": _count_by_status(dem_results),
+        "ndvi_total": len(ndvi_results),
+        "ndvi_by_status": _count_by_status(ndvi_results),
+    })
