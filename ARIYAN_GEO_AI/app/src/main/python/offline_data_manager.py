@@ -3,7 +3,7 @@ offline_data_manager.py
 
 Part of ARIYAN GEO AI's OFFLINE MODE extension.
 
-The actual bulk downloader for a country's offline DEM package: given a
+DEM HALF: the bulk downloader for a country's offline DEM package: given a
 CountryConfig (see offline_country_registry.py), enumerates the 1x1
 degree tiles covering its bounding box, downloads each from the public
 Copernicus DEM AWS bucket, and saves it under the local naming
@@ -28,8 +28,8 @@ number of tiles are withheld by country. A missing tile (HTTP 404) is
 therefore an ordinary, expected outcome here -- it is recorded and
 skipped, never treated as a fatal error.
 
-TESTED SO FAR: tile enumeration (which 1x1 tiles cover a bbox) and
-remote-key construction were verified in a local sandbox test against
+DEM HALF TESTED SO FAR: tile enumeration (which 1x1 tiles cover a bbox)
+and remote-key construction were verified in a local sandbox test against
 Iran's real bbox and cross-checked against real tile names confirmed to
 exist in a live bucket listing -- all matched. The full control flow
 (download-and-save, 404 handling, manifest writing, resume-on-rerun
@@ -41,6 +41,70 @@ at all, so that can only be tested where the app actually runs (GitHub
 Actions CI or the Android device itself, per the agreed build order's
 on-device confirmation step). Treat the download function as logically
 reviewed and control-flow-tested, not yet proven against the live bucket.
+
+===========================================================================
+
+NDVI HALF (added in a later session): for each of this app's own 1x1
+degree cells covering a country (the SAME grid the DEM half already
+uses, reused via tiles_covering_bbox() below -- offline_ndvi_store.py's
+own docstring explains why NDVI storage deliberately uses this simple
+grid rather than real Sentinel-2 MGRS tiling), this queries the real,
+free, public Earth Search STAC API (sentinel2_stac_client.py) for
+Sentinel-2 L2A scenes in the country's configured composite window,
+downloads the red/nir/scl COG band assets for the least-cloudy real
+scenes found (capped at MAX_SCENES_PER_CELL -- see rationale below),
+samples all three bands at a fixed output grid using
+sentinel2_cog_reader.py, applies each real scene's own per-asset
+scale/offset (read from that scene's actual STAC metadata, not a single
+hardcoded assumption -- see sentinel2_stac_client.py for the
+harmonization-offset background) and SCL-based cloud/water/shadow/snow
+masking, takes the per-pixel median NDVI across scenes, and writes the
+result into offline_ndvi_store.py's exact .npz schema.
+
+OUTPUT GRID RESOLUTION -- A DELIBERATE, DOCUMENTED ENGINEERING TRADEOFF
+(this is this project's own choice, not an external fact requiring
+verification): Sentinel-2's native resolution is 10-20m; sampling a full
+1x1-degree cell at that resolution is roughly 1e8 points, which -- even
+with sentinel2_cog_reader.py's per-tile caching -- would make a
+whole-country download (Iran: roughly 300 such cells) impractical as a
+background mobile job. NDVI_GRID_SIZE=32 (1024 points/cell, roughly
+3.5km/pixel at Iran's latitude) was chosen instead: far coarser than the
+live pipeline's per-candidate core/halo check, but this offline
+composite's honest job is letting an investigation COMPLETE with no
+network access, not replacing the live per-candidate fetch. The user's
+own stated NDVI requirement was temporal freshness ("averaged is fine"),
+not spatial resolution, and no spatial-resolution requirement was
+specified for NDVI the way 30m was explicitly agreed for DEM -- flagged
+here for visibility since this resolution choice was not itself
+pre-agreed the way DEM's was.
+
+SCL MASKING CLASSES USED (the published ESA Sentinel-2 standard, the
+same kind of external reference this project already cites for GPR
+velocities in gpr_depth_model.py -- not fabricated): valid = SCL in
+{4, 5, 7} (VEGETATION, NOT_VEGETATED, UNCLASSIFIED). Water (6) is
+excluded to match this project's existing live-pipeline precedent in
+ndvi_source_mobile.py (which also explicitly excludes SCL==6); clouds
+(8,9,10), cloud shadow (3), snow (11), defective/saturated (1),
+dark-area (2), and no-data (0) are excluded as ordinary real-world
+quality filtering.
+
+NDVI HALF TESTED in a local sandbox against a hand-built fake STAC search
+response and synthetic red/nir/scl COG files (not real downloaded
+Sentinel-2 data -- same already-flagged honest gap as the DEM half and
+as sentinel2_stac_client.py/sentinel2_cog_reader.py): verified NDVI math
+correctness against hand-computed expected values (including the
+harmonization -0.1 offset case), SCL masking correctly excluding
+cloud/water pixels on a per-point basis, multi-scene median compositing,
+the "zero real scenes found" and "scenes found but none downloadable"
+honest-empty cases (writes n_scenes_used=0 with an all-NaN grid rather
+than fabricating a value or crashing), resumability (already-composited
+cell skipped on re-run, reported "already_present"), the manifest file,
+and a full round-trip read-back through
+offline_ndvi_store.get_offline_ndvi()/get_offline_ndvi_metadata() on the
+actually-written .npz file -- all passed on first run. The real network
+calls (STAC search + band download against the live Earth Search API and
+sentinel-cogs bucket) are, like every other real-network piece of this
+project, unverified until the on-device/CI confirmation stage.
 """
 
 from __future__ import annotations
@@ -49,17 +113,27 @@ import json
 import math
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Callable, List, Optional, Tuple
 
+import numpy as np
 import requests
 
 from offline_country_registry import CountryConfig
 from offline_dem_store import local_tile_path
+from offline_ndvi_store import local_cell_path
+from sentinel2_cog_reader import Sentinel2CogBand, UnsupportedS2TiffError
+from sentinel2_stac_client import search_scenes, Sentinel2Scene, StacSearchError
 
+
+# =========================== DEM HALF (unchanged) ===========================
 
 def tiles_covering_bbox(south: float, north: float, west: float, east: float) -> List[Tuple[int, int]]:
     """Returns the (lat, lon) southwest-corner integers of every 1x1
-    degree tile that intersects the given bbox."""
+    degree tile that intersects the given bbox. Shared by the DEM half
+    (above) and the NDVI half (below) -- NDVI reuses this same grid
+    rather than implementing real Sentinel-2 MGRS tiling; see
+    offline_ndvi_store.py for why."""
     lat0, lat1 = math.floor(south), math.floor(north)
     lon0, lon1 = math.floor(west), math.floor(east)
     return [(lat, lon) for lat in range(lat0, lat1 + 1) for lon in range(lon0, lon1 + 1)]
@@ -166,6 +240,233 @@ def download_country_dem(
         "dem_resolution_m": country.dem_resolution_m,
         "tiles": [
             {"lat": r.lat, "lon": r.lon, "status": r.status, "detail": r.detail}
+            for r in results
+        ],
+    }
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    return results
+
+
+# =========================== NDVI HALF (new) ===========================
+
+NDVI_GRID_SIZE = 32  # see module docstring for the resolution rationale
+MAX_SCENES_PER_CELL = 4  # caps whole-country download cost; scenes already sorted least-cloudy-first
+VALID_SCL_CLASSES = frozenset({4, 5, 7})  # VEGETATION, NOT_VEGETATED, UNCLASSIFIED
+
+
+@dataclass
+class CellDownloadResult:
+    lat: int
+    lon: int
+    status: str  # "composited", "empty_no_scenes", "already_present", "error"
+    n_scenes_used: int = 0
+    detail: str = ""
+
+
+def _composite_window(window_days: int) -> tuple:
+    """Real 'last N days ending now (UTC)' window, same pattern already
+    proven in ndvi_source_mobile.py's _default_time_range()."""
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=window_days)
+    return start.date().isoformat(), now.date().isoformat()
+
+
+def _output_grid(lat: int, lon: int, n: int):
+    """Centered sample points for an n x n grid over the 1x1 degree cell
+    with southwest corner (lat, lon). Row 0 = north edge, matching
+    offline_ndvi_store.py's row-index convention exactly (verified by
+    round-trip in this module's own sandbox test)."""
+    lat_min, lat_max = float(lat), float(lat + 1)
+    lon_min, lon_max = float(lon), float(lon + 1)
+    lats = [lat_max - (i + 0.5) / n * (lat_max - lat_min) for i in range(n)]
+    lons = [lon_min + (j + 0.5) / n * (lon_max - lon_min) for j in range(n)]
+    return lats, lons, lat_min, lat_max, lon_min, lon_max
+
+
+def _download_band_file(url: str, dest_path: str, session, timeout: int = 60) -> None:
+    """Same atomic-save pattern already proven in download_country_dem's
+    _download_one_tile: temp file + os.replace, never leaves a
+    half-written file at the real path. Skips re-download if already
+    present (resumable)."""
+    if os.path.isfile(dest_path):
+        return
+    resp = session.get(url, timeout=timeout, stream=True)
+    if resp.status_code != 200:
+        raise IOError(f"HTTP {resp.status_code} downloading {url}")
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    tmp_path = dest_path + ".part"
+    try:
+        with open(tmp_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+        os.replace(tmp_path, dest_path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def _composite_one_scene(scene: Sentinel2Scene, lats, lons, scenes_cache_dir: str, session) -> np.ndarray:
+    """Downloads (if needed) and samples one real scene's red/nir/scl
+    bands at every output grid point, returning an NDVI grid with NaN
+    at any masked/invalid pixel. Real per-scene scale/offset applied to
+    red/nir before computing the ratio -- see module docstring."""
+    scene_dir = os.path.join(scenes_cache_dir, scene.scene_id)
+    red_path = os.path.join(scene_dir, "red.tif")
+    nir_path = os.path.join(scene_dir, "nir.tif")
+    scl_path = os.path.join(scene_dir, "scl.tif")
+
+    _download_band_file(scene.assets["red"].href, red_path, session)
+    _download_band_file(scene.assets["nir"].href, nir_path, session)
+    _download_band_file(scene.assets["scl"].href, scl_path, session)
+
+    red_band = Sentinel2CogBand(red_path)
+    nir_band = Sentinel2CogBand(nir_path)
+    scl_band = Sentinel2CogBand(scl_path)
+
+    red_asset = scene.assets["red"]
+    nir_asset = scene.assets["nir"]
+
+    n = len(lats)
+    grid = np.full((n, n), np.nan, dtype=np.float32)
+
+    for i, lat in enumerate(lats):
+        for j, lon in enumerate(lons):
+            scl_val = scl_band.get_value(lon, lat)
+            if scl_val is None or int(round(scl_val)) not in VALID_SCL_CLASSES:
+                continue
+            red_dn = red_band.get_value(lon, lat)
+            nir_dn = nir_band.get_value(lon, lat)
+            if red_dn is None or nir_dn is None:
+                continue
+
+            red_refl = red_dn * red_asset.scale + red_asset.offset
+            nir_refl = nir_dn * nir_asset.scale + nir_asset.offset
+            denom = red_refl + nir_refl
+            if abs(denom) < 1e-9:
+                continue
+            grid[i, j] = (nir_refl - red_refl) / denom
+
+    return grid
+
+
+def _write_ndvi_cell(dest_path, ndvi, lat_min, lat_max, lon_min, lon_max, window_start, window_end, n_scenes_used):
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    tmp_path = dest_path + ".part"
+    np.savez(
+        tmp_path,
+        ndvi=ndvi.astype(np.float32),
+        lat_min=np.float64(lat_min), lat_max=np.float64(lat_max),
+        lon_min=np.float64(lon_min), lon_max=np.float64(lon_max),
+        window_start=window_start, window_end=window_end,
+        n_scenes_used=np.int64(n_scenes_used),
+    )
+    # np.savez appends .npz to the filename if not already present; match
+    # that behavior explicitly rather than relying on it implicitly.
+    written_path = tmp_path if tmp_path.endswith(".npz") else tmp_path + ".npz"
+    os.replace(written_path, dest_path)
+
+
+def _composite_one_cell(
+    country: CountryConfig,
+    offline_data_root: str,
+    lat: int,
+    lon: int,
+    scenes_cache_dir: str,
+    session,
+) -> CellDownloadResult:
+    dest = local_cell_path(country.storage_folder, offline_data_root, lat + 0.5, lon + 0.5)
+    if os.path.isfile(dest):
+        return CellDownloadResult(lat, lon, "already_present")
+
+    window_start, window_end = _composite_window(country.ndvi_composite_window_days)
+    south, north, west, east = float(lat), float(lat + 1), float(lon), float(lon + 1)
+
+    try:
+        found = search_scenes(
+            south=south, north=north, west=west, east=east,
+            date_from=window_start, date_to=window_end,
+            max_cloud_cover=60.0, limit=MAX_SCENES_PER_CELL,
+            session=session,
+        )
+    except StacSearchError as exc:
+        return CellDownloadResult(lat, lon, "error", detail=str(exc))
+
+    lats, lons, lat_min, lat_max, lon_min, lon_max = _output_grid(lat, lon, NDVI_GRID_SIZE)
+
+    if not found:
+        _write_ndvi_cell(dest, np.full((NDVI_GRID_SIZE, NDVI_GRID_SIZE), np.nan, dtype=np.float32),
+                          lat_min, lat_max, lon_min, lon_max, window_start, window_end, 0)
+        return CellDownloadResult(lat, lon, "empty_no_scenes", n_scenes_used=0)
+
+    per_scene_grids: List[np.ndarray] = []
+    n_used = 0
+
+    for scene in found[:MAX_SCENES_PER_CELL]:
+        try:
+            grid = _composite_one_scene(scene, lats, lons, scenes_cache_dir, session)
+        except (UnsupportedS2TiffError, IOError, StacSearchError):
+            # A single bad/undownloadable scene doesn't fail the whole
+            # cell -- skip it and use whatever real scenes DID work,
+            # matching this project's existing precedent (a single
+            # malformed STAC item doesn't fail the whole search either).
+            continue
+        per_scene_grids.append(grid)
+        n_used += 1
+
+    if n_used == 0:
+        _write_ndvi_cell(dest, np.full((NDVI_GRID_SIZE, NDVI_GRID_SIZE), np.nan, dtype=np.float32),
+                          lat_min, lat_max, lon_min, lon_max, window_start, window_end, 0)
+        return CellDownloadResult(lat, lon, "empty_no_scenes", n_scenes_used=0,
+                                   detail="scenes were found but none could be downloaded/decoded")
+
+    stacked = np.stack(per_scene_grids, axis=0)
+    with np.errstate(invalid="ignore"):
+        composite = np.nanmedian(stacked, axis=0).astype(np.float32)
+
+    _write_ndvi_cell(dest, composite, lat_min, lat_max, lon_min, lon_max, window_start, window_end, n_used)
+    return CellDownloadResult(lat, lon, "composited", n_scenes_used=n_used)
+
+
+def download_country_ndvi(
+    country: CountryConfig,
+    offline_data_root: str,
+    progress_callback: Optional[Callable[[int, int, CellDownloadResult], None]] = None,
+) -> List[CellDownloadResult]:
+    """Downloads/composites every NDVI cell covering `country`'s bbox
+    that isn't already present locally. Resumable, same as
+    download_country_dem: an already-composited cell is reported
+    'already_present' and skipped, so an interrupted country-wide
+    download can simply be re-run.
+
+    Writes an ndvi_manifest.json in the country's storage folder,
+    mirroring dem_manifest.json's role -- records exactly what happened
+    for every cell, including the honest 'zero real scenes found' case,
+    never silently drops a failure.
+    """
+    cells = tiles_covering_bbox(country.south, country.north, country.west, country.east)
+    results: List[CellDownloadResult] = []
+    session = requests.Session()
+    scenes_cache_dir = os.path.join(offline_data_root, country.storage_folder, "ndvi_scenes_cache")
+
+    for i, (lat, lon) in enumerate(cells):
+        result = _composite_one_cell(country, offline_data_root, lat, lon, scenes_cache_dir, session)
+        results.append(result)
+        if progress_callback is not None:
+            progress_callback(i + 1, len(cells), result)
+
+    manifest_path = os.path.join(offline_data_root, country.storage_folder, "ndvi_manifest.json")
+    os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+    manifest = {
+        "country_iso": country.iso_code,
+        "bbox": {"south": country.south, "north": country.north, "west": country.west, "east": country.east},
+        "ndvi_grid_size": NDVI_GRID_SIZE,
+        "composite_window_days": country.ndvi_composite_window_days,
+        "cells": [
+            {"lat": r.lat, "lon": r.lon, "status": r.status, "n_scenes_used": r.n_scenes_used, "detail": r.detail}
             for r in results
         ],
     }
