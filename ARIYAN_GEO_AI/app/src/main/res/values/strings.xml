@@ -11,4 +11,10 @@
     <string name="real_dem_notice">Requires your own free OpenTopography API key (opentopography.org). Stored only in memory for this session — not saved to disk. Uses your device\'s data connection.</string>
     <string name="hint_api_key">OpenTopography API key</string>
     <string name="hint_demtype">Dataset (e.g. SRTMGL1, COP30, NASADEM)</string>
+    <string name="offline_data_title">Offline Country Data</string>
+    <string name="offline_data_notice">Download DEM + NDVI data for an entire country so investigations can run with no network access. This can take a long time (potentially hours) and use a large amount of mobile data — a Wi-Fi connection is strongly recommended.</string>
+    <string name="hint_offline_country">Country</string>
+    <string name="refresh_offline_status">Refresh status</string>
+    <string name="download_offline_data">Download offline data</string>
+    <string name="offline_download_notice">Downloads DEM tiles from the public Copernicus DEM bucket and Sentinel-2 NDVI composites from the public Earth Search STAC API — both free, no account needed. Already-downloaded tiles/cells are skipped automatically, so this can safely be stopped and resumed later.</string>
 </resources>
