@@ -104,14 +104,32 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Offline mode (DriveBackupWorker.kt): background download+backup jobs.
-    implementation("androidx.work:work-runtime-ktx:2.11.2")
+    //
+    // NOT the latest work-runtime-ktx (2.11.2) -- a real CI run confirmed
+    // that version's AAR metadata requires Android Gradle plugin 8.6.0+,
+    // while this project is pinned to AGP 8.5.2 (see the `com.android.tools.build:gradle`
+    // classpath in the project-level build.gradle.kts). This turns out to
+    // be part of a broader, ongoing AndroidX-wide trend of newer library
+    // releases quietly raising their required AGP floor (androidx.core-ktx
+    // hit the exact same AGP-8.6.0 wall at its own 1.16.0 release, for
+    // example) -- rather than bump this whole Chaquopy-based project's AGP
+    // version to chase it (a much bigger, riskier, less-isolated change,
+    // against this project's established minimal-footprint discipline),
+    // pinned to 2.9.1 instead: an established, long-stable release that
+    // predates this AGP-floor trend, and whose API surface (CoroutineWorker,
+    // WorkerParameters, workDataOf, setProgressAsync) has been stable since
+    // long before 2.9.1 -- nothing DriveBackupWorker.kt uses is new enough
+    // to require a newer release. To be confirmed for real via this same
+    // CI build.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     // Offline mode (DriveBackupWorker.kt): current (non-deprecated)
     // AuthorizationClient API for requesting the narrow drive.file scope
     // and obtaining a Drive access token -- deliberately NOT the older,
     // heavier GoogleSignInClient/GoogleApiClient (Google Sign-In for
     // Android is deprecated). Version + API surface confirmed against
     // Google's current official Android Identity documentation before
-    // adding this.
+    // adding this. Unlike work-runtime-ktx above, this version did NOT
+    // trigger an AGP-floor AAR metadata error in the same real CI run.
     implementation("com.google.android.gms:play-services-auth:21.5.1")
 
     testImplementation("junit:junit:4.13.2")
