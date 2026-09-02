@@ -1,5 +1,6 @@
 package com.ariyan.geoai
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.Location
 import androidx.activity.result.contract.ActivityResultContracts
@@ -119,6 +120,17 @@ import org.json.JSONObject
  * it), with this Activity's own optString call also hardened below
  * (isNull() checked explicitly) as a defensive backstop in case any
  * future caller of debate_engine.py still omits a real id.
+ *
+ * OFFLINE-DATA NAV BUTTON (this commit): buttonOfflineData just launches
+ * OfflineDataActivity via a plain Intent -- pure navigation, no other
+ * change. This is a deliberate, minimal, early slice of the still-
+ * pending build-order step (5) (the full step also adds a guarded
+ * live-fetch-fails fallback call into runInvestigation() below, which is
+ * NOT part of this commit and has not been added), pulled forward on its
+ * own because there was otherwise no way to reach OfflineDataActivity
+ * from a real installed APK at all, blocking on-device verification of
+ * step (4)'s Google Drive backup flow. Nothing else in this Activity was
+ * touched.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -158,6 +170,9 @@ class MainActivity : AppCompatActivity() {
 
         binding.buttonRun.setOnClickListener { onRunClicked() }
         binding.buttonUseLocation.setOnClickListener { onUseLocationClicked() }
+        binding.buttonOfflineData.setOnClickListener {
+            startActivity(Intent(this, OfflineDataActivity::class.java))
+        }
     }
 
     private fun setRealDemUiVisible(useRealDem: Boolean) {
