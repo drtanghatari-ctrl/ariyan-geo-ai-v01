@@ -1,14 +1,25 @@
 package com.ariyan.geoai
 
+import android.content.IntentSender
 import android.os.Bundle
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Toast
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 import com.ariyan.geoai.databinding.ActivityOfflineDataBinding
 import com.chaquo.python.PyException
 import com.chaquo.python.Python
+import com.google.android.gms.auth.api.identity.AuthorizationRequest
+import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.common.api.ApiException
+import com.google.android.gms.common.api.Scope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -22,7 +33,9 @@ import java.io.File
  * OfflineDataActivity — lets the user download a country's offline DEM +
  * NDVI package (see offline_download_runner.py / offline_data_manager.py
  * / offline_country_registry.py) so an investigation can still run with
- * no network access.
+ * no network access, and back that downloaded data up to their own
+ * Google Drive (DriveBackupWorker.kt) so it survives an app
+ * uninstall/reinstall or a move to a new phone.
  *
  * Calls offline_download_runner.py's thin JSON-string wrapper functions,
  * in the exact same style MainActivity.kt already uses for
@@ -41,17 +54,49 @@ import java.io.File
  *
  * STORAGE: offline_data_root is this app's own private internal storage
  * (filesDir/offline_data) -- no extra storage permission needed, and not
- * visible to other apps or the user's file browser. Backing this up to
- * the user's own Google Drive (so a large download survives an
- * uninstall/reinstall or a new device) is DriveBackupWorker.kt's job --
- * not yet built; this Activity only downloads and shows status.
+ * visible to other apps or the user's file browser.
  *
- * HONEST STATE: this Activity itself, and the download flow end-to-end,
- * have NOT yet been run on an actual device or in CI -- only
- * offline_download_runner.py/offline_data_manager.py's own Python logic
- * has been sandbox-tested (see those files' docstrings). This is new,
- * unverified Kotlin, to be confirmed at the on-device stage per the
- * agreed build order.
+ * DRIVE BACKUP (this commit): DriveBackupWorker.kt was already built and
+ * CI-compiling, but explicitly documented its own next step as "wiring
+ * the interactive first-time consent grant + a 'Back up to Drive'
+ * trigger into OfflineDataActivity.kt" -- that is what this section
+ * does. Two pieces:
+ *
+ *   1. Interactive consent ("Grant Google Drive access" button): a
+ *      background Worker cannot show UI, so the FIRST TIME the app needs
+ *      drive.file access, an Activity has to ask for it. Calls
+ *      AuthorizationClient.authorize() here (same drive.file scope
+ *      DriveBackupWorker.kt already requests); if hasResolution() is
+ *      true, launches the returned PendingIntent via
+ *      registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult())
+ *      and completes the grant in the callback with
+ *      Identity.getAuthorizationClient(this).getAuthorizationResultFromIntent(data).
+ *      This exact registerForActivityResult + getAuthorizationResultFromIntent
+ *      shape was confirmed against Google's current official "Authorize
+ *      access to Google user data" Android developer documentation
+ *      before writing it (not assumed/recalled from memory), matching
+ *      this project's established practice of verifying Android API
+ *      shapes against live docs before committing (already done once for
+ *      the silent-authorize() piece when DriveBackupWorker.kt itself was
+ *      written). Once granted here, DriveBackupWorker's own SILENT
+ *      authorize() call (its only option, being a background Worker)
+ *      succeeds on every future run with no further UI.
+ *
+ *   2. "Back up this country to Drive" button: enqueues DriveBackupWorker
+ *      as a WorkManager OneTimeWorkRequest for the selected country and
+ *      observes its WorkInfo (progress data written via the Worker's own
+ *      setProgressAsync() calls, plus final outputData on
+ *      success/failure) to render live upload progress and the final
+ *      uploaded/skipped/failed counts or error message.
+ *
+ * HONEST STATE: this Activity's download flow (list/summary/download)
+ * has still NOT been run on an actual device or in CI -- see the
+ * download section below, unchanged from before this commit. This
+ * newly-added Drive consent + backup wiring is ALSO new, unverified
+ * Kotlin -- the real AuthorizationClient token exchange and real Drive
+ * upload HTTP calls remain unverified until the on-device confirmation
+ * stage, per the same honest gap already flagged in
+ * DriveBackupWorker.kt's own class doc comment.
  */
 class OfflineDataActivity : AppCompatActivity() {
 
@@ -64,6 +109,32 @@ class OfflineDataActivity : AppCompatActivity() {
     private var isoByLabel: Map<String, String> = emptyMap()
     private var statusPollingJob: Job? = null
 
+    // -- Drive backup: the narrow, non-sensitive scope DriveBackupWorker
+    // itself requests -- this app can only ever see files IT created,
+    // never the user's whole Drive. Declared once here so the interactive
+    // request below asks for exactly the same scope the Worker's own
+    // silent authorize() call will later rely on already being granted.
+    private val driveFileScope = Scope("https://www.googleapis.com/auth/drive.file")
+
+    // Must be registered unconditionally during Activity construction
+    // (before onCreate/onStart), per Android's ActivityResultLauncher
+    // contract -- registering it inside a click listener would crash.
+    private val driveConsentLauncher = registerForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { activityResult ->
+        try {
+            val authorizationResult = Identity.getAuthorizationClient(this)
+                .getAuthorizationResultFromIntent(activityResult.data)
+            onDriveAuthorizationResult(authorizationResult.accessToken != null)
+        } catch (e: ApiException) {
+            // The user declined the consent screen, or it was dismissed
+            // some other way -- not a crash-worthy condition, just report
+            // it plainly (matches this project's honesty-over-guessing
+            // convention elsewhere, e.g. GPR's never-fabricate-a-value rule).
+            binding.textDriveStatus.text = "Drive access was not granted (${e.statusCode})."
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityOfflineDataBinding.inflate(layoutInflater)
@@ -75,6 +146,8 @@ class OfflineDataActivity : AppCompatActivity() {
 
         binding.buttonRefreshStatus.setOnClickListener { refreshCountrySummary() }
         binding.buttonDownload.setOnClickListener { onDownloadClicked() }
+        binding.buttonGrantDriveAccess.setOnClickListener { requestDriveAuthorization() }
+        binding.buttonBackupDrive.setOnClickListener { startDriveBackup() }
     }
 
     override fun onDestroy() {
@@ -193,7 +266,7 @@ class OfflineDataActivity : AppCompatActivity() {
         return module.callAttr("run_country_download_json", offlineDataRoot, iso).toString()
     }
 
-    // -- Rendering --
+    // -- Rendering (offline download) --
 
     private fun renderCountrySummary(json: String) {
         val record = JSONObject(json)
@@ -264,6 +337,127 @@ class OfflineDataActivity : AppCompatActivity() {
         binding.progressBarOffline.visibility = if (downloading) View.VISIBLE else View.GONE
         if (downloading) {
             binding.textDownloadStatus.text = "starting…"
+        }
+    }
+
+    // -- Drive backup: interactive consent --
+
+    /**
+     * Requests the drive.file scope. If the user has never granted it
+     * before, Google returns a PendingIntent that has to be launched from
+     * an Activity (never possible from DriveBackupWorker itself, since a
+     * background Worker has no UI) -- that's what driveConsentLauncher is
+     * for. If access was already granted in a previous session,
+     * hasResolution() is false and this completes immediately with no UI
+     * at all, matching Google's documented silent-reauthorization
+     * behavior (the same behavior DriveBackupWorker.kt's own
+     * getAccessTokenOrNull() already relies on).
+     */
+    private fun requestDriveAuthorization() {
+        binding.textDriveStatus.text = "Requesting Google Drive access…"
+        val request = AuthorizationRequest.Builder()
+            .setRequestedScopes(listOf(driveFileScope))
+            .build()
+        Identity.getAuthorizationClient(this)
+            .authorize(request)
+            .addOnSuccessListener { authorizationResult ->
+                if (authorizationResult.hasResolution()) {
+                    try {
+                        val intentSenderRequest = IntentSenderRequest.Builder(
+                            authorizationResult.pendingIntent!!.intentSender
+                        ).build()
+                        driveConsentLauncher.launch(intentSenderRequest)
+                    } catch (e: IntentSender.SendIntentException) {
+                        binding.textDriveStatus.text = "Couldn't open the Drive consent screen: ${e.message}"
+                    }
+                } else {
+                    onDriveAuthorizationResult(authorizationResult.accessToken != null)
+                }
+            }
+            .addOnFailureListener { e ->
+                binding.textDriveStatus.text = "Drive authorization request failed: ${e.message}"
+            }
+    }
+
+    private fun onDriveAuthorizationResult(granted: Boolean) {
+        binding.textDriveStatus.text = if (granted) {
+            "Google Drive access granted. You can now back up a downloaded country's data."
+        } else {
+            "Drive access was not granted."
+        }
+    }
+
+    // -- Drive backup: running DriveBackupWorker + observing its progress --
+
+    /**
+     * Enqueues DriveBackupWorker for the selected country and observes its
+     * WorkInfo. If drive.file access was never granted (or the earlier
+     * silent/interactive flow above never ran), DriveBackupWorker's own
+     * getAccessTokenOrNull() will fail informatively -- that real error
+     * message (its KEY_ERROR output data) is surfaced here as-is rather
+     * than guessed at or pre-checked, matching how download errors from
+     * the Python side are already surfaced via cleanErrorMessage() above.
+     */
+    private fun startDriveBackup() {
+        val iso = selectedIso()
+        if (iso == null) {
+            toast("Pick a country first")
+            return
+        }
+
+        binding.progressBarDrive.visibility = View.VISIBLE
+        binding.progressBarDrive.isIndeterminate = true
+        binding.textDriveStatus.text = "starting backup…"
+
+        val request = OneTimeWorkRequestBuilder<DriveBackupWorker>()
+            .setInputData(workDataOf(DriveBackupWorker.KEY_COUNTRY_ISO to iso))
+            .build()
+
+        val workManager = WorkManager.getInstance(applicationContext)
+        workManager.enqueue(request)
+        workManager.getWorkInfoByIdLiveData(request.id).observe(this) { info ->
+            renderDriveWorkInfo(info)
+        }
+    }
+
+    private fun renderDriveWorkInfo(info: WorkInfo?) {
+        if (info == null) return
+        when (info.state) {
+            WorkInfo.State.RUNNING -> {
+                val phase = info.progress.getString("phase") ?: "uploading"
+                val done = info.progress.getInt("done", 0)
+                val total = info.progress.getInt("total", 0)
+                val detail = info.progress.getString("detail") ?: ""
+                binding.progressBarDrive.visibility = View.VISIBLE
+                binding.progressBarDrive.isIndeterminate = false
+                binding.textDriveStatus.text = if (total > 0) {
+                    binding.progressBarDrive.max = total
+                    binding.progressBarDrive.progress = done
+                    "$phase: $done / $total   $detail"
+                } else {
+                    "$phase   $detail"
+                }
+            }
+            WorkInfo.State.SUCCEEDED -> {
+                binding.progressBarDrive.visibility = View.GONE
+                val uploaded = info.outputData.getInt(DriveBackupWorker.KEY_UPLOADED_COUNT, 0)
+                val skipped = info.outputData.getInt(DriveBackupWorker.KEY_SKIPPED_COUNT, 0)
+                val failed = info.outputData.getInt(DriveBackupWorker.KEY_FAILED_COUNT, 0)
+                binding.textDriveStatus.text =
+                    "Backup finished: $uploaded uploaded, $skipped already up to date, $failed failed."
+            }
+            WorkInfo.State.FAILED -> {
+                binding.progressBarDrive.visibility = View.GONE
+                binding.textDriveStatus.text =
+                    info.outputData.getString(DriveBackupWorker.KEY_ERROR) ?: "Backup failed."
+            }
+            WorkInfo.State.CANCELLED -> {
+                binding.progressBarDrive.visibility = View.GONE
+                binding.textDriveStatus.text = "Backup was cancelled."
+            }
+            else -> {
+                // ENQUEUED / BLOCKED -- nothing new to show the user yet.
+            }
         }
     }
 
