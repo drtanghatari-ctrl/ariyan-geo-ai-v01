@@ -21,4 +21,5 @@
     <string name="drive_backup_notice">This app\'s downloaded offline data does NOT survive an uninstall or a move to a new phone. Back it up to your own Google Drive so it does. Only files this app itself creates are ever shared — grant access once, then back up any downloaded country whenever you like.</string>
     <string name="grant_drive_access">Grant Google Drive access</string>
     <string name="backup_to_drive">Back up this country to Drive</string>
+    <string name="open_offline_data">Offline Country Data</string>
 </resources>
