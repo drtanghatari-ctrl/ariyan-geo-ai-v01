@@ -113,6 +113,25 @@ a bug) was triggering a numpy RuntimeWarning on every occurrence. Now
 explicitly suppressed around the nanmedian call so real Logcat output
 isn't cluttered with noise for an outcome the code already handles
 correctly -- behavior is unchanged, this only silences a benign warning.
+
+BUGFIX (2026-09-02) -- UNIQUE TEMP FILENAMES, defense in depth for the
+same concurrent-download race documented in offline_download_runner.py's
+module docstring (that file's new per-country lock is the actual fix --
+read that first). This file's own atomic-write helpers
+(_download_one_tile's .tif.part, _download_band_file's .part, and
+_write_ndvi_cell's .npz.part) all previously used a FIXED temp filename
+derived only from the destination path. If two full download runs for
+the same country were ever concurrent (the scenario that lock now
+prevents), two writers targeting the SAME destination tile/band/cell
+would race on the identical temp path -- whichever finished
+os.replace() first would yank the other's temp file out from under it,
+raising FileNotFoundError, caught by each function's existing broad
+except-and-record-as-"error" handling. This is the concrete mechanism
+behind the real on-device Iran run's inflated error counts (341/357 DEM
+tiles, 357/357 NDVI cells) -- most of those were lost temp-file races,
+not real network/API failures. Every temp path below now includes
+os.getpid() and a random uuid, so two writers can no longer collide on
+the same temp filename even if they do end up running concurrently.
 """
 
 from __future__ import annotations
@@ -120,6 +139,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import uuid
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -133,6 +153,17 @@ from offline_dem_store import local_tile_path
 from offline_ndvi_store import local_cell_path
 from sentinel2_cog_reader import Sentinel2CogBand, UnsupportedS2TiffError
 from sentinel2_stac_client import search_scenes, Sentinel2Scene, StacSearchError
+
+
+def _unique_tmp_path(dest: str) -> str:
+    """A temp path unique to this process and this call -- pid + a
+    random uuid, not a fixed '.part' suffix. See module docstring's
+    2026-09-02 BUGFIX note: this means two writers targeting the same
+    `dest` (from an accidental concurrent download run) can never
+    collide on the identical temp filename and race each other's
+    os.replace(). The actual prevention is offline_download_runner.py's
+    per-country lock; this is defense in depth on top of it."""
+    return f"{dest}.{os.getpid()}.{uuid.uuid4().hex}.part"
 
 
 # =========================== DEM HALF (unchanged) ===========================
@@ -196,7 +227,7 @@ def _download_one_tile(country: CountryConfig, offline_data_root: str, lat: int,
         return TileDownloadResult(lat, lon, "error", f"HTTP {resp.status_code}")
 
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    tmp_path = dest + ".part"
+    tmp_path = _unique_tmp_path(dest)
     try:
         with open(tmp_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1024 * 1024):
@@ -305,7 +336,7 @@ def _download_band_file(url: str, dest_path: str, session, timeout: int = 60) ->
     if resp.status_code != 200:
         raise IOError(f"HTTP {resp.status_code} downloading {url}")
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    tmp_path = dest_path + ".part"
+    tmp_path = _unique_tmp_path(dest_path)
     try:
         with open(tmp_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1024 * 1024):
@@ -364,7 +395,7 @@ def _composite_one_scene(scene: Sentinel2Scene, lats, lons, scenes_cache_dir: st
 
 def _write_ndvi_cell(dest_path, ndvi, lat_min, lat_max, lon_min, lon_max, window_start, window_end, n_scenes_used):
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    tmp_path = dest_path + ".part"
+    tmp_path = _unique_tmp_path(dest_path)
     np.savez(
         tmp_path,
         ndvi=ndvi.astype(np.float32),
