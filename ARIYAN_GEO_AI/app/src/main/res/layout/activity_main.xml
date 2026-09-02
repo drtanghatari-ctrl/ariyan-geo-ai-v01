@@ -21,6 +21,16 @@
             android:textStyle="bold"
             android:paddingBottom="4dp" />
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonOfflineData"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginBottom="8dp"
+            android:text="@string/open_offline_data"
+            android:textColor="@color/ariyan_accent" />
+
         <TextView
             android:id="@+id/textSyntheticNotice"
             android:layout_width="match_parent"
