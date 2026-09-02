@@ -56,11 +56,10 @@ import java.io.File
  * (filesDir/offline_data) -- no extra storage permission needed, and not
  * visible to other apps or the user's file browser.
  *
- * DRIVE BACKUP (this commit): DriveBackupWorker.kt was already built and
- * CI-compiling, but explicitly documented its own next step as "wiring
- * the interactive first-time consent grant + a 'Back up to Drive'
- * trigger into OfflineDataActivity.kt" -- that is what this section
- * does. Two pieces:
+ * DRIVE BACKUP: DriveBackupWorker.kt was already built and CI-compiling,
+ * documented its own next step as "wiring the interactive first-time
+ * consent grant + a 'Back up to Drive' trigger into
+ * OfflineDataActivity.kt" -- that is what this section does. Two pieces:
  *
  *   1. Interactive consent ("Grant Google Drive access" button): a
  *      background Worker cannot show UI, so the FIRST TIME the app needs
@@ -89,13 +88,46 @@ import java.io.File
  *      success/failure) to render live upload progress and the final
  *      uploaded/skipped/failed counts or error message.
  *
+ * BUGFIX (2026-09-02) #1 -- CONCURRENT-DOWNLOAD RACE, found from a real
+ * on-device Iran run (341/357 DEM tiles "error", 357/357 NDVI cells
+ * "error", plus a crash renaming offline_status.json.part). Root cause:
+ * runCountryDownloadJson() runs inside withContext(Dispatchers.Default),
+ * a genuinely blocking Chaquopy call -- Kotlin coroutine cancellation is
+ * cooperative and does NOT interrupt it once it's running. If this
+ * Activity is destroyed and recreated while a download is still running
+ * (screen rotation, or being backgrounded long enough to be recreated),
+ * the OLD call keeps running on its own thread even after its
+ * lifecycleScope was cancelled -- so tapping "DOWNLOAD OFFLINE DATA"
+ * again for the same country starts a genuinely second, concurrent
+ * download, racing on the same files (full detail in
+ * offline_download_runner.py's module docstring, which is where the
+ * REAL fix -- a per-country lock file -- now lives). isDownloadRunning
+ * below is a same-Activity-instance nicety on top of that real fix: it
+ * catches the common in-process double-tap case immediately, without a
+ * round-trip to Python, and onDownloadClicked() now shows a clear
+ * message if Python's DownloadAlreadyRunningError propagates anyway
+ * (the case this flag can't catch -- a different Activity instance,
+ * after recreation).
+ *
+ * BUGFIX (2026-09-02) #2 -- SILENT DRIVE CONSENT FAILURE. User report:
+ * tapping "Grant Google Drive Access" shows the account picker, then
+ * choosing an account does nothing visible at all. Root cause:
+ * driveConsentLauncher's callback only caught ApiException. If the
+ * consent flow returns with a null Intent (resultCode != RESULT_OK, or
+ * some device/Play-Services combinations that don't attach data even on
+ * a real completion), getAuthorizationResultFromIntent(null) throws a
+ * NullPointerException, not an ApiException -- uncaught, so nothing
+ * updated the UI and nothing crashed loudly either. Now explicitly
+ * checks for null data first (with a clear message) and catches any
+ * Exception around the call, so a real failure is always visible.
+ *
  * HONEST STATE: this Activity's download flow (list/summary/download)
- * has still NOT been run on an actual device or in CI -- see the
- * download section below, unchanged from before this commit. This
- * newly-added Drive consent + backup wiring is ALSO new, unverified
- * Kotlin -- the real AuthorizationClient token exchange and real Drive
- * upload HTTP calls remain unverified until the on-device confirmation
- * stage, per the same honest gap already flagged in
+ * has still NOT been run to full success on an actual device (the
+ * concurrent-download race above was found during that on-device test).
+ * The Drive consent + backup wiring is similarly still not fully
+ * confirmed on-device -- the real AuthorizationClient token exchange and
+ * real Drive upload HTTP calls remain unverified until a full on-device
+ * pass completes cleanly, per the same honest gap already flagged in
  * DriveBackupWorker.kt's own class doc comment.
  */
 class OfflineDataActivity : AppCompatActivity() {
@@ -108,6 +140,12 @@ class OfflineDataActivity : AppCompatActivity() {
     // ISO code Python needs, rather than re-parsing the display string.
     private var isoByLabel: Map<String, String> = emptyMap()
     private var statusPollingJob: Job? = null
+
+    // Same-Activity-instance re-entry guard -- see BUGFIX #1 above. Does
+    // NOT survive Activity recreation (rotation/process restart); the
+    // real, always-effective guard is offline_download_runner.py's new
+    // per-country lock file.
+    private var isDownloadRunning = false
 
     // -- Drive backup: the narrow, non-sensitive scope DriveBackupWorker
     // itself requests -- this app can only ever see files IT created,
@@ -122,9 +160,21 @@ class OfflineDataActivity : AppCompatActivity() {
     private val driveConsentLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { activityResult ->
+        // BUGFIX (2026-09-02) #2 -- see class doc comment. A null Intent
+        // is a real, expected outcome here (the flow can close without
+        // RESULT_OK), not a condition to silently ignore.
+        val data = activityResult.data
+        if (data == null) {
+            binding.textDriveStatus.text =
+                "Drive consent flow closed without returning a result (result code " +
+                "${activityResult.resultCode}). This can happen if the flow was dismissed, " +
+                "or a second consent step after choosing an account wasn't completed. " +
+                "Try tapping Grant Google Drive Access again."
+            return@registerForActivityResult
+        }
         try {
             val authorizationResult = Identity.getAuthorizationClient(this)
-                .getAuthorizationResultFromIntent(activityResult.data)
+                .getAuthorizationResultFromIntent(data)
             onDriveAuthorizationResult(authorizationResult.accessToken != null)
         } catch (e: ApiException) {
             // The user declined the consent screen, or it was dismissed
@@ -132,6 +182,11 @@ class OfflineDataActivity : AppCompatActivity() {
             // it plainly (matches this project's honesty-over-guessing
             // convention elsewhere, e.g. GPR's never-fabricate-a-value rule).
             binding.textDriveStatus.text = "Drive access was not granted (${e.statusCode})."
+        } catch (e: Exception) {
+            // Anything else (e.g. NullPointerException from a malformed
+            // result) previously fell through uncaught here, which is
+            // exactly why this looked like "nothing happens" to the user.
+            binding.textDriveStatus.text = "Drive consent flow failed unexpectedly: ${e.message}"
         }
     }
 
@@ -207,7 +262,16 @@ class OfflineDataActivity : AppCompatActivity() {
             toast("Pick a country first")
             return
         }
+        if (isDownloadRunning) {
+            // BUGFIX (2026-09-02) #1 -- see class doc comment. Same-instance
+            // double-tap guard; a download started in a DIFFERENT Activity
+            // instance (after recreation) is instead caught below by
+            // Python's DownloadAlreadyRunningError.
+            toast("A download is already running for this session — wait for it to finish.")
+            return
+        }
 
+        isDownloadRunning = true
         setDownloading(true)
         binding.textDownloadResult.text = ""
 
@@ -237,8 +301,15 @@ class OfflineDataActivity : AppCompatActivity() {
                 refreshCountrySummary()
             } catch (e: PyException) {
                 statusPollingJob?.cancel()
+                // BUGFIX (2026-09-02) #1 -- if Python raised
+                // DownloadAlreadyRunningError (offline_download_runner.py's
+                // new per-country lock), this now surfaces as a clear,
+                // readable message here instead of the raw race-condition
+                // crash previously seen (FileNotFoundError renaming
+                // offline_status.json.part).
                 binding.textDownloadResult.text = cleanErrorMessage(e.message)
             } finally {
+                isDownloadRunning = false
                 setDownloading(false)
             }
         }
