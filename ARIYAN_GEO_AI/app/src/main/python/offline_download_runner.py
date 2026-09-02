@@ -77,15 +77,73 @@ HONEST STATE: only sandbox/control-flow tested so far, same honest gap
 as offline_data_manager.py itself -- the real network calls this wraps
 are unverified until this file is actually exercised on-device (the
 current step in the agreed build order).
+
+BUGFIX (2026-09-02) -- CONCURRENT-DOWNLOAD RACE, found from a real
+on-device Iran run (screenshots: 341/357 DEM tiles "error", 357/357
+NDVI cells "error", and a crash: FileNotFoundError renaming
+offline_status.json.part -> offline_status.json).
+
+Root cause: run_country_download_json() is a long blocking call, run
+from OfflineDataActivity.kt inside `withContext(Dispatchers.Default)`.
+Kotlin coroutine cancellation is cooperative -- it does NOT interrupt a
+blocking Chaquopy/native call already in flight. If the Activity is
+destroyed and recreated while a download is still running (screen
+rotation, or the app being backgrounded long enough for the OS to
+recreate the Activity), the OLD call keeps running to completion on its
+own thread even though the OLD lifecycleScope was cancelled. If the
+user then taps "DOWNLOAD OFFLINE DATA" again for the same country, a
+genuinely second, fully concurrent run_country_download_json() call
+starts. Both instances then race on the exact same FIXED temp
+filenames -- offline_status.json.part here, and every individual
+tile's .tif.part / cell's .npz.part in offline_data_manager.py --
+whichever writer calls os.replace() first yanks the other's temp file
+out from under it, producing exactly the observed FileNotFoundError
+and inflating the DEM/NDVI "error" counts (a lost temp-file race, not a
+real network/API failure, for most of those entries -- consistent with
+DEM's partial 14/357 successes: a fast, single-GET-per-tile operation
+has a much smaller collision window than NDVI's much slower per-cell
+STAC-search-plus-three-band-download operation, which collided on
+essentially every cell).
+
+Fixed two ways:
+  1. THE ACTUAL FIX: a real, atomic (os.O_CREAT | os.O_EXCL) per-country
+     lock file (.download.lock in that country's storage folder) --
+     _acquire_lock()/_release_lock() below. A second concurrent
+     run_country_download_json() call for the same country now fails
+     FAST and CLEARLY with DownloadAlreadyRunningError instead of
+     silently racing. This works even across a full process restart,
+     unlike any purely in-memory Kotlin-side guard (which OfflineData
+     Activity.kt also now has, as a same-instance-only nicety -- see
+     that file's own bugfix note).
+  2. DEFENSE IN DEPTH: _write_status()'s temp filename is no longer a
+     fixed ".part" -- it now includes this process's PID and a random
+     UUID, so even in some future scenario where two writers
+     legitimately end up running concurrently (a bug elsewhere, or
+     simply while the lock above is being added/removed across a
+     version boundary), they can no longer collide on the identical
+     temp path. The equivalent fix was made in offline_data_manager.py
+     for DEM tile files, NDVI band downloads, and NDVI cell files (see
+     that file's own bugfix note).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
+import uuid
 
 from offline_country_registry import get_country, list_countries
 from offline_data_manager import download_country_dem, download_country_ndvi
+
+
+class DownloadAlreadyRunningError(Exception):
+    """Raised when run_country_download_json() is called for a country
+    that already has an active lock file -- i.e. a previous call for the
+    same country is (or at least appears to be) still running. Prevents
+    two concurrent downloads from racing on the same tile/cell/status
+    files -- see module docstring's 2026-09-02 BUGFIX note for the real
+    on-device bug this closes."""
 
 
 def list_offline_countries_json() -> str:
@@ -97,10 +155,46 @@ def _status_path(offline_data_root: str, country_iso: str) -> str:
     return os.path.join(offline_data_root, country_iso.lower(), "offline_status.json")
 
 
+def _lock_path(offline_data_root: str, country_iso: str) -> str:
+    return os.path.join(offline_data_root, country_iso.lower(), ".download.lock")
+
+
+def _acquire_lock(offline_data_root: str, country_iso: str) -> None:
+    """Atomically creates the lock file. os.O_EXCL makes the create fail
+    if the file already exists, with no check-then-create race window
+    (unlike `if not os.path.isfile(path): open(path, 'w')`, which two
+    threads could both pass before either creates the file). Raises
+    DownloadAlreadyRunningError if another run already holds the lock."""
+    path = _lock_path(offline_data_root, country_iso)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise DownloadAlreadyRunningError(
+            f"A download for {country_iso} is already running (or a previous run "
+            f"didn't clean up its lock file at {path}, e.g. because the app process "
+            f"was killed mid-download). Wait for the other download to finish. If "
+            f"you're sure nothing is actually running anymore, delete that lock file "
+            f"and try again."
+        )
+    with os.fdopen(fd, "w") as f:
+        f.write(str(time.time()))
+
+
+def _release_lock(offline_data_root: str, country_iso: str) -> None:
+    path = _lock_path(offline_data_root, country_iso)
+    if os.path.exists(path):
+        os.remove(path)
+
+
 def _write_status(offline_data_root, country_iso, phase, done, total, detail=""):
     path = _status_path(offline_data_root, country_iso)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".part"
+    # Unique per call (pid + random uuid), not a fixed ".part" name --
+    # see module docstring's 2026-09-02 BUGFIX note. Defense in depth on
+    # top of the lock above: even if two writers somehow ran
+    # concurrently, they can no longer race on the identical temp path.
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.part"
     with open(tmp, "w") as f:
         json.dump({"phase": phase, "done": done, "total": total, "detail": detail}, f)
     os.replace(tmp, path)
@@ -168,35 +262,46 @@ def run_country_download_json(offline_data_root: str, country_iso: str) -> str:
     user-initiated action whose failure should be visible, not
     debate_mobile.run_debate_json()'s swallow-and-omit convention (see
     module docstring for why that convention doesn't fit here).
+
+    ACQUIRES A PER-COUNTRY LOCK for the duration of the run (see module
+    docstring's 2026-09-02 BUGFIX note): if a download for this country
+    is already running, this raises DownloadAlreadyRunningError
+    immediately instead of starting a second, colliding run. The lock
+    is always released in a finally block, including when a real
+    download error propagates -- a failed run must not permanently
+    block all future attempts for that country.
     """
     country = get_country(country_iso)
+    _acquire_lock(offline_data_root, country_iso)
+    try:
+        def dem_progress(done, total, result):
+            _write_status(offline_data_root, country_iso, "dem", done, total,
+                          detail=f"{result.status} ({result.lat},{result.lon})")
 
-    def dem_progress(done, total, result):
-        _write_status(offline_data_root, country_iso, "dem", done, total,
-                      detail=f"{result.status} ({result.lat},{result.lon})")
+        def ndvi_progress(done, total, result):
+            _write_status(offline_data_root, country_iso, "ndvi", done, total,
+                          detail=f"{result.status} ({result.lat},{result.lon})")
 
-    def ndvi_progress(done, total, result):
-        _write_status(offline_data_root, country_iso, "ndvi", done, total,
-                      detail=f"{result.status} ({result.lat},{result.lon})")
+        _write_status(offline_data_root, country_iso, "starting", 0, 0)
 
-    _write_status(offline_data_root, country_iso, "starting", 0, 0)
+        dem_results = download_country_dem(country, offline_data_root, progress_callback=dem_progress)
+        ndvi_results = download_country_ndvi(country, offline_data_root, progress_callback=ndvi_progress)
 
-    dem_results = download_country_dem(country, offline_data_root, progress_callback=dem_progress)
-    ndvi_results = download_country_ndvi(country, offline_data_root, progress_callback=ndvi_progress)
+        def _count_by_status(results):
+            counts = {}
+            for r in results:
+                counts[r.status] = counts.get(r.status, 0) + 1
+            return counts
 
-    def _count_by_status(results):
-        counts = {}
-        for r in results:
-            counts[r.status] = counts.get(r.status, 0) + 1
-        return counts
+        total_done = len(dem_results) + len(ndvi_results)
+        _write_status(offline_data_root, country_iso, "done", total_done, total_done)
 
-    total_done = len(dem_results) + len(ndvi_results)
-    _write_status(offline_data_root, country_iso, "done", total_done, total_done)
-
-    return json.dumps({
-        "country_iso": country.iso_code,
-        "dem_total": len(dem_results),
-        "dem_by_status": _count_by_status(dem_results),
-        "ndvi_total": len(ndvi_results),
-        "ndvi_by_status": _count_by_status(ndvi_results),
-    })
+        return json.dumps({
+            "country_iso": country.iso_code,
+            "dem_total": len(dem_results),
+            "dem_by_status": _count_by_status(dem_results),
+            "ndvi_total": len(ndvi_results),
+            "ndvi_by_status": _count_by_status(ndvi_results),
+        })
+    finally:
+        _release_lock(offline_data_root, country_iso)
