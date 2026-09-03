@@ -28,20 +28,6 @@ number of tiles are withheld by country. A missing tile (HTTP 404) is
 therefore an ordinary, expected outcome here -- it is recorded and
 skipped, never treated as a fatal error.
 
-DEM HALF TESTED SO FAR: tile enumeration (which 1x1 tiles cover a bbox)
-and remote-key construction were verified in a local sandbox test against
-Iran's real bbox and cross-checked against real tile names confirmed to
-exist in a live bucket listing -- all matched. The full control flow
-(download-and-save, 404 handling, manifest writing, resume-on-rerun
-skipping an already-downloaded tile) was verified end-to-end in sandbox
-using a fake HTTP session standing in for the real bucket -- all correct.
-The actual network download path (the real HTTP GET itself, against the
-real bucket) has NOT been tested -- this sandbox has no network access
-at all, so that can only be tested where the app actually runs (GitHub
-Actions CI or the Android device itself, per the agreed build order's
-on-device confirmation step). Treat the download function as logically
-reviewed and control-flow-tested, not yet proven against the live bucket.
-
 ===========================================================================
 
 NDVI HALF (added in a later session): for each of this app's own 1x1
@@ -88,50 +74,43 @@ ndvi_source_mobile.py (which also explicitly excludes SCL==6); clouds
 dark-area (2), and no-data (0) are excluded as ordinary real-world
 quality filtering.
 
-NDVI HALF TESTED in a local sandbox against a hand-built fake STAC search
-response and synthetic red/nir/scl COG files (not real downloaded
-Sentinel-2 data -- same already-flagged honest gap as the DEM half and
-as sentinel2_stac_client.py/sentinel2_cog_reader.py): verified NDVI math
-correctness against hand-computed expected values (including the
-harmonization -0.1 offset case), SCL masking correctly excluding
-cloud/water pixels on a per-point basis, multi-scene median compositing,
-the "zero real scenes found" and "scenes found but none downloadable"
-honest-empty cases (writes n_scenes_used=0 with an all-NaN grid rather
-than fabricating a value or crashing), resumability (already-composited
-cell skipped on re-run, reported "already_present"), the manifest file,
-and a full round-trip read-back through
-offline_ndvi_store.get_offline_ndvi()/get_offline_ndvi_metadata() on the
-actually-written .npz file -- all passed on first run. The real network
-calls (STAC search + band download against the live Earth Search API and
-sentinel-cogs bucket) are, like every other real-network piece of this
-project, unverified until the on-device/CI confirmation stage.
-
-MINOR FOLLOW-UP FIX (same session as offline_download_runner.py, below):
-an all-NaN composite pixel (every scene masked or out of that scene's
-real coverage at that point -- an ordinary, already-handled outcome, not
-a bug) was triggering a numpy RuntimeWarning on every occurrence. Now
-explicitly suppressed around the nanmedian call so real Logcat output
-isn't cluttered with noise for an outcome the code already handles
-correctly -- behavior is unchanged, this only silences a benign warning.
-
 BUGFIX (2026-09-02) -- UNIQUE TEMP FILENAMES, defense in depth for the
 same concurrent-download race documented in offline_download_runner.py's
-module docstring (that file's new per-country lock is the actual fix --
-read that first). This file's own atomic-write helpers
-(_download_one_tile's .tif.part, _download_band_file's .part, and
-_write_ndvi_cell's .npz.part) all previously used a FIXED temp filename
-derived only from the destination path. If two full download runs for
-the same country were ever concurrent (the scenario that lock now
-prevents), two writers targeting the SAME destination tile/band/cell
-would race on the identical temp path -- whichever finished
-os.replace() first would yank the other's temp file out from under it,
-raising FileNotFoundError, caught by each function's existing broad
-except-and-record-as-"error" handling. This is the concrete mechanism
-behind the real on-device Iran run's inflated error counts (341/357 DEM
-tiles, 357/357 NDVI cells) -- most of those were lost temp-file races,
-not real network/API failures. Every temp path below now includes
-os.getpid() and a random uuid, so two writers can no longer collide on
-the same temp filename even if they do end up running concurrently.
+module docstring (that file's own per-country lock is the actual fix --
+read that first). This file's own atomic-write helpers all previously
+used a FIXED temp filename derived only from the destination path. Every
+temp path below now includes os.getpid() and a random uuid, so two
+writers can no longer collide on the same temp filename even if they do
+end up running concurrently.
+
+RETRY LOGIC (this session) -- ADDED AFTER A REAL ON-DEVICE IRAN RUN
+showed a very specific, honest failure pattern once the storage-access
+and concurrent-download-race issues were both fixed: 351/357 DEM tiles
+and 357/357 NDVI cells failed with real network-level errors --
+DNS resolution failures ("No address associated with hostname") for
+both earth-search.aws.element84.com and copernicus-dem-30m.s3.amazonaws.com,
+plus one mid-transfer connection drop (IncompleteRead). This is a real
+connection-stability problem (confirmed via the actual manifest
+"detail" fields the user read off their own phone's now-real,
+file-manager-visible storage -- not guessed at), not an application bug.
+Both hostnames are genuinely public, unauthenticated AWS endpoints with
+no reason not to resolve under a stable connection.
+
+Rather than require the user to manually re-tap "Download offline data"
+for every transient blip during a 700+-item run, _is_transient_network_error()
+and _retry_delays() below add a SMALL, NARROWLY-SCOPED automatic retry:
+up to MAX_TRANSIENT_ATTEMPTS total attempts, with a short (and slightly
+increasing) pause between them, but ONLY for genuine network-level
+failures a real retry could plausibly fix (DNS resolution failure,
+connection reset/refused, a dropped/incomplete transfer, a timeout).
+A definitive HTTP response -- 404 (correctly means "no tile here"),
+any other 4xx/5xx, or a malformed/unparseable response body -- is
+NEVER retried here: those are real, stable outcomes a retry would not
+change, and silently hammering a server that just returned a real error
+code would be the wrong behavior, not a safety margin. This keeps the
+existing honest manifest "error" status meaningful: it now means "this
+genuinely could not be fetched even after real retries", not "the first
+attempt happened to hit a blip".
 """
 
 from __future__ import annotations
@@ -139,6 +118,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 import uuid
 import warnings
 from dataclasses import dataclass
@@ -166,7 +146,32 @@ def _unique_tmp_path(dest: str) -> str:
     return f"{dest}.{os.getpid()}.{uuid.uuid4().hex}.part"
 
 
-# =========================== DEM HALF (unchanged) ===========================
+# =========================== RETRY HELPERS (this session) ===========================
+
+MAX_TRANSIENT_ATTEMPTS = 3  # total attempts, i.e. up to 2 automatic retries
+_RETRY_BASE_DELAY_S = 2.0   # attempt N waits _RETRY_BASE_DELAY_S * N seconds before retrying
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    """True only for network-level failures a short automatic retry could
+    plausibly fix: DNS resolution failure, connection reset/refused, a
+    dropped/incomplete transfer, or a timeout -- all subclasses of
+    requests.exceptions.ConnectionError, ChunkedEncodingError, or Timeout.
+    Deliberately NOT true for a definitive HTTP response (404/4xx/5xx) or
+    a malformed response body -- those are real, stable outcomes a retry
+    would not change. See module docstring's RETRY LOGIC note."""
+    return isinstance(exc, (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.ChunkedEncodingError,
+        requests.exceptions.Timeout,
+    ))
+
+
+def _sleep_before_retry(attempt: int) -> None:
+    time.sleep(_RETRY_BASE_DELAY_S * attempt)
+
+
+# =========================== DEM HALF ===========================
 
 def tiles_covering_bbox(south: float, north: float, west: float, east: float) -> List[Tuple[int, int]]:
     """Returns the (lat, lon) southwest-corner integers of every 1x1
@@ -214,32 +219,57 @@ def _download_one_tile(country: CountryConfig, offline_data_root: str, lat: int,
 
     url = remote_tile_url(country, lat, lon)
     http = session or requests
-    try:
-        resp = http.get(url, timeout=60, stream=True)
-    except requests.RequestException as exc:
-        return TileDownloadResult(lat, lon, "error", str(exc))
+    last_exc: Optional[Exception] = None
 
-    if resp.status_code == 404:
-        # Ordinary, expected: ocean tile, or one of the small number of
-        # tiles Copernicus hasn't released publicly yet. Not an error.
-        return TileDownloadResult(lat, lon, "not_available", "HTTP 404")
-    if resp.status_code != 200:
-        return TileDownloadResult(lat, lon, "error", f"HTTP {resp.status_code}")
+    for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
+        try:
+            resp = http.get(url, timeout=60, stream=True)
+        except requests.RequestException as exc:
+            last_exc = exc
+            if _is_transient_network_error(exc) and attempt < MAX_TRANSIENT_ATTEMPTS:
+                _sleep_before_retry(attempt)
+                continue
+            return TileDownloadResult(lat, lon, "error", str(exc))
 
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    tmp_path = _unique_tmp_path(dest)
-    try:
-        with open(tmp_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-        os.replace(tmp_path, dest)  # atomic -- never leaves a half-written file at the real path
-    except Exception as exc:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        return TileDownloadResult(lat, lon, "error", str(exc))
+        if resp.status_code == 404:
+            # Ordinary, expected: ocean tile, or one of the small number of
+            # tiles Copernicus hasn't released publicly yet. Not an error,
+            # and never retried -- a 404 is a definitive, stable answer.
+            return TileDownloadResult(lat, lon, "not_available", "HTTP 404")
+        if resp.status_code != 200:
+            # Any other real HTTP status is a definitive response too --
+            # not retried here, see module docstring's RETRY LOGIC note.
+            return TileDownloadResult(lat, lon, "error", f"HTTP {resp.status_code}")
 
-    return TileDownloadResult(lat, lon, "downloaded")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp_path = _unique_tmp_path(dest)
+        try:
+            with open(tmp_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+            os.replace(tmp_path, dest)  # atomic -- never leaves a half-written file at the real path
+            return TileDownloadResult(lat, lon, "downloaded")
+        except requests.RequestException as exc:
+            # Covers a dropped/incomplete transfer mid-stream (the real
+            # IncompleteRead pattern seen on-device) -- retried like any
+            # other transient network failure.
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            last_exc = exc
+            if _is_transient_network_error(exc) and attempt < MAX_TRANSIENT_ATTEMPTS:
+                _sleep_before_retry(attempt)
+                continue
+            return TileDownloadResult(lat, lon, "error", str(exc))
+        except Exception as exc:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            return TileDownloadResult(lat, lon, "error", str(exc))
+
+    return TileDownloadResult(
+        lat, lon, "error",
+        str(last_exc) if last_exc else f"Failed after {MAX_TRANSIENT_ATTEMPTS} attempts"
+    )
 
 
 def download_country_dem(
@@ -251,12 +281,15 @@ def download_country_dem(
     already present locally. Resumable by nature: already-downloaded
     tiles are skipped on a re-run (its own explicit 'already_present'
     result rather than silently re-downloading), so an interrupted
-    download can just be started again.
+    download can just be started again. Each tile also gets its own
+    small automatic retry for transient network failures within this
+    same run -- see module docstring's RETRY LOGIC note; the manifest
+    'error' status still means a real, retried failure, not a first-hit
+    blip.
 
     progress_callback, if given, is called after each tile with
     (tiles_done, tiles_total, result) -- intended for
-    OfflineDataActivity.kt (via Chaquopy) to update a progress bar,
-    not yet wired up.
+    OfflineDataActivity.kt (via Chaquopy) to update a progress bar.
 
     Writes a manifest.json in the country's storage folder recording
     exactly what happened for every tile -- never silently drops a
@@ -289,7 +322,7 @@ def download_country_dem(
     return results
 
 
-# =========================== NDVI HALF (new) ===========================
+# =========================== NDVI HALF ===========================
 
 NDVI_GRID_SIZE = 32  # see module docstring for the resolution rationale
 MAX_SCENES_PER_CELL = 4  # caps whole-country download cost; scenes already sorted least-cloudy-first
@@ -325,28 +358,83 @@ def _output_grid(lat: int, lon: int, n: int):
     return lats, lons, lat_min, lat_max, lon_min, lon_max
 
 
+def _search_scenes_with_retry(
+    south: float, north: float, west: float, east: float,
+    date_from: str, date_to: str, max_cloud_cover: float, limit: int, session,
+) -> List[Sentinel2Scene]:
+    """Thin retry wrapper around sentinel2_stac_client.search_scenes().
+    StacSearchError properly chains the real underlying cause
+    (`raise StacSearchError(...) from exc`, see that module), so a
+    genuine transient network failure can be told apart from a
+    definitive HTTP error or a malformed response -- only the former is
+    retried, matching this file's module-level RETRY LOGIC note."""
+    last_err: Optional[StacSearchError] = None
+    for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
+        try:
+            return search_scenes(
+                south=south, north=north, west=west, east=east,
+                date_from=date_from, date_to=date_to,
+                max_cloud_cover=max_cloud_cover, limit=limit,
+                session=session,
+            )
+        except StacSearchError as exc:
+            last_err = exc
+            if _is_transient_network_error(exc.__cause__) and attempt < MAX_TRANSIENT_ATTEMPTS:
+                _sleep_before_retry(attempt)
+                continue
+            raise
+    # Unreachable in practice (the loop always returns or raises), but
+    # keeps type-checkers and readers honest about the fallthrough case.
+    raise last_err  # type: ignore[misc]
+
+
 def _download_band_file(url: str, dest_path: str, session, timeout: int = 60) -> None:
     """Same atomic-save pattern already proven in download_country_dem's
     _download_one_tile: temp file + os.replace, never leaves a
     half-written file at the real path. Skips re-download if already
-    present (resumable)."""
+    present (resumable). Same small automatic retry for transient
+    network failures as the DEM half -- see module docstring."""
     if os.path.isfile(dest_path):
         return
-    resp = session.get(url, timeout=timeout, stream=True)
-    if resp.status_code != 200:
-        raise IOError(f"HTTP {resp.status_code} downloading {url}")
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    tmp_path = _unique_tmp_path(dest_path)
-    try:
-        with open(tmp_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-        os.replace(tmp_path, dest_path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, MAX_TRANSIENT_ATTEMPTS + 1):
+        try:
+            resp = session.get(url, timeout=timeout, stream=True)
+        except requests.RequestException as exc:
+            last_exc = exc
+            if _is_transient_network_error(exc) and attempt < MAX_TRANSIENT_ATTEMPTS:
+                _sleep_before_retry(attempt)
+                continue
+            raise IOError(f"Network error downloading {url}: {exc}") from exc
+
+        if resp.status_code != 200:
+            # A definitive HTTP status -- never retried, see module docstring.
+            raise IOError(f"HTTP {resp.status_code} downloading {url}")
+
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        tmp_path = _unique_tmp_path(dest_path)
+        try:
+            with open(tmp_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+            os.replace(tmp_path, dest_path)
+            return
+        except requests.RequestException as exc:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            last_exc = exc
+            if _is_transient_network_error(exc) and attempt < MAX_TRANSIENT_ATTEMPTS:
+                _sleep_before_retry(attempt)
+                continue
+            raise IOError(f"Network error downloading {url}: {exc}") from exc
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+    raise IOError(f"Network error downloading {url} after {MAX_TRANSIENT_ATTEMPTS} attempts: {last_exc}")
 
 
 def _composite_one_scene(scene: Sentinel2Scene, lats, lons, scenes_cache_dir: str, session) -> np.ndarray:
@@ -426,7 +514,7 @@ def _composite_one_cell(
     south, north, west, east = float(lat), float(lat + 1), float(lon), float(lon + 1)
 
     try:
-        found = search_scenes(
+        found = _search_scenes_with_retry(
             south=south, north=north, west=west, east=east,
             date_from=window_start, date_to=window_end,
             max_cloud_cover=60.0, limit=MAX_SCENES_PER_CELL,
@@ -485,7 +573,8 @@ def download_country_ndvi(
     that isn't already present locally. Resumable, same as
     download_country_dem: an already-composited cell is reported
     'already_present' and skipped, so an interrupted country-wide
-    download can simply be re-run.
+    download can simply be re-run. Same small automatic retry for
+    transient network failures as the DEM half -- see module docstring.
 
     Writes an ndvi_manifest.json in the country's storage folder,
     mirroring dem_manifest.json's role -- records exactly what happened
