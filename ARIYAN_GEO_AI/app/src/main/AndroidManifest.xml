@@ -10,12 +10,12 @@
          redesign): survives an app uninstall/reinstall, unlike app-private
          storage. WRITE/READ_EXTERNAL_STORAGE cover Android 9 and below,
          where scoped storage doesn't apply at all. MANAGE_EXTERNAL_STORAGE
-         covers Android 11+ ("All files access") -- the modern equivalent,
+         covers Android 11+ ("All files access"), the modern equivalent,
          requested via a one-time settings toggle (Settings.
          ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, see
          ExternalStorageAccess.kt). tools:ignore="ScopedStorage" silences
          the lint warning Android Studio would otherwise raise for this
-         permission -- a deliberate, justified choice here, not an
+         permission, a deliberate, justified choice here, not an
          oversight (this app is sideloaded, never distributed via Google
          Play, so Play's policy restrictions on this permission don't apply). -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
