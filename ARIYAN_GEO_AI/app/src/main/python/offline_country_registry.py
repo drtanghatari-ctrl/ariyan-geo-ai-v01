@@ -15,10 +15,20 @@ THIS MODULE IS PART OF THE SEPARATE OFFLINE EXTENSION. It is never
 imported by any existing live-pipeline file (dem_source_mobile.py,
 ndvi_source_mobile.py, investigation_multi_mobile.py, evidence_record.py)
 and does not change how the live/online investigation flow behaves.
+
+ADDED THIS SESSION -- get_country_for_point(): the real-data-first /
+offline-fallback design (offline_evidence_fallback.py) needs to find
+which country's offline package (if any) covers a given investigation
+coordinate, WITHOUT the user having to manually pick a country on the
+main investigation screen -- they already picked it once, implicitly,
+when they entered coordinates or used their GPS location. This is a
+simple linear scan over _COUNTRIES' bounding boxes; fine at this
+registry's current and realistically-expected size (a handful of
+countries, not thousands).
 """
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 
 @dataclass(frozen=True)
@@ -95,6 +105,11 @@ class CountryConfig:
         offline_dem_store.py / offline_ndvi_store.py, not yet written)."""
         return self.iso_code.lower()
 
+    def contains(self, lat: float, lon: float) -> bool:
+        """True if (lat, lon) falls inside this country's configured
+        bounding box (the padded rectangle above, not its real border)."""
+        return self.south <= lat <= self.north and self.west <= lon <= self.east
+
 
 # --- Registry -------------------------------------------------------------
 #
@@ -140,3 +155,23 @@ def get_country(iso_code: str) -> CountryConfig:
 def list_countries() -> Dict[str, str]:
     """Returns {iso_code: display_name} for every registered country."""
     return {code: cfg.name for code, cfg in _COUNTRIES.items()}
+
+
+def get_country_for_point(lat: float, lon: float) -> Optional[CountryConfig]:
+    """Returns the registered CountryConfig whose bounding box covers
+    (lat, lon), or None if no registered country's offline package
+    covers this coordinate (either because it's genuinely outside every
+    registered country, or because that country simply hasn't been added
+    to _COUNTRIES yet). Never raises -- 'no offline coverage here' is an
+    ordinary, expected outcome for the live-fetch-fails fallback path in
+    offline_evidence_fallback.py to handle honestly, not an error.
+
+    If bounding boxes of two registered countries ever overlap (padded
+    rectangles near a shared border, once a second country is added),
+    this returns whichever is found first in _COUNTRIES -- acceptable
+    for now since there is currently only one entry; revisit if that
+    ever becomes a real ambiguity worth resolving properly."""
+    for country in _COUNTRIES.values():
+        if country.contains(lat, lon):
+            return country
+    return None
