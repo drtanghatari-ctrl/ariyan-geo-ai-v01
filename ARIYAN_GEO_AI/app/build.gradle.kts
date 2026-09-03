@@ -79,9 +79,9 @@ chaquopy {
 
         pip {
             // numpy: required by the whole pipeline (np_ops.py etc).
-            // requests: used only by dem_source_mobile.py's real
-            // OpenTopography fetch (use_real_dem=True path) -- it's a
-            // pure-Python package, no native build step, unlike
+            // requests: used by dem_source_mobile.py's real OpenTopography
+            // fetch and ndvi_source_mobile.py's real Copernicus fetch --
+            // it's a pure-Python package, no native build step, unlike
             // scipy/matplotlib/rasterio which are deliberately NOT
             // listed here (see np_ops.py / dem_source_mobile.py for
             // why: scipy's native code and rasterio's GDAL dependency
@@ -102,6 +102,23 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("androidx.activity:activity-ktx:1.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // Real-data-first design (this session): MainActivity.kt now saves the
+    // user's OpenTopography API key and Copernicus OAuth client ID/secret
+    // on-device (so real data can be attempted automatically, with no
+    // manual toggle and no re-typing every session -- see MainActivity.kt's
+    // class doc comment). Uses EncryptedSharedPreferences (MasterKey +
+    // AES256_SIV/AES256_GCM), confirmed against Android's current official
+    // Security reference docs before adding this, same practice already
+    // established for the AuthorizationClient/Drive-consent shape below.
+    // HONEST NOTE: EncryptedSharedPreferences was marked @deprecated as of
+    // security-crypto 1.1.0 (Google's stated long-term direction is Jetpack
+    // DataStore + Tink instead) -- but the class itself is still present,
+    // shipped, and functional in this stable 1.1.0 release; a full
+    // DataStore+Tink migration is a materially bigger, riskier change this
+    // session deliberately did not take on. Revisit if a future AGP/library
+    // bump ever actually removes the class, not preemptively.
+    implementation("androidx.security:security-crypto:1.1.0")
 
     // Offline mode (DriveBackupWorker.kt): background download+backup jobs.
     //
