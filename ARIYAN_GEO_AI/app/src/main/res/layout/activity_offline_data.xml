@@ -29,6 +29,47 @@
             android:textSize="12sp"
             android:paddingBottom="16dp" />
 
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/storage_access_title"
+            android:textColor="@color/ariyan_text_primary"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:paddingBottom="4dp" />
+
+        <TextView
+            android:id="@+id/textStorageAccessNotice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/storage_access_notice"
+            android:textColor="@color/ariyan_text_secondary"
+            android:textSize="12sp"
+            android:paddingBottom="12dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonGrantStorageAccess"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/grant_storage_access" />
+
+        <TextView
+            android:id="@+id/textStorageAccessStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:fontFamily="monospace"
+            android:textColor="@color/ariyan_accent"
+            android:textSize="12sp"
+            android:textIsSelectable="true" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="20dp"
+            android:layout_marginBottom="20dp"
+            android:background="@color/ariyan_text_secondary" />
+
         <com.google.android.material.textfield.TextInputLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -102,64 +143,6 @@
             android:layout_marginTop="12dp"
             android:fontFamily="monospace"
             android:textColor="@color/ariyan_text_secondary"
-            android:textSize="12sp"
-            android:textIsSelectable="true" />
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginTop="24dp"
-            android:background="@color/ariyan_text_secondary" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:text="@string/drive_backup_title"
-            android:textColor="@color/ariyan_text_primary"
-            android:textSize="18sp"
-            android:textStyle="bold"
-            android:paddingBottom="4dp" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/drive_backup_notice"
-            android:textColor="@color/ariyan_text_secondary"
-            android:textSize="12sp"
-            android:paddingBottom="16dp" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonGrantDriveAccess"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/grant_drive_access" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/buttonBackupDrive"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="@string/backup_to_drive"
-            app:backgroundTint="@color/ariyan_accent" />
-
-        <ProgressBar
-            android:id="@+id/progressBarDrive"
-            style="?android:attr/progressBarStyleHorizontal"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:max="100"
-            android:progress="0"
-            android:visibility="gone" />
-
-        <TextView
-            android:id="@+id/textDriveStatus"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:fontFamily="monospace"
-            android:textColor="@color/ariyan_accent"
             android:textSize="12sp"
             android:textIsSelectable="true" />
 
