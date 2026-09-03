@@ -32,11 +32,11 @@
             android:textColor="@color/ariyan_accent" />
 
         <TextView
-            android:id="@+id/textSyntheticNotice"
+            android:id="@+id/textRealDataNotice"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/synthetic_notice"
-            android:textColor="@color/ariyan_warn"
+            android:text="@string/real_data_notice"
+            android:textColor="@color/ariyan_text_secondary"
             android:textSize="12sp"
             android:paddingBottom="16dp" />
 
@@ -90,31 +90,22 @@
             android:text="@string/run_investigation"
             app:backgroundTint="@color/ariyan_accent" />
 
-        <com.google.android.material.switchmaterial.SwitchMaterial
-            android:id="@+id/switchRealDem"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            android:text="@string/use_real_dem"
-            android:textColor="@color/ariyan_text_primary" />
-
         <TextView
             android:id="@+id/textRealDemNotice"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
             android:text="@string/real_dem_notice"
             android:textColor="@color/ariyan_text_secondary"
             android:textSize="11sp"
-            android:paddingTop="2dp"
-            android:visibility="gone" />
+            android:paddingTop="2dp" />
 
         <com.google.android.material.textfield.TextInputLayout
             android:id="@+id/layoutApiKey"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:hint="@string/hint_api_key"
-            android:visibility="gone">
+            android:hint="@string/hint_api_key">
             <com.google.android.material.textfield.TextInputEditText
                 android:id="@+id/inputApiKey"
                 android:layout_width="match_parent"
@@ -126,8 +117,7 @@
             android:id="@+id/layoutDemType"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="@string/hint_demtype"
-            android:visibility="gone">
+            android:hint="@string/hint_demtype">
             <com.google.android.material.textfield.TextInputEditText
                 android:id="@+id/inputDemType"
                 android:layout_width="match_parent"
@@ -147,24 +137,17 @@
             android:id="@+id/textNdviNotice"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="NDVI is synthetic by default on this build. Turn on &quot;Use real Copernicus NDVI&quot; below for a real, network-fetched check."
+            android:text="@string/ndvi_notice"
             android:textColor="@color/ariyan_text_secondary"
             android:textSize="11sp"
-            android:paddingTop="2dp" />
-
-        <com.google.android.material.switchmaterial.SwitchMaterial
-            android:id="@+id/switchRealNdvi"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Use real Copernicus NDVI (needs network + client credentials)"
-            android:textColor="@color/ariyan_text_primary" />
+            android:paddingTop="2dp"
+            android:visibility="gone" />
 
         <TextView
             android:id="@+id/textRealNdviNotice"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Requires your own free Copernicus Data Space Ecosystem OAuth client ID/secret (dataspace.copernicus.eu). Stored only in memory for this session — not saved to disk. Uses your device's data connection. For each DEM candidate, fetches real NDVI mean/stdDev for a small core area at the point and a larger halo area around it; a core significantly below the halo indicates vegetation stress, a real documented signature of buried features."
+            android:text="@string/real_ndvi_notice"
             android:textColor="@color/ariyan_text_secondary"
             android:textSize="11sp"
             android:paddingTop="2dp"
