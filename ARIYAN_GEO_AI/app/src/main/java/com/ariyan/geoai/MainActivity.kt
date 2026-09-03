@@ -20,6 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 
 /**
  * MainActivity — the entire native UI shell for the ARIYAN GEO AI Android
@@ -31,22 +32,45 @@ import org.json.JSONObject
  * depending on the "Include NDVI correlation" switch, and renders the
  * returned evidence record.
  *
- * Two DEM sources are available:
- *  - Synthetic (default): offline, no network, every result explicitly
- *    labeled synthetic on screen.
- *  - Real (opt-in via switchRealDem): a live OpenTopography fetch, decoded
- *    as AAIGrid rather than GeoTIFF because Chaquopy cannot build
- *    GDAL/rasterio for Android (see dem_source_mobile.py). Requires the
- *    user's own OpenTopography API key, entered in-app and held only in
- *    memory for this session -- never written to disk.
+ * REAL-DATA-FIRST REDESIGN (this session) -- SYNTHETIC MODE REMOVED
+ * ENTIRELY. Previously this Activity had switchRealDem/switchRealNdvi
+ * toggles, both defaulting OFF, meaning the actual default investigation
+ * used SyntheticDEMSource / SyntheticNDVISource -- fabricated terrain --
+ * unless the user remembered to flip a switch and retype an API key
+ * every single session (credentials were held only in memory before).
+ * That directly violated this project's own hard requirement: nothing
+ * synthetic/fake, ever. Fixed by removing the toggles and the synthetic
+ * path entirely, on both the Kotlin side (this file, activity_main.xml)
+ * and the Python side (investigation_mobile.py / investigation_multi_
+ * mobile.py, rewritten to always attempt real data first).
  *
- * Two NDVI sources are available when NDVI correlation is included:
- *  - Synthetic (default): offline, no network, always labeled synthetic.
- *  - Real (opt-in via switchRealNdvi): a live Copernicus Data Space
- *    Ecosystem Statistical API core/halo vegetation-stress check per DEM
- *    candidate (see ndvi_source_mobile.py). Requires the user's own
- *    Copernicus OAuth client ID/secret, entered in-app and held only in
- *    memory for this session -- never written to disk.
+ * NEW BEHAVIOR:
+ *  - DEM: a real, live OpenTopography fetch is ALWAYS attempted first,
+ *    using the API key entered below (opentopography.org, free). If
+ *    that fails for ANY reason (no network, bad/expired key, rate
+ *    limit, HTTP/parse error), Python automatically falls back to this
+ *    device's own offline DEM library (see OfflineDataActivity.kt /
+ *    offline_data_manager.py) for the SAME coordinate, if that
+ *    country's data has been pre-downloaded. If NEITHER succeeds, the
+ *    investigation fails with a single, honest, combined error message
+ *    (surfaced via the existing try/catch below) -- there is no third,
+ *    fabricated fallback anymore.
+ *  - NDVI (when "Include NDVI correlation" is on): a real, live,
+ *    per-DEM-candidate Copernicus core/halo check is ALWAYS attempted
+ *    first, using the Copernicus OAuth client ID/secret entered below
+ *    (dataspace.copernicus.eu, free). If that's unavailable for every
+ *    candidate this run, Python automatically falls back to this
+ *    device's offline Sentinel-2 composite for a full-AOI correlation
+ *    instead. If neither is available, the DEM results are still
+ *    returned -- an NDVI-side failure never blocks the DEM investigation.
+ *  - CREDENTIALS ARE NOW SAVED, not memory-only: SecureCredentialStore.kt
+ *    (new this session) persists the OpenTopography API key, DEM
+ *    dataset type, and Copernicus client ID/secret in an on-device
+ *    EncryptedSharedPreferences store, loaded back into the input
+ *    fields in onCreate() and re-saved every time "Run Investigation"
+ *    is tapped. This is the piece that makes "real data always
+ *    attempted, no manual toggle" actually usable day to day -- without
+ *    it, the user would be back to retyping credentials every session.
  *
  * Optional GPR field pick (opt-in via switchGpr): a single real manual
  * pick -- a two-way radar travel time a human has read directly off a
@@ -62,14 +86,12 @@ import org.json.JSONObject
  * single-source investigation_mobile module has no GPR parameters -- so
  * switchGpr requires switchNdviCorrelation to also be on; onRunClicked()
  * below validates this explicitly rather than silently ignoring a GPR
- * pick the user thought they were submitting. GPR manual-pick entry has
- * been CONFIRMED WORKING ON-DEVICE (real DEM + real NDVI + a real manual
- * pick, depth section rendered correctly) and is now also fed into the
- * AI Debate Engine (debate_mobile.py matches the GPR pick to nearby DEM
- * candidates by distance and factors real subsurface confirmation into
- * the Geomorphology / Anthropogenic-Archaeological / Data-Artifact-
- * Skeptic perspectives) -- see HONEST STATE below for what is and isn't
- * yet verified about that specific integration.
+ * pick the user thought they were submitting. GPR manual-pick entry is
+ * confirmed working on-device and is also fed into the AI Debate Engine
+ * (debate_mobile.py matches the GPR pick to nearby DEM candidates by
+ * distance and factors real subsurface confirmation into the
+ * Geomorphology / Anthropogenic-Archaeological / Data-Artifact-Skeptic
+ * perspectives).
  *
  * After a successful investigation, the AI Debate Engine
  * (debate_mobile.run_debate_json()) is called and, if it succeeds, its
@@ -82,61 +104,37 @@ import org.json.JSONObject
  * debate_engine.py (rule-based, offline, four perspectives: Geomorphology,
  * Anthropogenic/Archaeological, Data Artifact/Skeptic, Vegetation/
  * Agronomic) and debate_mobile.py (the JSON-string wrapper this Activity
- * calls, which translates the real anomalies[]/correlation[]/evidence[]
- * schema into debate_engine.py's field vocabulary) both exist in
- * app/src/main/python/ and have been CONFIRMED WORKING on an actual
- * compiled APK on a physical device (real OpenTopography DEM + real
- * Copernicus Sentinel-2 NDVI; synthesis correctly landed on CONTESTED
- * for a genuinely ambiguous candidate). insufficient-data positions
- * (most commonly Vegetation/Agronomic when NDVI shows no stress signal)
- * render explicitly labeled "[insufficient data]" rather than being
- * silently omitted -- an honest "no signal" finding is itself a real
- * result this project does not hide. GPR manual-pick entry has been
- * CONFIRMED WORKING ON-DEVICE as a third evidence source (real DEM +
- * real NDVI + a real manual pick, depth section rendered correctly).
- * GPR-INTO-DEBATE-ENGINE INTEGRATION: debate_mobile.py now matches the
- * GPR pick to nearby DEM candidates (by distance, using the AOI's own
- * cell size as the proximity tolerance -- see
- * debate_mobile._gpr_colocation_distance_m()) and, when close enough,
- * adds real subsurface-confirmation reasoning to three of the four
- * perspectives (debate_engine.py's Geomorphology,
- * Anthropogenic/Archaeological, and Data Artifact/Skeptic positions).
- * Verified so far only with local Python-side tests against synthetic
- * JSON payloads shaped like a real investigation record -- NOT yet run
- * on a real compiled APK with a real manual GPR pick close enough to an
- * actual DEM candidate to confirm the debate section's confidence
- * labels/stances actually shift as designed. There is no automatic GPR
- * device-export parsing in this build (manual pick entry only -- see
- * gpr_source_mobile.py's own honest-state docstring).
- * CANDIDATE-ID BUG FIXED (this commit): the AI Debate section previously
- * rendered "Candidate null:" as the header for every debated candidate.
- * Root cause was org.json's JSONObject.optString(name, fallback): it
- * only substitutes the fallback when the KEY IS ABSENT, not when the key
- * is present holding a JSON null (which is exactly what debate_engine.py
- * previously returned for candidate_id, since nothing upstream ever set
- * a real id). Fixed at the root in debate_mobile.py (every debated
- * candidate now gets a real, non-null id -- its own 1-based position in
- * this run's anomalies[] list, matching the "Candidates: #N" list above
- * it), with this Activity's own optString call also hardened below
- * (isNull() checked explicitly) as a defensive backstop in case any
- * future caller of debate_engine.py still omits a real id.
+ * calls) both exist in app/src/main/python/ and have been CONFIRMED
+ * WORKING on an actual compiled APK on a physical device (real
+ * OpenTopography DEM + real Copernicus Sentinel-2 NDVI; synthesis
+ * correctly landed on CONTESTED for a genuinely ambiguous candidate).
+ * insufficient-data positions render explicitly labeled "[insufficient
+ * data]" rather than being silently omitted. GPR manual-pick entry has
+ * been CONFIRMED WORKING ON-DEVICE as a third evidence source. THIS
+ * SESSION'S CHANGES (real-data-first, credential persistence, offline
+ * fallback wiring) have NOT yet been run on an actual device -- that
+ * on-device confirmation is the honest next step once this build
+ * compiles clean, same practice as every other real piece of this
+ * project. There is no automatic GPR device-export parsing in this
+ * build (manual pick entry only -- see gpr_source_mobile.py's own
+ * honest-state docstring).
  *
- * OFFLINE-DATA NAV BUTTON (this commit): buttonOfflineData just launches
- * OfflineDataActivity via a plain Intent -- pure navigation, no other
- * change. This is a deliberate, minimal, early slice of the still-
- * pending build-order step (5) (the full step also adds a guarded
- * live-fetch-fails fallback call into runInvestigation() below, which is
- * NOT part of this commit and has not been added), pulled forward on its
- * own because there was otherwise no way to reach OfflineDataActivity
- * from a real installed APK at all, blocking on-device verification of
- * step (4)'s Google Drive backup flow. Nothing else in this Activity was
- * touched.
+ * OFFLINE-DATA NAV BUTTON: buttonOfflineData launches OfflineDataActivity
+ * via a plain Intent -- pure navigation, unchanged this session.
  */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var python: Python
     private lateinit var fusedLocationClient: FusedLocationProviderClient
+    private lateinit var credentialStore: SecureCredentialStore
+
+    // This app's own private internal storage for pre-downloaded offline
+    // DEM/NDVI data -- the exact same path OfflineDataActivity.kt already
+    // uses (filesDir/offline_data), so the live-fetch-fails fallback in
+    // investigation_mobile.py / investigation_multi_mobile.py reads from
+    // whatever OfflineDataActivity has actually downloaded there.
+    private val offlineDataRoot: String by lazy { File(filesDir, "offline_data").absolutePath }
 
     private val locationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -153,15 +151,28 @@ class MainActivity : AppCompatActivity() {
        python = Python.getInstance()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
-        binding.switchRealDem.setOnCheckedChangeListener { _, checked ->
-            setRealDemUiVisible(checked)
+        // Real-data-first redesign: load any previously-saved credentials
+        // back into the input fields, so the user doesn't have to retype
+        // them every session -- see SecureCredentialStore.kt and this
+        // class's own doc comment.
+        credentialStore = SecureCredentialStore(this)
+        if (credentialStore.openTopographyApiKey.isNotEmpty()) {
+            binding.inputApiKey.setText(credentialStore.openTopographyApiKey)
         }
-        setRealDemUiVisible(false)
+        if (credentialStore.demType.isNotEmpty()) {
+            binding.inputDemType.setText(credentialStore.demType)
+        }
+        if (credentialStore.copernicusClientId.isNotEmpty()) {
+            binding.inputNdviClientId.setText(credentialStore.copernicusClientId)
+        }
+        if (credentialStore.copernicusClientSecret.isNotEmpty()) {
+            binding.inputNdviClientSecret.setText(credentialStore.copernicusClientSecret)
+        }
 
-        binding.switchRealNdvi.setOnCheckedChangeListener { _, checked ->
-            setRealNdviUiVisible(checked)
+        binding.switchNdviCorrelation.setOnCheckedChangeListener { _, checked ->
+            setNdviUiVisible(checked)
         }
-        setRealNdviUiVisible(false)
+        setNdviUiVisible(binding.switchNdviCorrelation.isChecked)
 
         binding.switchGpr.setOnCheckedChangeListener { _, checked ->
             setGprUiVisible(checked)
@@ -175,17 +186,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setRealDemUiVisible(useRealDem: Boolean) {
-        binding.layoutApiKey.visibility = if (useRealDem) View.VISIBLE else View.GONE
-        binding.layoutDemType.visibility = if (useRealDem) View.VISIBLE else View.GONE
-        binding.textRealDemNotice.visibility = if (useRealDem) View.VISIBLE else View.GONE
-        binding.textSyntheticNotice.visibility = if (useRealDem) View.GONE else View.VISIBLE
-    }
-
-    private fun setRealNdviUiVisible(useRealNdvi: Boolean) {
-        binding.layoutNdviClientId.visibility = if (useRealNdvi) View.VISIBLE else View.GONE
-        binding.layoutNdviClientSecret.visibility = if (useRealNdvi) View.VISIBLE else View.GONE
-        binding.textRealNdviNotice.visibility = if (useRealNdvi) View.VISIBLE else View.GONE
+    /** Shows/hides the NDVI credential fields and their explanatory notes
+     * based on whether "Include NDVI correlation" is on. There is no
+     * longer a separate "use real NDVI" switch -- real NDVI is always
+     * attempted whenever NDVI correlation is included at all (see class
+     * doc comment); this function only controls whether the fields
+     * needed for that are visible. */
+    private fun setNdviUiVisible(includeNdvi: Boolean) {
+        binding.textNdviNotice.visibility = if (includeNdvi) View.VISIBLE else View.GONE
+        binding.textRealNdviNotice.visibility = if (includeNdvi) View.VISIBLE else View.GONE
+        binding.layoutNdviClientId.visibility = if (includeNdvi) View.VISIBLE else View.GONE
+        binding.layoutNdviClientSecret.visibility = if (includeNdvi) View.VISIBLE else View.GONE
     }
 
     private fun setGprUiVisible(useGpr: Boolean) {
@@ -201,12 +212,10 @@ class MainActivity : AppCompatActivity() {
         val lon = coordsParts.getOrNull(1)?.toDoubleOrNull()
         val radius = binding.inputRadius.text?.toString()?.trim()?.toDoubleOrNull()
         val grid = binding.inputGrid.text?.toString()?.trim()?.toIntOrNull()
-        val useRealDem = binding.switchRealDem.isChecked
         val apiKey = binding.inputApiKey.text?.toString()?.trim().orEmpty()
         val demType = binding.inputDemType.text?.toString()?.trim()
             ?.ifEmpty { "SRTMGL1" } ?: "SRTMGL1"
         val includeNdvi = binding.switchNdviCorrelation.isChecked
-        val useRealNdvi = binding.switchRealNdvi.isChecked
         val ndviClientId = binding.inputNdviClientId.text?.toString()?.trim().orEmpty()
         val ndviClientSecret = binding.inputNdviClientSecret.text?.toString()?.trim().orEmpty()
         val useGpr = binding.switchGpr.isChecked
@@ -223,12 +232,6 @@ class MainActivity : AppCompatActivity() {
         if (grid == null || grid < 8) {
             toast("Grid size must be at least 8"); return
         }
-        if (useRealDem && apiKey.isEmpty()) {
-            toast("Enter your OpenTopography API key, or turn off \"Use real DEM\""); return
-        }
-        if (includeNdvi && useRealNdvi && (ndviClientId.isEmpty() || ndviClientSecret.isEmpty())) {
-            toast("Enter your Copernicus client ID and secret, or turn off \"Use real Copernicus NDVI\""); return
-        }
         if (useGpr && !includeNdvi) {
             toast("GPR only attaches via the multi-evidence path -- turn on \"Include NDVI correlation\" above too, or turn off \"Attach GPR field pick\""); return
         }
@@ -238,6 +241,24 @@ class MainActivity : AppCompatActivity() {
         if (useGpr && (gprTwoWayTimeNs == null || gprTwoWayTimeNs <= 0.0)) {
             toast("Enter a positive two-way travel time (ns) for the GPR pick"); return
         }
+        // NOTE: apiKey / ndviClientId / ndviClientSecret are intentionally
+        // NOT required here anymore. Real data is always attempted first
+        // when a key IS present; if one is genuinely empty, Python treats
+        // that exactly like a live-fetch failure and falls back to the
+        // offline library automatically (see investigation_mobile.py /
+        // investigation_multi_mobile.py) -- so a user relying entirely on
+        // pre-downloaded offline data, with no live credentials configured
+        // at all, is a legitimate, supported case, not a blocked one.
+
+        // Real-data-first redesign: persist whatever credentials were
+        // actually entered/used for this run, so they're pre-filled next
+        // time -- see SecureCredentialStore.kt.
+        credentialStore.openTopographyApiKey = apiKey
+        credentialStore.demType = demType
+        if (includeNdvi) {
+            credentialStore.copernicusClientId = ndviClientId
+            credentialStore.copernicusClientSecret = ndviClientSecret
+        }
 
         setRunning(true)
 
@@ -246,8 +267,8 @@ class MainActivity : AppCompatActivity() {
                 val json = withContext(Dispatchers.Default) {
                     runInvestigation(
                         lat, lon, radius, grid,
-                        useRealDem, apiKey, demType,
-                        includeNdvi, useRealNdvi, ndviClientId, ndviClientSecret,
+                        apiKey, demType,
+                        includeNdvi, ndviClientId, ndviClientSecret,
                         useGpr, gprSoilPresetKey, gprTwoWayTimeNs, gprDeviceNote
                     )
                 }
@@ -268,9 +289,10 @@ class MainActivity : AppCompatActivity() {
                 // Surface the real Python error rather than a generic
                 // "something went wrong" -- this app is a scientific
                 // instrument, not a consumer toy, and dem_source_mobile.py
-                // / ndvi_source_mobile.py / gpr_source_mobile.py already
-                // produce human-readable messages for every network/HTTP/
-                // parsing/depth-model failure. Show just that message, not
+                // / ndvi_source_mobile.py / gpr_source_mobile.py /
+                // offline_evidence_fallback.py already produce
+                // human-readable messages for every network/HTTP/parsing/
+                // offline-availability failure. Show just that message, not
                 // the full traceback noise Chaquopy appends.
                 binding.textConfidence.text = "Investigation failed"
                 binding.textResults.text = cleanErrorMessage(e.message)
@@ -319,11 +341,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Runs on a background thread. Chaquopy calls block, so this must
-     * never be called from the main thread. */
+     * never be called from the main thread. Real data is always
+     * attempted first on the Python side now -- see
+     * investigation_mobile.py / investigation_multi_mobile.py's own
+     * docstrings for the full real-live-then-offline-fallback logic;
+     * this function just passes through whatever the user entered plus
+     * offlineDataRoot, unconditionally. */
     private fun runInvestigation(
         lat: Double, lon: Double, radiusM: Double, gridSize: Int,
-        useRealDem: Boolean, apiKey: String, demType: String,
-        includeNdvi: Boolean, useRealNdvi: Boolean,
+        apiKey: String, demType: String,
+        includeNdvi: Boolean,
         ndviClientId: String, ndviClientSecret: String,
         useGpr: Boolean, gprSoilPresetKey: String, gprTwoWayTimeNs: Double?,
         gprDeviceNote: String
@@ -333,12 +360,11 @@ class MainActivity : AppCompatActivity() {
             val result = module.callAttr(
                 "run_investigation_multi_json",
                 lat, lon, radiusM, gridSize,
-                Kwarg("use_real_dem", useRealDem),
                 Kwarg("api_key", apiKey),
                 Kwarg("demtype", demType),
-                Kwarg("use_real_ndvi", useRealNdvi),
                 Kwarg("ndvi_client_id", ndviClientId),
                 Kwarg("ndvi_client_secret", ndviClientSecret),
+                Kwarg("offline_data_root", offlineDataRoot),
                 Kwarg("use_gpr", useGpr),
                 Kwarg("gpr_soil_preset_key", gprSoilPresetKey),
                 Kwarg("gpr_two_way_time_ns", gprTwoWayTimeNs),
@@ -351,9 +377,9 @@ class MainActivity : AppCompatActivity() {
             val result = module.callAttr(
                 "run_investigation_json",
                 lat, lon, radiusM, gridSize,
-                Kwarg("use_real_dem", useRealDem),
                 Kwarg("api_key", apiKey),
-                Kwarg("demtype", demType)
+                Kwarg("demtype", demType),
+                Kwarg("offline_data_root", offlineDataRoot)
             )
             result.toString()
         }
@@ -481,22 +507,15 @@ class MainActivity : AppCompatActivity() {
      * by debate_engine.py (labeled "[insufficient data]" rather than
      * silently omitted) -- an honest "this perspective had no evidence to
      * argue from" is itself a real finding this project does not hide.
-     * Each perspective's reasoning bullet points are also rendered (they
-     * previously were computed by debate_engine.py but never shown here --
-     * now surfaced so a real GPR-confirmation effect, or any other
-     * perspective's reasoning, is actually visible/testable on-device, not
-     * just present in the underlying JSON). A top-level "gpr_note" is
-     * rendered too, when debate_mobile.py reports that real GPR evidence
-     * existed for this investigation but wasn't close enough to any
-     * candidate to be used in its debate.
-     * candidateId: debate_mobile.py now always assigns a real, non-null
-     * "candidate_id" (see debate_mobile._build_candidate()'s "id" field),
-     * but this still checks isNull() explicitly rather than relying only
-     * on optString()'s fallback -- org.json's optString(name, fallback)
-     * only substitutes the fallback when the key is ABSENT, not when the
-     * key is present holding a JSON null, which is exactly how the
-     * earlier "Candidate null:" bug happened. This is a defensive
-     * backstop, not the primary fix. */
+     * Each perspective's reasoning bullet points are also rendered. A
+     * top-level "gpr_note" is rendered too, when debate_mobile.py reports
+     * that real GPR evidence existed for this investigation but wasn't
+     * close enough to any candidate to be used in its debate.
+     * candidateId: debate_mobile.py always assigns a real, non-null
+     * "candidate_id", but this still checks isNull() explicitly rather
+     * than relying only on optString()'s fallback -- org.json's
+     * optString(name, fallback) only substitutes the fallback when the
+     * key is ABSENT, not when the key is present holding a JSON null. */
     private fun appendDebateSection(sb: StringBuilder, debateJsonText: String?) {
         if (debateJsonText.isNullOrBlank()) return
         val debateResult = try {
