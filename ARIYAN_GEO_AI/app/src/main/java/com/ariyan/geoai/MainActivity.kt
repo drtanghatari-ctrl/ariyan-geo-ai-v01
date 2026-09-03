@@ -20,7 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.File
+
 
 /**
  * MainActivity — the entire native UI shell for the ARIYAN GEO AI Android
@@ -134,8 +134,7 @@ class MainActivity : AppCompatActivity() {
     // uses (filesDir/offline_data), so the live-fetch-fails fallback in
     // investigation_mobile.py / investigation_multi_mobile.py reads from
     // whatever OfflineDataActivity has actually downloaded there.
-    private val offlineDataRoot: String by lazy { File(filesDir, "offline_data").absolutePath }
-
+    private val offlineDataRoot: String by lazy { ExternalStorageAccess.offlineDataRoot().absolutePath }
     private val locationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) fetchLocation() else toast("Location permission denied")
