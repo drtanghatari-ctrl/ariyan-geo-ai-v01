@@ -93,6 +93,41 @@ chaquopy {
     }
 }
 
+// ADDED THIS SESSION -- prints the debug keystore's SHA-1/SHA-256
+// certificate fingerprints to the build log on every CI run. Needed to
+// register an Android OAuth client (Google Cloud Console) for this app's
+// package name (com.ariyan.geoai) + this exact debug signing key, which
+// is what DriveBackupWorker.kt / OfflineDataActivity.kt's Google Drive
+// consent flow requires to get past a CommonStatusCodes.INTERNAL_ERROR
+// (status 8) on authorize(). Added here (not as a separate CI workflow
+// step in .github/workflows/build-apk.yml) because the GitHub connection
+// available in this session does not have the OAuth "workflow" scope
+// GitHub requires to edit files under .github/workflows/ via the API --
+// this Gradle-level hook achieves the same result without needing that
+// scope, since assembleDebug already depends on preBuild transitively.
+// Pure JDK APIs (java.security.KeyStore/MessageDigest) -- no new
+// dependency, no keytool binary assumed on the CI runner's PATH.
+tasks.register("printDebugSigningInfo") {
+    doLast {
+        val keystoreFile = file("debug.keystore")
+        val ks = java.security.KeyStore.getInstance("JKS")
+        keystoreFile.inputStream().use { ks.load(it, "android".toCharArray()) }
+        val cert = ks.getCertificate("androiddebugkey")
+        fun fingerprint(algorithm: String): String {
+            val digestBytes = java.security.MessageDigest.getInstance(algorithm).digest(cert.encoded)
+            return digestBytes.joinToString(":") { String.format("%02X", it) }
+        }
+        println("==== ARIYAN debug keystore fingerprints (for Google Cloud OAuth client setup) ====")
+        println("Package name: com.ariyan.geoai")
+        println("SHA-1:   ${fingerprint("SHA-1")}")
+        println("SHA-256: ${fingerprint("SHA-256")}")
+        println("====================================================================================")
+    }
+}
+tasks.named("preBuild") {
+    dependsOn("printDebugSigningInfo")
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("com.google.android.gms:play-services-location:21.3.0")
