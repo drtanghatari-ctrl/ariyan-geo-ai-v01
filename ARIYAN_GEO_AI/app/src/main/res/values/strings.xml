@@ -18,9 +18,8 @@
     <string name="refresh_offline_status">Refresh status</string>
     <string name="download_offline_data">Download offline data</string>
     <string name="offline_download_notice">Downloads DEM tiles from the public Copernicus DEM bucket and Sentinel-2 NDVI composites from the public Earth Search STAC API — both free, no account needed. Already-downloaded tiles/cells are skipped automatically, so this can safely be stopped and resumed later.</string>
-    <string name="drive_backup_title">Google Drive Backup</string>
-    <string name="drive_backup_notice">This app\'s downloaded offline data does NOT survive an uninstall or a move to a new phone. Back it up to your own Google Drive so it does. Only files this app itself creates are ever shared — grant access once, then back up any downloaded country whenever you like.</string>
-    <string name="grant_drive_access">Grant Google Drive access</string>
-    <string name="backup_to_drive">Back up this country to Drive</string>
+    <string name="storage_access_title">Storage Access</string>
+    <string name="storage_access_notice">Downloaded country data is saved to your phone\'s real shared storage (not this app\'s private storage), so it survives an uninstall or a move to a new phone — no cloud backup needed. This requires a one-time permission: tap below, then enable the toggle on the settings screen that opens.</string>
+    <string name="grant_storage_access">Grant storage access</string>
     <string name="open_offline_data">Offline Country Data</string>
 </resources>
