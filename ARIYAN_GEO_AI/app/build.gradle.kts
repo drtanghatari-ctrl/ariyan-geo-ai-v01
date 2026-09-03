@@ -93,41 +93,6 @@ chaquopy {
     }
 }
 
-// ADDED THIS SESSION -- prints the debug keystore's SHA-1/SHA-256
-// certificate fingerprints to the build log on every CI run. Needed to
-// register an Android OAuth client (Google Cloud Console) for this app's
-// package name (com.ariyan.geoai) + this exact debug signing key, which
-// is what DriveBackupWorker.kt / OfflineDataActivity.kt's Google Drive
-// consent flow requires to get past a CommonStatusCodes.INTERNAL_ERROR
-// (status 8) on authorize(). Added here (not as a separate CI workflow
-// step in .github/workflows/build-apk.yml) because the GitHub connection
-// available in this session does not have the OAuth "workflow" scope
-// GitHub requires to edit files under .github/workflows/ via the API --
-// this Gradle-level hook achieves the same result without needing that
-// scope, since assembleDebug already depends on preBuild transitively.
-// Pure JDK APIs (java.security.KeyStore/MessageDigest) -- no new
-// dependency, no keytool binary assumed on the CI runner's PATH.
-tasks.register("printDebugSigningInfo") {
-    doLast {
-        val keystoreFile = file("debug.keystore")
-        val ks = java.security.KeyStore.getInstance("JKS")
-        keystoreFile.inputStream().use { ks.load(it, "android".toCharArray()) }
-        val cert = ks.getCertificate("androiddebugkey")
-        fun fingerprint(algorithm: String): String {
-            val digestBytes = java.security.MessageDigest.getInstance(algorithm).digest(cert.encoded)
-            return digestBytes.joinToString(":") { String.format("%02X", it) }
-        }
-        println("==== ARIYAN debug keystore fingerprints (for Google Cloud OAuth client setup) ====")
-        println("Package name: com.ariyan.geoai")
-        println("SHA-1:   ${fingerprint("SHA-1")}")
-        println("SHA-256: ${fingerprint("SHA-256")}")
-        println("====================================================================================")
-    }
-}
-tasks.named("preBuild") {
-    dependsOn("printDebugSigningInfo")
-}
-
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("com.google.android.gms:play-services-location:21.3.0")
@@ -138,51 +103,21 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // Real-data-first design (this session): MainActivity.kt now saves the
-    // user's OpenTopography API key and Copernicus OAuth client ID/secret
+    // Real-data-first design: MainActivity.kt saves the user's
+    // OpenTopography API key and Copernicus OAuth client ID/secret
     // on-device (so real data can be attempted automatically, with no
     // manual toggle and no re-typing every session -- see MainActivity.kt's
     // class doc comment). Uses EncryptedSharedPreferences (MasterKey +
     // AES256_SIV/AES256_GCM), confirmed against Android's current official
-    // Security reference docs before adding this, same practice already
-    // established for the AuthorizationClient/Drive-consent shape below.
-    // HONEST NOTE: EncryptedSharedPreferences was marked @deprecated as of
+    // Security reference docs before adding this. HONEST NOTE:
+    // EncryptedSharedPreferences was marked @deprecated as of
     // security-crypto 1.1.0 (Google's stated long-term direction is Jetpack
     // DataStore + Tink instead) -- but the class itself is still present,
     // shipped, and functional in this stable 1.1.0 release; a full
-    // DataStore+Tink migration is a materially bigger, riskier change this
-    // session deliberately did not take on. Revisit if a future AGP/library
-    // bump ever actually removes the class, not preemptively.
+    // DataStore+Tink migration is a materially bigger, riskier change
+    // deliberately not taken on here. Revisit if a future AGP/library bump
+    // ever actually removes the class, not preemptively.
     implementation("androidx.security:security-crypto:1.1.0")
-
-    // Offline mode (DriveBackupWorker.kt): background download+backup jobs.
-    //
-    // NOT the latest work-runtime-ktx (2.11.2) -- a real CI run confirmed
-    // that version's AAR metadata requires Android Gradle plugin 8.6.0+,
-    // while this project is pinned to AGP 8.5.2 (see the `com.android.tools.build:gradle`
-    // classpath in the project-level build.gradle.kts). This turns out to
-    // be part of a broader, ongoing AndroidX-wide trend of newer library
-    // releases quietly raising their required AGP floor (androidx.core-ktx
-    // hit the exact same AGP-8.6.0 wall at its own 1.16.0 release, for
-    // example) -- rather than bump this whole Chaquopy-based project's AGP
-    // version to chase it (a much bigger, riskier, less-isolated change,
-    // against this project's established minimal-footprint discipline),
-    // pinned to 2.9.1 instead: an established, long-stable release that
-    // predates this AGP-floor trend, and whose API surface (CoroutineWorker,
-    // WorkerParameters, workDataOf, setProgressAsync) has been stable since
-    // long before 2.9.1 -- nothing DriveBackupWorker.kt uses is new enough
-    // to require a newer release. To be confirmed for real via this same
-    // CI build.
-    implementation("androidx.work:work-runtime-ktx:2.9.1")
-    // Offline mode (DriveBackupWorker.kt): current (non-deprecated)
-    // AuthorizationClient API for requesting the narrow drive.file scope
-    // and obtaining a Drive access token -- deliberately NOT the older,
-    // heavier GoogleSignInClient/GoogleApiClient (Google Sign-In for
-    // Android is deprecated). Version + API surface confirmed against
-    // Google's current official Android Identity documentation before
-    // adding this. Unlike work-runtime-ktx above, this version did NOT
-    // trigger an AGP-floor AAR metadata error in the same real CI run.
-    implementation("com.google.android.gms:play-services-auth:21.5.1")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
