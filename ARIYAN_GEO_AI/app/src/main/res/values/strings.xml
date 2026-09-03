@@ -6,11 +6,12 @@
     <string name="hint_grid">Grid size (cells/side)</string>
     <string name="run_investigation">Run Investigation</string>
     <string name="running">Running…</string>
-    <string name="synthetic_notice">SYNTHETIC DATA — this build has no live DEM source wired in yet. Every number below is computed on offline synthetic terrain, not a real location.</string>
-    <string name="use_real_dem">Use real OpenTopography DEM (needs network + API key)</string>
-    <string name="real_dem_notice">Requires your own free OpenTopography API key (opentopography.org). Stored only in memory for this session — not saved to disk. Uses your device\'s data connection.</string>
+    <string name="real_data_notice">Real data, always: a live fetch is attempted first. If no network is available, this automatically falls back to any offline data you\'ve pre-downloaded for this country (see Offline Country Data below). If neither is available, you\'ll see a clear error — never fabricated results.</string>
+    <string name="real_dem_notice">Requires your own free OpenTopography API key (opentopography.org). Saved securely on this device (encrypted) so you only enter it once — never sent anywhere except OpenTopography\'s own API.</string>
     <string name="hint_api_key">OpenTopography API key</string>
     <string name="hint_demtype">Dataset (e.g. SRTMGL1, COP30, NASADEM)</string>
+    <string name="ndvi_notice">Real NDVI (Copernicus), always: a live per-candidate check is attempted first; if that\'s unavailable for every candidate, this falls back to your offline Sentinel-2 composite for this country, if downloaded.</string>
+    <string name="real_ndvi_notice">Requires your own free Copernicus Data Space Ecosystem OAuth client ID/secret (dataspace.copernicus.eu). Saved securely on this device (encrypted) so you only enter it once. For each DEM candidate, fetches real NDVI mean/stdDev for a small core area at the point and a larger halo area around it; a core significantly below the halo indicates vegetation stress, a real documented signature of buried features.</string>
     <string name="offline_data_title">Offline Country Data</string>
     <string name="offline_data_notice">Download DEM + NDVI data for an entire country so investigations can run with no network access. This can take a long time (potentially hours) and use a large amount of mobile data — a Wi-Fi connection is strongly recommended.</string>
     <string name="hint_offline_country">Country</string>
