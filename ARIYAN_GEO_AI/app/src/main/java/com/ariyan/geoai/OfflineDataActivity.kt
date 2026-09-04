@@ -274,4 +274,99 @@ class OfflineDataActivity : AppCompatActivity() {
 
     // -- Chaquopy calls (must run off the main thread -- callers above already do) --
 
-    p
+    private fun listOfflineCountriesJson(): String {
+        val module = python.getModule("offline_download_runner")
+        return module.callAttr("list_offline_countries_json").toString()
+    }
+
+    private fun getOfflineCountrySummaryJson(iso: String): String {
+        val module = python.getModule("offline_download_runner")
+        return module.callAttr("get_offline_country_summary_json", offlineDataRoot, iso).toString()
+    }
+
+    private fun getOfflineDownloadStatusJson(iso: String): String {
+        val module = python.getModule("offline_download_runner")
+        return module.callAttr("get_offline_download_status_json", offlineDataRoot, iso).toString()
+    }
+
+    // -- Rendering (offline download) --
+
+    private fun renderCountrySummary(json: String) {
+        val record = JSONObject(json)
+        val name = record.optString("country_name", record.optString("country_iso", "?"))
+        val dem = record.optJSONObject("dem")
+        val ndvi = record.optJSONObject("ndvi")
+        val sb = StringBuilder()
+        sb.append(name).append(" -- already downloaded:\n")
+        sb.append("  DEM tiles: ").append(dem?.optInt("total", 0) ?: 0)
+        appendByStatus(sb, dem?.optJSONObject("by_status"))
+        sb.append("\n  NDVI cells: ").append(ndvi?.optInt("total", 0) ?: 0)
+        appendByStatus(sb, ndvi?.optJSONObject("by_status"))
+        binding.textCountrySummary.text = sb.toString()
+    }
+
+    private fun appendByStatus(sb: StringBuilder, byStatus: JSONObject?) {
+        if (byStatus == null || byStatus.length() == 0) return
+        sb.append("  (")
+        val keys = byStatus.keys()
+        val parts = mutableListOf<String>()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            parts.add("$k=${byStatus.optInt(k, 0)}")
+        }
+        sb.append(parts.joinToString(", ")).append(")")
+    }
+
+    private fun renderDownloadStatus(json: String) {
+        val status = JSONObject(json)
+        val phase = status.optString("phase", "?")
+        val done = status.optInt("done", 0)
+        val total = status.optInt("total", 0)
+        val detail = status.optString("detail", "")
+
+        if (total > 0) {
+            binding.progressBarOffline.max = total
+            binding.progressBarOffline.progress = done
+        }
+        binding.textDownloadStatus.text = if (total > 0) {
+            "$phase: $done / $total   $detail"
+        } else {
+            "$phase   $detail"
+        }
+    }
+
+    private fun renderDownloadSummary(json: String) {
+        val record = JSONObject(json)
+        val sb = StringBuilder()
+        sb.append("Download complete for ").append(record.optString("country_iso", "?")).append(":\n\n")
+        sb.append("DEM tiles: ").append(record.optInt("dem_total", 0)).append("\n")
+        appendByStatusBlock(sb, record.optJSONObject("dem_by_status"))
+        sb.append("\nNDVI cells: ").append(record.optInt("ndvi_total", 0)).append("\n")
+        appendByStatusBlock(sb, record.optJSONObject("ndvi_by_status"))
+        binding.textDownloadResult.text = sb.toString()
+    }
+
+    private fun appendByStatusBlock(sb: StringBuilder, byStatus: JSONObject?) {
+        if (byStatus == null) return
+        val keys = byStatus.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            sb.append("  ").append(k).append(": ").append(byStatus.optInt(k, 0)).append("\n")
+        }
+    }
+
+    private fun setDownloading(downloading: Boolean) {
+        binding.buttonDownload.isEnabled = !downloading && ExternalStorageAccess.isGranted(this)
+        binding.progressBarOffline.visibility = if (downloading) View.VISIBLE else View.GONE
+        if (downloading) {
+            binding.textDownloadStatus.text = "starting…"
+        }
+    }
+
+    private fun cleanErrorMessage(raw: String?): String {
+        if (raw.isNullOrBlank()) return "Unknown Python error"
+        return raw.substringBefore("\n\n").trim()
+    }
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+}
