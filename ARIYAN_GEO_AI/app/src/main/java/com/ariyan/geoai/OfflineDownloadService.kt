@@ -11,7 +11,6 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.chaquo.python.PyException
 import com.chaquo.python.Python
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -19,41 +18,23 @@ import kotlin.concurrent.thread
 /**
  * OfflineDownloadService — runs run_country_download_json() as a real
  * foreground service, independent of OfflineDataActivity's lifecycle.
+ * See earlier class doc history for the Doze/App-Standby rationale.
  *
- * WHY THIS EXISTS (2026-09-04): the download used to run inside
- * OfflineDataActivity's lifecycleScope on Dispatchers.Default. Fine for
- * a short call, but this download realistically takes hours. Once the
- * screen locks and the device goes idle, Doze/App Standby throttles and
- * eventually cuts network access for any process without a foreground-
- * service exemption. A real on-device Iran run showed exactly that
- * signature: DEM (ran early, screen mostly on) got ~45% through before
- * errors climbed; NDVI (started later) got 0/76 real successes -- every
- * attempt failed DNS resolution, even WITH offline_data_manager.py's own
- * retry-with-backoff already in place. Retries ride out brief real
- * blips; they cannot fix the OS deciding this process gets no network
- * at all for extended stretches. A foreground service is the actual fix
- * for that -- the Python-side retry logic is unchanged and remains
- * correct for genuine transient failures.
- *
- * Progress reporting is UNCHANGED: offline_download_runner.py already
- * writes offline_status.json after every tile/cell, and
- * OfflineDataActivity.kt already polls that file -- neither needed to
- * change. This service also refreshes its own notification text from
- * that same file as a convenience, not a requirement.
- *
- * HONEST GAP: on Android 15 (API 35), a dataSync foreground service has
- * a system runtime cap (~6h rolling window) before onTimeout() fires.
- * An 8+ hour whole-country run could still get interrupted by the OS,
- * just later and without the silent-100%-DNS-failure symptom. onTimeout
- * below is best-effort (updates the notification, does not attempt
- * graceful mid-tile cancellation of the download thread -- Kotlin
- * thread cancellation isn't cooperative any more than coroutine
- * cancellation was, so this isn't solved differently than before).
- * Real fallback if this happens: the per-country lock file +
- * already_present/composited resumability mean re-tapping Download
- * finishes whatever's left -- same honest recovery path
- * offline_download_runner.py's docstring already documents for a
- * killed process.
+ * DIAGNOSTIC WIDENING (2026-09-04, this session) -- a real on-device test
+ * showed NOTHING happening at all after tapping Download: no persistent
+ * notification, no progress, no visible crash dialog. The previous
+ * version of this file only caught PyException inside the download
+ * thread -- any OTHER failure (e.g. buildNotification()/startForeground()
+ * itself throwing, acquireWakeLock() throwing, Python.getInstance()
+ * throwing something that isn't a PyException) would fail completely
+ * silently: no broadcast, no log the user could see, nothing. The user
+ * has no working ADB path (Google's official platform-tools download is
+ * blocked by sanctions on their network), so logcat-based debugging is
+ * not available -- this version instead catches EVERYTHING, at every
+ * stage, and routes it through the SAME ACTION_DOWNLOAD_FAILED broadcast
+ * OfflineDataActivity.kt already displays in textDownloadResult. No new
+ * UI, no new permissions, no external tools needed to see what actually
+ * went wrong.
  */
 class OfflineDownloadService : Service() {
 
@@ -81,29 +62,54 @@ class OfflineDownloadService : Service() {
         val root = intent?.getStringExtra(EXTRA_OFFLINE_ROOT)
 
         if (iso == null || root == null) {
+            reportFailure("Service started without country/root extras -- this should not happen from the UI.")
             stopSelf(startId)
             return START_NOT_STICKY
         }
 
         if (!running.compareAndSet(false, true)) {
-            // Real guard is offline_download_runner.py's lock file; this
-            // just avoids spinning up a second thread pointlessly.
             stopSelf(startId)
             return START_NOT_STICKY
         }
 
-        startForeground(NOTIFICATION_ID, buildNotification("$iso — starting…"))
-        acquireWakeLock()
+        // WIDENED (this session): startForeground() and the wake lock
+        // used to run with no surrounding try/catch at all. If EITHER
+        // threw (e.g. a Samsung/OEM policy silently rejecting the
+        // foreground-service promotion, or a notification-channel
+        // issue), the Service would die here with zero visible signal
+        // to the user -- no crash dialog, no notification, nothing.
+        // Now any such failure is reported through the same error path
+        // as everything else.
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification("$iso — starting…"))
+            acquireWakeLock()
+        } catch (t: Throwable) {
+            Log.e("OfflineDownloadService", "startForeground/acquireWakeLock failed for $iso", t)
+            running.set(false)
+            reportFailure("Foreground-service start failed: ${t.javaClass.simpleName}: ${t.message}\n${t.stackTraceToString().take(1500)}")
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
 
         thread(name = "offline-download-$iso") {
             try {
                 val python = Python.getInstance()
                 val module = python.getModule("offline_download_runner")
                 val resultJson = module.callAttr("run_country_download_json", root, iso).toString()
-                broadcast(ACTION_DOWNLOAD_FINISHED) { putExtra(EXTRA_RESULT_JSON, resultJson) }
-            } catch (e: PyException) {
-                Log.e("OfflineDownloadService", "Download failed for $iso", e)
-                broadcast(ACTION_DOWNLOAD_FAILED) { putExtra(EXTRA_ERROR_MESSAGE, e.message ?: "Unknown error") }
+                sendBroadcast(Intent(ACTION_DOWNLOAD_FINISHED).apply {
+                    setPackage(packageName)
+                    putExtra(EXTRA_RESULT_JSON, resultJson)
+                })
+            } catch (t: Throwable) {
+                // WIDENED (this session): was `catch (e: PyException)` only.
+                // Catching Throwable here means a crash ANYWHERE in this
+                // block -- Python not yet initialized, a Chaquopy-internal
+                // error that isn't a PyException, an unexpected Kotlin
+                // exception -- is reported the same way, instead of
+                // silently killing this thread with the Service left
+                // running indefinitely with its notification stuck.
+                Log.e("OfflineDownloadService", "Download failed for $iso", t)
+                reportFailure("${t.javaClass.simpleName}: ${t.message}\n${t.stackTraceToString().take(1500)}")
             } finally {
                 running.set(false)
                 releaseWakeLock()
@@ -115,10 +121,21 @@ class OfflineDownloadService : Service() {
         return START_NOT_STICKY
     }
 
+    private fun reportFailure(message: String) {
+        try {
+            sendBroadcast(Intent(ACTION_DOWNLOAD_FAILED).apply {
+                setPackage(packageName)
+                putExtra(EXTRA_ERROR_MESSAGE, message)
+            })
+        } catch (t: Throwable) {
+            // Broadcasting itself should never realistically throw, but
+            // this is a last-resort diagnostic path -- never let the
+            // reporting mechanism itself crash silently.
+            Log.e("OfflineDownloadService", "Failed to broadcast failure", t)
+        }
+    }
+
     override fun onTimeout(startId: Int, fgsType: Int) {
-        // Android 15+ dataSync runtime-cap callback -- see class doc's
-        // HONEST GAP note. Best-effort notice only; the download thread
-        // is not force-stopped mid-tile.
         Log.w("OfflineDownloadService", "System-imposed foreground service timeout hit for startId=$startId")
     }
 
@@ -130,7 +147,7 @@ class OfflineDownloadService : Service() {
     private fun acquireWakeLock() {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ariyangeoai:offline-download")
-        wakeLock?.acquire(12 * 60 * 60 * 1000L)  // 12h safety cap -- always released explicitly on finish too
+        wakeLock?.acquire(12 * 60 * 60 * 1000L)
     }
 
     private fun releaseWakeLock() {
@@ -152,13 +169,9 @@ class OfflineDownloadService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("ARIYAN GEO AI — offline data")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_download)  // swap for a real app icon resource if you have one
+            .setSmallIcon(android.R.drawable.stat_sys_download)
             .setOngoing(true)
             .setContentIntent(openIntent)
             .build()
-    }
-
-    private fun broadcast(action: String, extras: Intent.() -> Unit) {
-        sendBroadcast(Intent(action).apply(extras))
     }
 }
