@@ -25,15 +25,15 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
 
-    <!-- Foreground-service redesign (2026-09-04) -- the offline download
+    <!-- Foreground service redesign (2026-09-04): the offline download
          now runs in OfflineDownloadService.kt, not directly inside
          OfflineDataActivity's own coroutine, so a real on-device run
-         survives the screen locking / the device going idle for hours
-         (Doze/App Standby otherwise cuts a plain background process's
-         network access entirely -- see that file's class doc for the
-         real on-device symptom this fixes: NDVI went 0/76, even with
+         survives the screen locking and the device going idle for hours.
+         Doze/App Standby otherwise cuts a plain background process's
+         network access entirely; see that file's class doc for the real
+         on-device symptom this fixes: NDVI went 0/76, even with
          offline_data_manager.py's own retry-with-backoff already in
-         place). FOREGROUND_SERVICE_DATA_SYNC is the Android 14+
+         place. FOREGROUND_SERVICE_DATA_SYNC is the Android 14+
          (API 34+) type declaration required alongside the service's own
          android:foregroundServiceType="dataSync" below. POST_NOTIFICATIONS
          is Android 13+ (API 33+), needed to actually show the progress
@@ -53,3 +53,30 @@
         android:theme="@style/Theme.AriyanGeoAi"
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".OfflineDataActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- Foreground service redesign (2026-09-04); see
+             OfflineDownloadService.kt's class doc. exported="false"
+             because it's only ever started from within this app
+             (OfflineDataActivity.kt), never by another app. -->
+        <service
+            android:name=".OfflineDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+
+</manifest>
