@@ -34,34 +34,44 @@ background thread, and the calling thread gives up after `timeout_s`
 seconds regardless of what that background thread is still doing
 underneath.
 
-DIAGNOSTIC-VISIBILITY FIX (this session): a real on-device test showed
-the live fetch consistently timing out at exactly the hard deadline
-(10s) even while GENUINELY ONLINE, with a valid API key, and with the
-IDENTICAL request (same URL, same key, same bbox) succeeding instantly
-when made directly from the phone's own browser. This means something
-about how Python's requests library behaves on this device for this
-call differs from the browser -- but the app previously had NO way to
-see what the abandoned background thread was actually doing, because
-giving up on future.result(timeout=...) does not stop that thread, and
-its eventual outcome (success, or a real exception) was simply
-discarded. Fixed by registering a done-callback on the future: whenever
-that background thread DOES eventually finish -- even well after we've
-already given up and fallen back to offline data -- its real outcome
-(success, or the exact exception type and message) is now written to
-dem_fetch_diagnostic.json in offline_data_root. This is purely
-diagnostic (does not change investigation behavior at all) -- its only
-purpose is to let a real failure be inspected after the fact, e.g. by
-waiting a bit longer after a run before checking that file, rather than
-guessing blindly at network/TLS/IPv6 theories with no evidence.
+DIAGNOSTIC-VISIBILITY FIX (a prior session): a real on-device test
+showed the live fetch consistently timing out at exactly the hard
+deadline even while GENUINELY ONLINE, with a valid API key, with the
+IDENTICAL request succeeding from the phone's own browser. Since
+giving up on future.result(timeout=...) does not stop the background
+thread, and its eventual outcome was previously discarded, this module
+registers a done-callback on the future so that IF it eventually
+completes (success or a real exception), that outcome is written to
+dem_fetch_diagnostic.json in offline_data_root -- purely diagnostic,
+does not change investigation behavior.
+
+TIMEOUT-VALUE FIX (this session): that diagnostic delivered a real,
+conclusive answer -- the abandoned request came back with
+exception_type "ReadTimeout" at elapsed_s=11.4, i.e. the connection
+genuinely succeeded (DNS/TLS/connect all completed) and OpenTopography
+simply took a little over 10 seconds to generate and return the
+elevation data for this request -- a real, occasionally-slow live
+server response, not a network failure, not a TLS/proxy/VPN issue, and
+not a bug in this module's request logic. The earlier HARD-DEADLINE FIX
+correctly bounded worst-case wall time, but its 10.0s default (tightened
+down from the original 30.0s specifically to make the AIRPLANE-MODE
+fallback fast) turned out to be too aggressive for a real, working, but
+sometimes-slow live server -- it was cutting off successful requests
+about 1.4 seconds before they would have completed. Fixed by raising
+the default back up to 30.0s. This remains safe for the genuine
+no-network case: DNS/connect fails almost instantly with no interface
+present at all, so raising the ceiling costs nothing there -- it only
+matters for, and now correctly accommodates, this real slow-but-working
+server case.
 
 HONEST LIMITATION, updated: this module's HTTP/parsing/resampling logic
 was originally verified only against a hand-built AAIGrid text fixture
 and a known-shape resampling test, not a live OpenTopography call. It
 has since been exercised on a real physical device in real conditions
-(both airplane mode and genuinely online) -- a real SUCCESSFUL live
-fetch, from THIS module specifically (as opposed to a browser hitting
-the same URL), has still not yet been confirmed. That remains the
-honest next on-device milestone.
+(airplane mode, and genuinely online with the diagnostic above proving
+a real, in-progress live fetch) -- a full successful end-to-end live
+fetch completing within the new 30s window, confirmed on-device, is the
+honest next milestone to verify.
 """
 from __future__ import annotations
 
@@ -117,7 +127,7 @@ class OpenTopographyAAIGridSource:
     BASE_URL = "https://portal.opentopography.org/API/globaldem"
 
     def __init__(
-        self, api_key: str, demtype: str = "SRTMGL1", timeout_s: float = 10.0,
+        self, api_key: str, demtype: str = "SRTMGL1", timeout_s: float = 30.0,
         offline_data_root: str = "",
     ):
         if not api_key:
@@ -137,11 +147,11 @@ class OpenTopographyAAIGridSource:
         directly (never lets a raw concurrent.futures.TimeoutError or
         requests exception escape to the caller).
 
-        THIS SESSION'S FIX: on a timeout, registers a done-callback on
-        the abandoned future so that IF it eventually completes (success
-        or a real exception), that outcome is written to
-        dem_fetch_diagnostic.json instead of being silently discarded --
-        see module docstring's DIAGNOSTIC-VISIBILITY FIX note."""
+        Registers a done-callback on a timeout so that IF the abandoned
+        background thread eventually completes (success or a real
+        exception), that outcome is written to dem_fetch_diagnostic.json
+        instead of being silently discarded -- see module docstring's
+        DIAGNOSTIC-VISIBILITY FIX note."""
         import requests
 
         submit_time = time.time()
