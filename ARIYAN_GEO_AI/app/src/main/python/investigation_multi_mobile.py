@@ -55,14 +55,14 @@ honestly with its own uncertainty range. Not yet fed into the AI Debate
 Engine from this file directly -- that happens in debate_mobile.py,
 called separately by MainActivity.kt.
 
-TOKEN-CACHING + PROGRESS-REPORTING FIX (this session): a real on-device
-airplane-mode test showed this module could appear to hang for several
-minutes with a multi-candidate grid, because the old NDVI loop fetched
-a brand-new OAuth token independently for every candidate (see
-ndvi_source_mobile.py's own docstring for the full explanation) with
-zero visible progress in the meantime. Fixed two ways: (1) the NDVI
-loop below now fetches ONE access token for the whole run and reuses it
-for every candidate; (2) this module now writes a small
+TOKEN-CACHING + PROGRESS-REPORTING FIX (a prior session): a real
+on-device airplane-mode test showed this module could appear to hang
+for several minutes with a multi-candidate grid, because the old NDVI
+loop fetched a brand-new OAuth token independently for every candidate
+(see ndvi_source_mobile.py's own docstring for the full explanation)
+with zero visible progress in the meantime. Fixed two ways: (1) the
+NDVI loop below fetches ONE access token for the whole run and reuses
+it for every candidate; (2) this module writes a small
 investigation_status.json into offline_data_root as it works (phase =
 "dem" / "ndvi" / "done", plus done/total counts for the NDVI loop),
 mirroring the exact JSON shape offline_data_manager.py already writes
@@ -70,6 +70,20 @@ for offline downloads. MainActivity.kt polls this file on a separate
 coroutine so "Running..." can show real progress instead of a silent
 spinner. Status writes are best-effort -- a failure to write progress
 must never fail the actual investigation.
+
+LIVE-DEM-FAILURE VISIBILITY FIX (this session): a real on-device test,
+run WHILE genuinely online with a valid OpenTopography API key entered,
+still resulted in offline DEM data being used -- meaning the live fetch
+was failing for some real reason even under conditions where it should
+have succeeded. Previously, if live_dem_error was set but the offline
+fallback succeeded, the specific reason live failed was discarded
+entirely -- the user had no way to see it, only that offline data had
+been used (see evidence_record.py's own notes field, which already
+said as much, but never said WHY). Fixed by appending a new limitations
+entry naming the real live_dem_error whenever offline DEM was used, so
+a genuinely-online failure like this is now diagnosable from the
+results screen itself rather than requiring another guess-and-check
+round.
 """
 from __future__ import annotations
 
@@ -184,13 +198,13 @@ def _real_ndvi_correlation_for_dem_candidates(
     (every candidate failed) to decide whether to try the offline
     fallback.
 
-    THIS SESSION'S FIX: fetches ONE OAuth access token up front for the
-    entire run (rather than every candidate fetching its own -- see this
-    module's and ndvi_source_mobile.py's docstrings). If that single
-    token fetch fails (e.g. no network at all, which is the realistic
-    on-device signature this was built to fix), every candidate is
-    marked failed immediately with that same real error message instead
-    of every candidate separately retrying and timing out. `progress_
+    Fetches ONE OAuth access token up front for the entire run (rather
+    than every candidate fetching its own -- see this module's and
+    ndvi_source_mobile.py's docstrings). If that single token fetch
+    fails (e.g. no network at all, which is the realistic on-device
+    signature this was built to fix), every candidate is marked failed
+    immediately with that same real error message instead of every
+    candidate separately retrying and timing out. `progress_
     callback(done, total)`, if given, is called after each candidate so
     the caller can report live progress."""
     correlated: list[CorrelatedCandidate] = []
@@ -369,19 +383,21 @@ def run_investigation_multi_json(
 
     DEM: real (OpenTopography) always attempted first via api_key; on
     failure, falls back to this device's offline DEM library. If both
-    fail, raises OpenTopographyFetchError naming both real reasons.
+    fail, raises OpenTopographyFetchError naming both real reasons. If
+    offline DEM was used, the real live-fetch error is now also
+    appended to the result's limitations (this session's fix) so a
+    genuinely-online failure is diagnosable from the results screen.
 
     NDVI: real (Copernicus Sentinel Hub Statistical API, per-DEM-candidate
     core/halo check) always attempted first via ndvi_client_id/secret,
-    using ONE shared access token for the whole run (this session's fix
-    -- see ndvi_source_mobile.py and this module's own docstrings). If
-    EVERY candidate's live check failed, falls back to this device's
-    offline Sentinel-2 composite (a full-AOI raster, independently
-    scanned and correlated against the DEM candidates -- can find NDVI
-    anomalies the per-candidate check couldn't). If that's also
-    unavailable, the honest per-candidate-failure results are kept and
-    DEM results are still returned -- an NDVI-side failure never blocks
-    the DEM investigation itself.
+    using ONE shared access token for the whole run. If EVERY
+    candidate's live check failed, falls back to this device's offline
+    Sentinel-2 composite (a full-AOI raster, independently scanned and
+    correlated against the DEM candidates -- can find NDVI anomalies the
+    per-candidate check couldn't). If that's also unavailable, the
+    honest per-candidate-failure results are kept and DEM results are
+    still returned -- an NDVI-side failure never blocks the DEM
+    investigation itself.
 
     GPR (optional, use_gpr=True): a single real manual pick (two-way
     travel time + soil preset) anchored at this investigation's
@@ -416,7 +432,10 @@ def run_investigation_multi_json(
             "No OpenTopography API key is configured yet -- enter your "
             "free key (opentopography.org) to enable live real DEM fetch."
         )
+
+    used_offline_dem = False
     if dem is None:
+        used_offline_dem = True
         try:
             dem = fetch_offline_dem(aoi, offline_data_root)
         except OfflineDataUnavailableError as offline_dem_error:
@@ -516,6 +535,15 @@ def run_investigation_multi_json(
         third_evidence=gpr_evidence,
         third_evidence_type="GPR",
     )
+
+    if used_offline_dem:
+        record.limitations.append(
+            f"This run used the offline DEM library, not a live fetch -- "
+            f"the live OpenTopography attempt failed with: {live_dem_error}. "
+            f"If you expected a live fetch to succeed (e.g. you have "
+            f"network and a valid API key), this real error message is the "
+            f"actual reason it didn't."
+        )
 
     if not used_offline_ndvi:
         record.limitations.append(
