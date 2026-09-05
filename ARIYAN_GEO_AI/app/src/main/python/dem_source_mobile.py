@@ -183,4 +183,88 @@ class OpenTopographyAAIGridSource:
                 )
             except requests.exceptions.Timeout:
                 raise OpenTopographyFetchError(
-                    f"OpenTopography request timed out after {self.
+                    f"OpenTopography request timed out after {self.timeout_s:.0f}s. "
+                    "Check your network connection and try again."
+                )
+            except requests.exceptions.ConnectionError as e:
+                raise OpenTopographyFetchError(
+                    f"Could not reach OpenTopography -- network error: {e}"
+                )
+        finally:
+            # Don't block app shutdown waiting on an abandoned, still-
+            # hung background thread -- it will be cleaned up by the
+            # process eventually; we simply stop waiting on its result.
+            # The done-callback above (if registered) still fires
+            # whenever that thread does eventually finish.
+            executor.shutdown(wait=False)
+
+    def fetch(self, aoi: AreaOfInterest) -> DEM:
+        params = {
+            "demtype": self.demtype,
+            "south": aoi.min_lat,
+            "north": aoi.max_lat,
+            "west": aoi.min_lon,
+            "east": aoi.max_lon,
+            "outputFormat": "AAIGrid",
+            "API_Key": self.api_key,
+        }
+        resp = self._get_with_hard_deadline(params)
+
+        if resp.status_code == 401:
+            raise OpenTopographyFetchError(
+                "OpenTopography rejected the API key (401 Unauthorized). "
+                "Check that it was typed correctly."
+            )
+        if resp.status_code == 429:
+            raise OpenTopographyFetchError(
+                "OpenTopography rate limit exceeded (429). Free API keys "
+                "are limited to a fixed number of requests per 24 hours."
+            )
+        if resp.status_code != 200:
+            snippet = (resp.text or "")[:300] or "(empty response body)"
+            raise OpenTopographyFetchError(
+                f"OpenTopography returned HTTP {resp.status_code}: {snippet}"
+            )
+
+        try:
+            grid = parse_ascii_grid(resp.text)
+        except AsciiGridParseError as e:
+            snippet = (resp.text or "")[:300]
+            raise OpenTopographyFetchError(
+                f"Could not parse OpenTopography's response as AAIGrid: {e}. "
+                f"Response started with: {snippet!r}"
+            )
+
+        if np.isnan(grid.values).any():
+            raise OpenTopographyFetchError(
+                "The returned elevation data contains NODATA cells inside "
+                "the requested area (commonly open ocean, or a location "
+                "outside this dataset's coverage). This location can't be "
+                "investigated with this dataset -- try a different demtype "
+                "or a nearby land location."
+            )
+
+        n = aoi.grid_size
+        if grid.nrows == n and grid.ncols == n:
+            elevation = grid.values
+            resample_note = "Native raster already matched the requested grid size; no resampling needed."
+        else:
+            elevation = resample_bilinear(grid.values, n, n)
+            resample_note = (
+                f"Native raster was {grid.nrows}x{grid.ncols}; resampled to "
+                f"{n}x{n} via bilinear interpolation to fit this pipeline's "
+                "square-grid convention."
+            )
+
+        return DEM(
+            aoi=aoi,
+            elevation_m=elevation,
+            source=f"OpenTopography:{self.demtype}",
+            synthetic=False,
+            resolution_m=RESOLUTION_BY_DEMTYPE_M.get(self.demtype, grid.cellsize * 111_320),
+            acquisition_date=None,
+            notes=(
+                "Live fetch from OpenTopography Global DEM API, AAIGrid "
+                f"format, decoded without GDAL/rasterio. {resample_note}"
+            ),
+        )
