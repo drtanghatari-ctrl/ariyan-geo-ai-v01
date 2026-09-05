@@ -9,9 +9,9 @@ Given a coordinate, this module answers two things:
      was that composite actually built (date window, scene count)?
 
 It does NOT download or composite anything -- that is the NDVI half of
-offline_data_manager.py (not yet written). This module only knows how to
-name/locate composite cells that have ALREADY been produced by that
-downloader, and how to read them.
+offline_data_manager.py. This module only knows how to name/locate
+composite cells that have ALREADY been produced by that downloader, and
+how to read them.
 
 CELL IDENTITY -- IMPORTANT, READ BEFORE CHANGING: unlike Copernicus DEM,
 Sentinel-2 does NOT get tiled by this app's own grid here. Real Sentinel-2
@@ -48,11 +48,37 @@ this module):
     this composite (0 is a valid, honest value -- means no cloud-free
     scene was found in the window for that cell).
 
+PER-CELL CACHING FIX (this session, found via real on-device testing --
+same root cause as offline_dem_store.py's identical fix, see that
+module's own docstring for the full explanation): _load_cell() re-read
+and re-parsed the same .npz file from disk on EVERY call, with no
+caching, and offline_evidence_fallback.py's fetch_offline_ndvi() calls
+BOTH get_offline_ndvi() and get_offline_ndvi_metadata() -- each
+independently calling _load_cell() -- for every one of up to 9,216 AOI
+grid points. Since a typical AOI is tiny compared to this module's 1x1
+degree cell, nearly all of those points land in the same one or two
+cells, meaning a single investigation could re-load the identical .npz
+file from disk roughly 18,000 times (2 loads x ~9,216 points) for data
+that never changes between calls. Fixed by caching each loaded cell
+dict in a module-level dict, keyed by absolute file path, so each cell
+is read from disk and parsed at most ONCE per app process.
+
+HONEST TRADEOFF, same as offline_dem_store.py: this cache is never
+invalidated by this module itself. clear_cell_cache() exists for the
+case of re-downloading the same country's same cell within one
+continuous app session, but is NOT YET wired up to be called
+automatically after a download completes -- an honest follow-up item,
+not done in this pass.
+
 TESTED: end-to-end in a local sandbox test against a hand-built synthetic
 .npz cell (see build_and_test_offline_ndvi_store.py), including a
 coordinate with a real value, a coordinate landing on a NaN (no-data)
 pixel, a coordinate outside the stored cell's actual bounds, and a
-missing-file (never-downloaded) case.
+missing-file (never-downloaded) case. The caching behavior added this
+session (same loaded cell dict reused across repeated calls for the
+same path) has been reasoned through but not yet re-run against that
+same sandbox fixture -- an honest gap to close alongside the on-device
+retest this fix is going out for.
 """
 
 from __future__ import annotations
@@ -62,6 +88,16 @@ import os
 from typing import Optional, Dict, Any
 
 import numpy as np
+
+_cell_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+
+def clear_cell_cache() -> None:
+    """Drops all cached, already-loaded NDVI cell dicts. Not yet called
+    automatically anywhere (see module docstring's PER-CELL CACHING FIX
+    note) -- available for OfflineDataActivity.kt / offline_data_manager.py
+    to call after a fresh download completes, once that wiring is added."""
+    _cell_cache.clear()
 
 
 def ndvi_cell_id_for(lat: float, lon: float) -> str:
@@ -95,10 +131,26 @@ def has_offline_ndvi(storage_folder: str, offline_data_root: str, lat: float, lo
 
 
 def _load_cell(path: str) -> Optional[Dict[str, Any]]:
+    """Loads and parses one .npz cell, or returns None if it doesn't
+    exist. THIS SESSION'S FIX: the result (including a genuine "doesn't
+    exist" None) is now cached per path in _cell_cache, so repeated
+    calls for the same cell -- the overwhelmingly common case within
+    one investigation's AOI grid -- reuse the already-parsed result
+    instead of re-reading the file from disk every time. Caching the
+    None case too (not just successful loads) matters here: a
+    genuinely-missing cell is looked up just as repeatedly as an
+    existing one, and os.path.isfile() + a failed open is itself real,
+    non-free disk I/O worth avoiding on every one of ~9,216 grid
+    points."""
+    if path in _cell_cache:
+        return _cell_cache[path]
+
     if not os.path.isfile(path):
+        _cell_cache[path] = None
         return None
+
     with np.load(path, allow_pickle=False) as npz:
-        return {
+        cell = {
             "ndvi": npz["ndvi"],
             "lat_min": float(npz["lat_min"]),
             "lat_max": float(npz["lat_max"]),
@@ -108,6 +160,8 @@ def _load_cell(path: str) -> Optional[Dict[str, Any]]:
             "window_end": str(npz["window_end"]),
             "n_scenes_used": int(npz["n_scenes_used"]),
         }
+    _cell_cache[path] = cell
+    return cell
 
 
 def get_offline_ndvi(storage_folder: str, offline_data_root: str, lat: float, lon: float) -> Optional[float]:
@@ -147,7 +201,13 @@ def get_offline_ndvi_metadata(storage_folder: str, offline_data_root: str, lat: 
     data-quality context to the user alongside the NDVI value itself --
     matches this project's existing practice (e.g. GPR depth ranges,
     debate engine's insufficient_data labeling) of never presenting a
-    derived number without also disclosing how solid it is."""
+    derived number without also disclosing how solid it is.
+
+    THIS SESSION'S FIX: shares the same per-path cache as
+    get_offline_ndvi() via _load_cell() -- calling both functions for
+    the same (lat, lon), as offline_evidence_fallback.py's
+    fetch_offline_ndvi() does for every AOI grid point, now costs one
+    disk read total for that cell, not two."""
     path = local_cell_path(storage_folder, offline_data_root, lat, lon)
     cell = _load_cell(path)
     if cell is None:
