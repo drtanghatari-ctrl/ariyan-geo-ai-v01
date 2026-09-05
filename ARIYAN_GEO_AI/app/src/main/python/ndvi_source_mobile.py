@@ -14,8 +14,9 @@ plain JSON object. No raster ever reaches the device. This is the same
 "push the heavy processing server-side, parse plain text/JSON on-device"
 pattern already used for DEM (OpenTopography's AAIGrid text format).
 
-Pure Python standard library only (urllib, json, math, datetime). No numpy,
-no rasterio, no requests library dependency.
+Pure Python standard library only (urllib, json, math, datetime) plus
+concurrent.futures (also stdlib) for the hard-deadline wrapper below. No
+numpy, no rasterio, no requests library dependency.
 
 CREDENTIALS REQUIRED (real account, like the existing OpenTopography key):
 A free Copernicus Data Space Ecosystem account + an OAuth2 "client
@@ -31,28 +32,26 @@ fetch_ndvi_core_halo_check never actually existed as working code, despite
 being described as built in prior session notes. This version replaces that
 with a real, complete implementation.
 
-TIMEOUT/TOKEN-CACHING FIX (this session): the original version of this file
-fetched a fresh OAuth access token independently inside EVERY call to
+TIMEOUT/TOKEN-CACHING FIX (a prior session): the original version of this
+file fetched a fresh OAuth access token independently inside EVERY call to
 _stats_for_bbox, and fetch_ndvi_core_halo_check called _stats_for_bbox TWICE
 per candidate (core + halo) -- meaning up to 4 separate network calls per
-DEM candidate, each with its own 30-second timeout. In a real on-device
-airplane-mode test, this made a multi-candidate investigation appear to
-hang for several minutes with zero on-screen indication of progress (it
-was not actually stuck -- it was genuinely still working through a slow
-real-network-failure path, one candidate at a time). Fixed two ways:
-(1) the default timeout is now 8 seconds instead of 30 -- long enough for
-a real slow connection, short enough that a truly absent connection fails
-fast; (2) fetch_ndvi_core_halo_check now fetches ONE access token and
-reuses it for both the core and halo stats calls, and
-investigation_multi_mobile.py's per-candidate loop now fetches ONE token
-for the entire run and passes it to every candidate, rather than every
-candidate (and every bbox within it) fetching its own. Worst case for a
-whole run with no network at all is now one ~8-second token-fetch
-failure, not (candidates x 4 x 30s).
+DEM candidate. Fixed by caching one token per investigation run and cutting
+the default timeout from 30s to 8s.
+
+HARD-DEADLINE FIX (this session, applied for the same real reason found in
+dem_source_mobile.py -- see that module's own docstring): urllib.request's
+`timeout=` parameter has the same underlying weakness as requests' --
+it does not reliably bound DNS resolution (socket.getaddrinfo()), which is
+a separate, unbounded OS-level call. _http_post below now runs the actual
+urlopen() call on a background thread and enforces a real wall-clock
+deadline via concurrent.futures, exactly like dem_source_mobile.py's fetch,
+regardless of which underlying phase is actually stuck.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import math
 import urllib.error
@@ -98,18 +97,43 @@ class NDVIFetchError(Exception):
     pattern -- never silently fall back to synthetic data."""
 
 
+def _urlopen_with_hard_deadline(req: urllib.request.Request, timeout: int):
+    """Runs urllib.request.urlopen() on a background thread and gives up
+    after `timeout` seconds of real wall-clock time, regardless of which
+    internal phase (DNS resolution, connect, TLS handshake, read) is
+    actually blocking -- see module docstring's HARD-DEADLINE FIX note.
+    Returns the raw response body as decoded text. Raises NDVIFetchError
+    directly for every failure mode (never lets a raw exception escape)."""
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        def _do_request():
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8")
+
+        future = executor.submit(_do_request)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise NDVIFetchError(
+                f"Timed out contacting {req.full_url} after {timeout}s "
+                "(no network, or an extremely slow/blocked connection)."
+            )
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise NDVIFetchError(f"HTTP {exc.code} from {req.full_url}: {body[:300]}") from exc
+        except urllib.error.URLError as exc:
+            raise NDVIFetchError(f"Network error contacting {req.full_url}: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise NDVIFetchError(f"Timed out contacting {req.full_url}") from exc
+    finally:
+        # Don't block waiting on an abandoned, still-hung background
+        # thread -- we simply stop waiting on its result.
+        executor.shutdown(wait=False)
+
+
 def _http_post(url: str, data: bytes, headers: dict, timeout: int) -> str:
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise NDVIFetchError(f"HTTP {exc.code} from {url}: {body[:300]}") from exc
-    except urllib.error.URLError as exc:
-        raise NDVIFetchError(f"Network error contacting {url}: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise NDVIFetchError(f"Timed out contacting {url}") from exc
+    return _urlopen_with_hard_deadline(req, timeout)
 
 
 def get_access_token(client_id: str, client_secret: str, timeout: int = 8) -> str:
@@ -170,10 +194,9 @@ def _stats_for_bbox(
     pooled real NDVI statistics across whatever cloud-free/water-masked
     pixel observations exist in the time range.
 
-    Takes an already-fetched `access_token` directly (this session's
-    fix -- see module docstring) rather than client_id/client_secret, so
-    the caller controls exactly how many times a token is fetched per run
-    instead of this function silently fetching its own every call.
+    Takes an already-fetched `access_token` directly (see module docstring
+    -- one token is fetched per run, not per bbox) rather than
+    client_id/client_secret.
 
     Returns a dict: {"mean": float, "stddev": float, "sample_count": int,
     "n_intervals_with_data": int}.
@@ -289,8 +312,8 @@ def fetch_ndvi_stats(
     area around a point, expressed as an equivalent bbox. Used for the
     simple single-AOI path (not the per-candidate core/halo check below).
 
-    Pass `access_token` if the caller already has one for this run (this
-    session's fix) to skip fetching a fresh one here."""
+    Pass `access_token` if the caller already has one for this run to
+    skip fetching a fresh one here."""
     bbox = _bbox_from_point(lat, lon, radius_m)
     token = access_token or get_access_token(client_id, client_secret, timeout=timeout)
     return _stats_for_bbox(bbox, token, timeout=timeout)
@@ -315,9 +338,7 @@ def fetch_ndvi_core_halo_check(
     annulus subtraction, since the Statistics API operates on bboxes).
 
     Fetches (or reuses, if `access_token` is passed in) exactly ONE token
-    for both the core and halo bbox calls -- previously this fetched two
-    independent tokens, one per bbox (see module docstring's TIMEOUT/
-    TOKEN-CACHING FIX note).
+    for both the core and halo bbox calls.
 
     Flags vegetation_stress_detected=True when the core mean NDVI is
     significantly below the halo mean NDVI (z-score computed against the
