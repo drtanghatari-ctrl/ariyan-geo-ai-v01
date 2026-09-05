@@ -17,9 +17,12 @@ import com.chaquo.python.Kwarg
 import com.chaquo.python.PyException
 import com.chaquo.python.Python
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 
 
 /**
@@ -32,7 +35,7 @@ import org.json.JSONObject
  * depending on the "Include NDVI correlation" switch, and renders the
  * returned evidence record.
  *
- * REAL-DATA-FIRST REDESIGN (this session) -- SYNTHETIC MODE REMOVED
+ * REAL-DATA-FIRST REDESIGN (a prior session) -- SYNTHETIC MODE REMOVED
  * ENTIRELY. Previously this Activity had switchRealDem/switchRealNdvi
  * toggles, both defaulting OFF, meaning the actual default investigation
  * used SyntheticDEMSource / SyntheticNDVISource -- fabricated terrain --
@@ -64,13 +67,10 @@ import org.json.JSONObject
  *    instead. If neither is available, the DEM results are still
  *    returned -- an NDVI-side failure never blocks the DEM investigation.
  *  - CREDENTIALS ARE NOW SAVED, not memory-only: SecureCredentialStore.kt
- *    (new this session) persists the OpenTopography API key, DEM
- *    dataset type, and Copernicus client ID/secret in an on-device
- *    EncryptedSharedPreferences store, loaded back into the input
- *    fields in onCreate() and re-saved every time "Run Investigation"
- *    is tapped. This is the piece that makes "real data always
- *    attempted, no manual toggle" actually usable day to day -- without
- *    it, the user would be back to retyping credentials every session.
+ *    persists the OpenTopography API key, DEM dataset type, and
+ *    Copernicus client ID/secret in an on-device EncryptedSharedPreferences
+ *    store, loaded back into the input fields in onCreate() and re-saved
+ *    every time "Run Investigation" is tapped.
  *
  * Optional GPR field pick (opt-in via switchGpr): a single real manual
  * pick -- a two-way radar travel time a human has read directly off a
@@ -100,7 +100,20 @@ import org.json.JSONObject
  * the investigation results themselves -- it is caught and simply omits
  * the debate section.
  *
- * HONEST STATE (updated -- keep this note truthful, don't just delete it):
+ * LIVE PROGRESS REPORTING (this session): a real on-device airplane-mode
+ * test showed a multi-candidate NDVI-correlation run could take several
+ * minutes with zero on-screen indication of what was happening -- not
+ * actually stuck, just genuinely slow, but indistinguishable from a
+ * hang. investigation_multi_mobile.py now writes a small
+ * investigation_status.json into offlineDataRoot as it works (see that
+ * file's own docstring). This Activity now polls that file on a
+ * separate coroutine (pollInvestigationProgress below) while the real
+ * investigation coroutine runs, updating the "Running..." label with
+ * real progress (e.g. "NDVI check 3 of 7") instead of a silent spinner.
+ * This is purely a UI change -- it does not alter what the investigation
+ * does or how it decides live-vs-offline fallback.
+ *
+ * HONEST STATE (keep this note truthful, don't just delete it):
  * debate_engine.py (rule-based, offline, four perspectives: Geomorphology,
  * Anthropogenic/Archaeological, Data Artifact/Skeptic, Vegetation/
  * Agronomic) and debate_mobile.py (the JSON-string wrapper this Activity
@@ -110,14 +123,9 @@ import org.json.JSONObject
  * correctly landed on CONTESTED for a genuinely ambiguous candidate).
  * insufficient-data positions render explicitly labeled "[insufficient
  * data]" rather than being silently omitted. GPR manual-pick entry has
- * been CONFIRMED WORKING ON-DEVICE as a third evidence source. THIS
- * SESSION'S CHANGES (real-data-first, credential persistence, offline
- * fallback wiring) have NOT yet been run on an actual device -- that
- * on-device confirmation is the honest next step once this build
- * compiles clean, same practice as every other real piece of this
- * project. There is no automatic GPR device-export parsing in this
- * build (manual pick entry only -- see gpr_source_mobile.py's own
- * honest-state docstring).
+ * been CONFIRMED WORKING ON-DEVICE as a third evidence source. There is
+ * no automatic GPR device-export parsing in this build (manual pick
+ * entry only -- see gpr_source_mobile.py's own honest-state docstring).
  *
  * OFFLINE-DATA NAV BUTTON: buttonOfflineData launches OfflineDataActivity
  * via a plain Intent -- pure navigation, unchanged this session.
@@ -133,7 +141,9 @@ class MainActivity : AppCompatActivity() {
     // DEM/NDVI data -- the exact same path OfflineDataActivity.kt already
     // uses (filesDir/offline_data), so the live-fetch-fails fallback in
     // investigation_mobile.py / investigation_multi_mobile.py reads from
-    // whatever OfflineDataActivity has actually downloaded there.
+    // whatever OfflineDataActivity has actually downloaded there. Also the
+    // location investigation_multi_mobile.py now writes
+    // investigation_status.json to (see class doc comment above).
     private val offlineDataRoot: String by lazy { ExternalStorageAccess.offlineDataRoot().absolutePath }
     private val locationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -261,6 +271,24 @@ class MainActivity : AppCompatActivity() {
 
         setRunning(true)
 
+        // LIVE PROGRESS REPORTING (this session, see class doc comment):
+        // investigation_multi_mobile.py writes investigation_status.json
+        // into offlineDataRoot as it works. Clear any stale status left
+        // over from a previous run, then poll it on a separate coroutine
+        // while the real investigation runs on its own coroutine below --
+        // cancelled in that coroutine's finally block once the run ends.
+        val statusFile = File(offlineDataRoot, "investigation_status.json")
+        statusFile.delete()
+        val progressJob = lifecycleScope.launch {
+            while (isActive) {
+                delay(750)
+                val text = readInvestigationProgressText(statusFile)
+                if (text != null) {
+                    binding.textConfidence.text = text
+                }
+            }
+        }
+
         lifecycleScope.launch {
             try {
                 val json = withContext(Dispatchers.Default) {
@@ -296,10 +324,34 @@ class MainActivity : AppCompatActivity() {
                 binding.textConfidence.text = "Investigation failed"
                 binding.textResults.text = cleanErrorMessage(e.message)
             } finally {
+                progressJob.cancel()
                 setRunning(false)
             }
         }
     }
+
+    /** Reads investigation_status.json (best-effort -- returns null on any
+     * missing/malformed file, e.g. before Python has written it yet, or
+     * on a permission/IO failure) and turns it into a short human-
+     * readable progress string for the "Running..." label. Mirrors the
+     * JSON shape investigation_multi_mobile.py's
+     * _write_investigation_status() writes: {"phase", "done", "total",
+     * "detail"}. */
+    private fun readInvestigationProgressText(file: File): String? {
+        if (!file.exists()) return null
+        return try {
+            val obj = JSONObject(file.readText())
+            when (obj.optString("phase", "")) {
+                "dem" -> "Running… fetching elevation data"
+                "ndvi" -> "Running… NDVI check ${obj.optInt("done", 0)} of ${obj.optInt("total", 0)}"
+                "done" -> "Running… finishing up"
+                else -> "Running…"
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun onUseLocationClicked() {
         val hasPermission = ContextCompat.checkSelfPermission(
             this, Manifest.permission.ACCESS_FINE_LOCATION
