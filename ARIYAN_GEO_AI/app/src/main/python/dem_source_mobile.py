@@ -23,16 +23,44 @@ it as a DEM, so the rest of the pipeline's square-grid assumption
 holds. That resampling step is stated in the returned DEM's notes
 field, not hidden in a JSON corner.
 
-HONEST LIMITATION, stated here rather than only in a comment: this
-module's HTTP/parsing/resampling logic is verified against a
-hand-built AAIGrid text fixture and a known-shape resampling test
-(see tests/test_dem_source_mobile.py) -- not against a live
-OpenTopography call, because the sandbox this was built in has no
-outbound network access. It has NOT yet been run against a real
-API key over a real network connection. See verify_real_dem.py for a
-small script to do exactly that once you have both.
+HARD-DEADLINE FIX (this session, found via real on-device airplane-mode
+testing): the original version of this file passed timeout=30.0 to
+requests.get() and assumed that bounded the whole call. On a real
+device in real airplane mode, the fetch instead sat for 5+ minutes
+with zero progress. Root cause: Python's requests/urllib3 `timeout`
+parameter bounds the socket connect and read phases, but does NOT
+reliably bound DNS resolution (socket.getaddrinfo()), which is a
+separate, unbounded blocking OS-level call made before that timeout
+starts counting -- a real, documented gotcha, not specific to this
+app. Depending on how the Android network stack behaves when there is
+genuinely no interface available, that resolution step can hang far
+longer than the requests timeout would suggest. Fixed by wrapping the
+actual network call in a real, thread-based hard deadline
+(concurrent.futures): the call runs on a background thread, and the
+calling thread gives up after `timeout_s` seconds regardless of what
+that background thread is still doing underneath -- this bounds
+wall-clock time no matter which phase (DNS, connect, TLS, read) is the
+one actually stuck. The background thread may still be running after
+we give up on it; it is simply abandoned and its eventual result (if
+any) discarded, which is the standard accepted trade-off for making an
+otherwise-unkillable blocking call time-bounded from the caller's side.
+Default timeout_s also reduced from 30.0 to 10.0, since a real fallback
+path (this device's offline DEM library) exists and a failed live fetch
+should hand off to it quickly rather than making the user wait.
+
+HONEST LIMITATION, updated: this module's HTTP/parsing/resampling logic
+was originally verified only against a hand-built AAIGrid text fixture
+and a known-shape resampling test (see tests/test_dem_source_mobile.py),
+not a live OpenTopography call, because the sandbox this was built in
+had no outbound network access. It has now been exercised on a real
+physical device in real airplane mode (confirming the hang described
+above) -- but a real SUCCESSFUL live fetch, with actual network and a
+real API key, still has not yet been confirmed. That remains the
+honest next on-device test once this fix is installed.
 """
 from __future__ import annotations
+
+import concurrent.futures
 
 import numpy as np
 
@@ -63,16 +91,53 @@ class OpenTopographyAAIGridSource:
 
     BASE_URL = "https://portal.opentopography.org/API/globaldem"
 
-    def __init__(self, api_key: str, demtype: str = "SRTMGL1", timeout_s: float = 30.0):
+    def __init__(self, api_key: str, demtype: str = "SRTMGL1", timeout_s: float = 10.0):
         if not api_key:
             raise ValueError("OpenTopography requires an API key")
         self.api_key = api_key
         self.demtype = demtype
         self.timeout_s = timeout_s
 
-    def fetch(self, aoi: AreaOfInterest) -> DEM:
+    def _get_with_hard_deadline(self, params: dict):
+        """Runs requests.get() on a background thread and gives up after
+        self.timeout_s seconds of real wall-clock time, regardless of
+        which internal phase (DNS resolution, connect, TLS handshake,
+        read) is actually blocking -- see module docstring's HARD-
+        DEADLINE FIX note for why requests' own `timeout=` parameter
+        alone isn't trustworthy for this. Raises OpenTopographyFetchError
+        directly (never lets a raw concurrent.futures.TimeoutError or
+        requests exception escape to the caller)."""
         import requests
 
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(
+                requests.get, self.BASE_URL, params=params, timeout=self.timeout_s
+            )
+            try:
+                return future.result(timeout=self.timeout_s)
+            except concurrent.futures.TimeoutError:
+                raise OpenTopographyFetchError(
+                    f"OpenTopography did not respond within {self.timeout_s:.0f}s "
+                    "(no network, or an extremely slow/blocked connection). "
+                    "Falling back to this device's offline DEM library."
+                )
+            except requests.exceptions.Timeout:
+                raise OpenTopographyFetchError(
+                    f"OpenTopography request timed out after {self.timeout_s:.0f}s. "
+                    "Check your network connection and try again."
+                )
+            except requests.exceptions.ConnectionError as e:
+                raise OpenTopographyFetchError(
+                    f"Could not reach OpenTopography -- network error: {e}"
+                )
+        finally:
+            # Don't block app shutdown waiting on an abandoned, still-
+            # hung background thread -- it will be cleaned up by the
+            # process eventually; we simply stop waiting on its result.
+            executor.shutdown(wait=False)
+
+    def fetch(self, aoi: AreaOfInterest) -> DEM:
         params = {
             "demtype": self.demtype,
             "south": aoi.min_lat,
@@ -82,17 +147,7 @@ class OpenTopographyAAIGridSource:
             "outputFormat": "AAIGrid",
             "API_Key": self.api_key,
         }
-        try:
-            resp = requests.get(self.BASE_URL, params=params, timeout=self.timeout_s)
-        except requests.exceptions.Timeout:
-            raise OpenTopographyFetchError(
-                f"OpenTopography request timed out after {self.timeout_s:.0f}s. "
-                "Check your network connection and try again."
-            )
-        except requests.exceptions.ConnectionError as e:
-            raise OpenTopographyFetchError(
-                f"Could not reach OpenTopography -- network error: {e}"
-            )
+        resp = self._get_with_hard_deadline(params)
 
         if resp.status_code == 401:
             raise OpenTopographyFetchError(
