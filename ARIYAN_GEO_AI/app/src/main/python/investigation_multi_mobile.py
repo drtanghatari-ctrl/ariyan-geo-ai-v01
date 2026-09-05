@@ -8,7 +8,7 @@ scipy, no file I/O) but runs BOTH an elevation (DEM) and a vegetation
 correlation.py to produce CORROBORATED / SINGLE_SOURCE status per
 candidate.
 
-REWRITTEN THIS SESSION -- SYNTHETIC PATH REMOVED ENTIRELY, BOTH DEM AND
+REWRITTEN A PRIOR SESSION -- SYNTHETIC PATH REMOVED ENTIRELY, BOTH DEM AND
 NDVI. Previously, DEM had a use_real_dem switch (default False,
 SyntheticDEMSource) and NDVI was ALWAYS SyntheticNDVISource unless a
 SEPARATE use_real_ndvi switch was also flipped on -- meaning by default
@@ -31,32 +31,50 @@ every DEM candidate -- no toggle, and no separate use_real_ndvi switch
 anymore. Each candidate's fetch is independently try/excepted (as
 before): a per-candidate failure (or missing Copernicus credentials)
 never fails the whole run, it's recorded honestly as SINGLE_SOURCE with
-the real reason. NEW THIS SESSION: if EVERY candidate's live check
-failed (the realistic signature of "no network at all" or "credentials
-never configured", as opposed to one flaky candidate), this module now
-automatically retries NDVI correlation using
-offline_evidence_fallback.fetch_offline_ndvi() -- a full-AOI raster
-sampled from this device's own previously-downloaded Sentinel-2
-composite, run through the SAME independent full-grid detect_raster_
-anomalies() + correlate_anomalies() pipeline the old synthetic-NDVI
-path used structurally (this can therefore find an NDVI anomaly DEM
-missed, which the live per-candidate check never could -- a genuine,
-if coarser-resolution, capability gain, not just a fallback). If that
-ALSO isn't available, the original honest per-candidate-failure results
-are kept (DEM results are never discarded because NDVI failed) with a
-clear limitations note explaining neither NDVI path worked this time.
+the real reason. If EVERY candidate's live check failed (the realistic
+signature of "no network at all" or "credentials never configured", as
+opposed to one flaky candidate), this module automatically retries NDVI
+correlation using offline_evidence_fallback.fetch_offline_ndvi() -- a
+full-AOI raster sampled from this device's own previously-downloaded
+Sentinel-2 composite, run through the SAME independent full-grid
+detect_raster_anomalies() + correlate_anomalies() pipeline the old
+synthetic-NDVI path used structurally (this can therefore find an NDVI
+anomaly DEM missed, which the live per-candidate check never could -- a
+genuine, if coarser-resolution, capability gain, not just a fallback).
+If that ALSO isn't available, the original honest per-candidate-failure
+results are kept (DEM results are never discarded because NDVI failed)
+with a clear limitations note explaining neither NDVI path worked this
+time.
 
-GPR (roadmap item 4, unchanged this session): when use_gpr=True, a
-single real GPR manual pick (a human-read two-way travel time + chosen
-soil preset, see gpr_source_mobile.py) anchored at this investigation's
-(lat, lon) is converted into a depth estimate and attached as a THIRD,
-independent evidence entry (evidence_record.py's third_evidence slot),
-reported honestly with its own uncertainty range. Not yet fed into the
-AI Debate Engine from this file directly -- that happens in
-debate_mobile.py, called separately by MainActivity.kt.
+GPR (roadmap item 4, unchanged): when use_gpr=True, a single real GPR
+manual pick (a human-read two-way travel time + chosen soil preset, see
+gpr_source_mobile.py) anchored at this investigation's (lat, lon) is
+converted into a depth estimate and attached as a THIRD, independent
+evidence entry (evidence_record.py's third_evidence slot), reported
+honestly with its own uncertainty range. Not yet fed into the AI Debate
+Engine from this file directly -- that happens in debate_mobile.py,
+called separately by MainActivity.kt.
+
+TOKEN-CACHING + PROGRESS-REPORTING FIX (this session): a real on-device
+airplane-mode test showed this module could appear to hang for several
+minutes with a multi-candidate grid, because the old NDVI loop fetched
+a brand-new OAuth token independently for every candidate (see
+ndvi_source_mobile.py's own docstring for the full explanation) with
+zero visible progress in the meantime. Fixed two ways: (1) the NDVI
+loop below now fetches ONE access token for the whole run and reuses it
+for every candidate; (2) this module now writes a small
+investigation_status.json into offline_data_root as it works (phase =
+"dem" / "ndvi" / "done", plus done/total counts for the NDVI loop),
+mirroring the exact JSON shape offline_data_manager.py already writes
+for offline downloads. MainActivity.kt polls this file on a separate
+coroutine so "Running..." can show real progress instead of a silent
+spinner. Status writes are best-effort -- a failure to write progress
+must never fail the actual investigation.
 """
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 
 from coordinate import GeoPoint, build_aoi
@@ -69,6 +87,22 @@ from gpr_source_mobile import GPRSurvey, GPRPick, estimate_depths, GPREvidence
 from gpr_depth_model import GPRDepthModelError
 from dem_source_mobile import OpenTopographyAAIGridSource, OpenTopographyFetchError
 from offline_evidence_fallback import fetch_offline_dem, fetch_offline_ndvi, OfflineDataUnavailableError
+
+
+def _write_investigation_status(
+    offline_data_root: str, phase: str, done: int, total: int, detail: str = ""
+) -> None:
+    """Best-effort progress status write, polled by MainActivity.kt while
+    a run is in progress -- mirrors the existing offline_status.json
+    pattern already proven for OfflineDataActivity.kt's downloads. Never
+    raises: a failure to write progress (e.g. storage permission not
+    granted) must never fail the actual investigation."""
+    try:
+        path = os.path.join(offline_data_root, "investigation_status.json")
+        with open(path, "w") as f:
+            json.dump({"phase": phase, "done": done, "total": total, "detail": detail}, f)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -132,6 +166,8 @@ def _real_ndvi_correlation_for_dem_candidates(
     client_id: str,
     client_secret: str,
     stress_zscore_threshold: float = 1.5,
+    timeout: float = 8.0,
+    progress_callback=None,
 ) -> tuple[list, list]:
     """For each DEM candidate, run a real Copernicus NDVI core/halo check
     anchored at that candidate's location. Returns
@@ -140,26 +176,52 @@ def _real_ndvi_correlation_for_dem_candidates(
     SINGLE_SOURCE), ndvi_results is a list[NdviCoreHaloResult] (including
     failed/unavailable fetches, recorded honestly rather than dropped).
 
-    Missing client_id/client_secret is now treated exactly like a fetch
+    Missing client_id/client_secret is treated exactly like a fetch
     failure -- every candidate gets an honest "credentials not
-    configured" note -- rather than raising, since real data is now
-    ALWAYS attempted first and the caller (run_investigation_multi_json)
-    needs a uniform way to detect "live NDVI totally unavailable this
-    run" (every candidate failed) to decide whether to try the offline
-    fallback."""
+    configured" note -- rather than raising, since real data is always
+    attempted first and the caller (run_investigation_multi_json) needs
+    a uniform way to detect "live NDVI totally unavailable this run"
+    (every candidate failed) to decide whether to try the offline
+    fallback.
+
+    THIS SESSION'S FIX: fetches ONE OAuth access token up front for the
+    entire run (rather than every candidate fetching its own -- see this
+    module's and ndvi_source_mobile.py's docstrings). If that single
+    token fetch fails (e.g. no network at all, which is the realistic
+    on-device signature this was built to fix), every candidate is
+    marked failed immediately with that same real error message instead
+    of every candidate separately retrying and timing out. `progress_
+    callback(done, total)`, if given, is called after each candidate so
+    the caller can report live progress."""
     correlated: list[CorrelatedCandidate] = []
     ndvi_results: list[NdviCoreHaloResult] = []
+    total = len(dem_candidates)
 
     creds_missing_message = None
+    token = None
+    token_error_message = None
+
     if not client_id or not client_secret:
         creds_missing_message = (
             "Copernicus OAuth client ID/secret not configured yet -- enter "
             "your free client credentials (dataspace.copernicus.eu) to "
             "enable live real per-candidate NDVI checks."
         )
+    else:
+        try:
+            token = ndvi_source_mobile.get_access_token(client_id, client_secret, timeout=timeout)
+        except NDVIFetchError as exc:
+            token_error_message = (
+                f"Could not obtain a Copernicus access token: {exc}. This "
+                f"usually means no network connection is available right "
+                f"now, or the credentials are invalid. Checked once for "
+                f"this entire run rather than retried per candidate."
+            )
 
-    for dem_candidate in dem_candidates:
-        error_message = creds_missing_message
+    shared_error_message = creds_missing_message or token_error_message
+
+    for i, dem_candidate in enumerate(dem_candidates):
+        error_message = shared_error_message
         check = None
         if error_message is None:
             try:
@@ -167,6 +229,8 @@ def _real_ndvi_correlation_for_dem_candidates(
                     dem_candidate.lat, dem_candidate.lon,
                     client_id, client_secret,
                     stress_zscore_threshold=stress_zscore_threshold,
+                    timeout=timeout,
+                    access_token=token,
                 )
             except NDVIFetchError as exc:
                 error_message = str(exc)
@@ -224,6 +288,9 @@ def _real_ndvi_correlation_for_dem_candidates(
             distance_between_peaks_m=0.0,
             combined_confidence_note=note,
         ))
+
+        if progress_callback is not None:
+            progress_callback(i + 1, total)
 
     correlated.sort(key=lambda r: (r.status != "CORROBORATED", -len(r.supporting_sources)))
     return correlated, ndvi_results
@@ -287,6 +354,7 @@ def run_investigation_multi_json(
     demtype: str = "SRTMGL1",
     ndvi_client_id: str = "",
     ndvi_client_secret: str = "",
+    ndvi_timeout_s: float = 8.0,
     offline_data_root: str = "",
     use_gpr: bool = False,
     gpr_soil_preset_key: str | None = None,
@@ -304,8 +372,10 @@ def run_investigation_multi_json(
     fail, raises OpenTopographyFetchError naming both real reasons.
 
     NDVI: real (Copernicus Sentinel Hub Statistical API, per-DEM-candidate
-    core/halo check) always attempted first via ndvi_client_id/secret.
-    If EVERY candidate's live check failed, falls back to this device's
+    core/halo check) always attempted first via ndvi_client_id/secret,
+    using ONE shared access token for the whole run (this session's fix
+    -- see ndvi_source_mobile.py and this module's own docstrings). If
+    EVERY candidate's live check failed, falls back to this device's
     offline Sentinel-2 composite (a full-AOI raster, independently
     scanned and correlated against the DEM candidates -- can find NDVI
     anomalies the per-candidate check couldn't). If that's also
@@ -318,12 +388,18 @@ def run_investigation_multi_json(
     (lat, lon), attached as a third, independent evidence entry. All
     gpr_* parameters default to off/empty.
 
+    Writes investigation_status.json into offline_data_root as it works
+    (phase "dem" / "ndvi" / "done"), polled by MainActivity.kt for live
+    progress display. Best-effort -- never raises on its own.
+
     Raises ValueError if use_gpr=True without both gpr_soil_preset_key
     and gpr_two_way_time_ns. Raises OpenTopographyFetchError if DEM is
     unavailable both live and offline (see above) -- this is the only
     hard failure; every NDVI-side and GPR-side failure degrades
     gracefully with an honest limitations[] entry instead.
     """
+    _write_investigation_status(offline_data_root, "dem", 0, 1)
+
     center = GeoPoint(lat, lon)
     aoi = build_aoi(center, radius_m=radius_m, grid_size=grid_size)
 
@@ -363,8 +439,15 @@ def run_investigation_multi_json(
     )
 
     # --- NDVI: real per-candidate check first, offline full-raster fallback if that totally failed ---
+    _write_investigation_status(offline_data_root, "ndvi", 0, max(1, len(dem_candidates)))
+
+    def _report_ndvi_progress(done: int, total: int) -> None:
+        _write_investigation_status(offline_data_root, "ndvi", done, total)
+
     correlation_results, ndvi_results = _real_ndvi_correlation_for_dem_candidates(
         dem_candidates, ndvi_client_id, ndvi_client_secret,
+        timeout=ndvi_timeout_s,
+        progress_callback=_report_ndvi_progress,
     )
     n_errors = sum(1 for r in ndvi_results if r.error is not None)
 
@@ -451,4 +534,7 @@ def run_investigation_multi_json(
         record.limitations.append(note)
     if gpr_limitation:
         record.limitations.append(gpr_limitation)
+
+    _write_investigation_status(offline_data_root, "done", max(1, len(dem_candidates)), max(1, len(dem_candidates)))
+
     return record.to_json()
