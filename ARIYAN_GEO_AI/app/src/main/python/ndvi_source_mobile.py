@@ -30,6 +30,25 @@ code -- meaning _stats_for_bbox, fetch_ndvi_stats, and
 fetch_ndvi_core_halo_check never actually existed as working code, despite
 being described as built in prior session notes. This version replaces that
 with a real, complete implementation.
+
+TIMEOUT/TOKEN-CACHING FIX (this session): the original version of this file
+fetched a fresh OAuth access token independently inside EVERY call to
+_stats_for_bbox, and fetch_ndvi_core_halo_check called _stats_for_bbox TWICE
+per candidate (core + halo) -- meaning up to 4 separate network calls per
+DEM candidate, each with its own 30-second timeout. In a real on-device
+airplane-mode test, this made a multi-candidate investigation appear to
+hang for several minutes with zero on-screen indication of progress (it
+was not actually stuck -- it was genuinely still working through a slow
+real-network-failure path, one candidate at a time). Fixed two ways:
+(1) the default timeout is now 8 seconds instead of 30 -- long enough for
+a real slow connection, short enough that a truly absent connection fails
+fast; (2) fetch_ndvi_core_halo_check now fetches ONE access token and
+reuses it for both the core and halo stats calls, and
+investigation_multi_mobile.py's per-candidate loop now fetches ONE token
+for the entire run and passes it to every candidate, rather than every
+candidate (and every bbox within it) fetching its own. Worst case for a
+whole run with no network at all is now one ~8-second token-fetch
+failure, not (candidates x 4 x 30s).
 """
 
 from __future__ import annotations
@@ -93,7 +112,7 @@ def _http_post(url: str, data: bytes, headers: dict, timeout: int) -> str:
         raise NDVIFetchError(f"Timed out contacting {url}") from exc
 
 
-def get_access_token(client_id: str, client_secret: str, timeout: int = 30) -> str:
+def get_access_token(client_id: str, client_secret: str, timeout: int = 8) -> str:
     """OAuth2 client-credentials token exchange. Raises NDVIFetchError on any
     failure (missing credentials, bad credentials, network error, malformed
     response, or a token response missing access_token)."""
@@ -142,26 +161,28 @@ def _default_time_range(days_back: int = 60) -> tuple:
 
 def _stats_for_bbox(
     bbox: list,
-    client_id: str,
-    client_secret: str,
+    access_token: str,
     time_from: str | None = None,
     time_to: str | None = None,
-    timeout: int = 30,
+    timeout: int = 8,
 ) -> dict:
     """Calls the Sentinel Hub Statistical API for one bbox and returns the
     pooled real NDVI statistics across whatever cloud-free/water-masked
     pixel observations exist in the time range.
 
+    Takes an already-fetched `access_token` directly (this session's
+    fix -- see module docstring) rather than client_id/client_secret, so
+    the caller controls exactly how many times a token is fetched per run
+    instead of this function silently fetching its own every call.
+
     Returns a dict: {"mean": float, "stddev": float, "sample_count": int,
     "n_intervals_with_data": int}.
 
-    Raises NDVIFetchError if authentication fails, the request fails, the
-    response is malformed, or there is no valid (non-water, non-nodata)
-    pixel data anywhere in the time range -- this is a real "no usable
-    signal" condition, not something to paper over with a default value.
+    Raises NDVIFetchError if the request fails, the response is malformed,
+    or there is no valid (non-water, non-nodata) pixel data anywhere in
+    the time range -- this is a real "no usable signal" condition, not
+    something to paper over with a default value.
     """
-    token = get_access_token(client_id, client_secret, timeout=timeout)
-
     if time_from is None or time_to is None:
         time_from, time_to = _default_time_range()
 
@@ -194,7 +215,7 @@ def _stats_for_bbox(
         STATISTICS_URL,
         json.dumps(request_body).encode("utf-8"),
         {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
         },
         timeout,
@@ -261,13 +282,18 @@ def fetch_ndvi_stats(
     radius_m: float,
     client_id: str,
     client_secret: str,
-    timeout: int = 30,
+    timeout: int = 8,
+    access_token: str | None = None,
 ) -> dict:
     """Single-AOI real NDVI mean/stddev/min-style summary for a circular
     area around a point, expressed as an equivalent bbox. Used for the
-    simple single-AOI path (not the per-candidate core/halo check below)."""
+    simple single-AOI path (not the per-candidate core/halo check below).
+
+    Pass `access_token` if the caller already has one for this run (this
+    session's fix) to skip fetching a fresh one here."""
     bbox = _bbox_from_point(lat, lon, radius_m)
-    return _stats_for_bbox(bbox, client_id, client_secret, timeout=timeout)
+    token = access_token or get_access_token(client_id, client_secret, timeout=timeout)
+    return _stats_for_bbox(bbox, token, timeout=timeout)
 
 
 def fetch_ndvi_core_halo_check(
@@ -278,7 +304,8 @@ def fetch_ndvi_core_halo_check(
     core_radius_m: float = 15.0,
     halo_radius_m: float = 60.0,
     stress_zscore_threshold: float = 1.5,
-    timeout: int = 30,
+    timeout: int = 8,
+    access_token: str | None = None,
 ) -> dict:
     """Per-DEM-candidate real vegetation-stress check.
 
@@ -286,6 +313,11 @@ def fetch_ndvi_core_halo_check(
     point and a larger "halo" bbox around it (the halo bbox geometrically
     includes the core -- this is a documented approximation, not a true
     annulus subtraction, since the Statistics API operates on bboxes).
+
+    Fetches (or reuses, if `access_token` is passed in) exactly ONE token
+    for both the core and halo bbox calls -- previously this fetched two
+    independent tokens, one per bbox (see module docstring's TIMEOUT/
+    TOKEN-CACHING FIX note).
 
     Flags vegetation_stress_detected=True when the core mean NDVI is
     significantly below the halo mean NDVI (z-score computed against the
@@ -300,16 +332,18 @@ def fetch_ndvi_core_halo_check(
         "core_sample_count": int, "halo_sample_count": int,
       }
 
-    Raises NDVIFetchError (propagated from either the core or halo fetch)
-    on any auth/network/no-data failure. Callers should catch this per
-    candidate and record it as an honest SINGLE_SOURCE result with the
-    real error message, rather than failing the whole investigation.
+    Raises NDVIFetchError on any auth/network/no-data failure. Callers
+    should catch this per candidate and record it as an honest
+    SINGLE_SOURCE result with the real error message, rather than
+    failing the whole investigation.
     """
     core_bbox = _bbox_from_point(lat, lon, core_radius_m)
     halo_bbox = _bbox_from_point(lat, lon, halo_radius_m)
 
-    core_stats = _stats_for_bbox(core_bbox, client_id, client_secret, timeout=timeout)
-    halo_stats = _stats_for_bbox(halo_bbox, client_id, client_secret, timeout=timeout)
+    token = access_token or get_access_token(client_id, client_secret, timeout=timeout)
+
+    core_stats = _stats_for_bbox(core_bbox, token, timeout=timeout)
+    halo_stats = _stats_for_bbox(halo_bbox, token, timeout=timeout)
 
     halo_stddev = halo_stats["stddev"]
     if halo_stddev <= 1e-9:
