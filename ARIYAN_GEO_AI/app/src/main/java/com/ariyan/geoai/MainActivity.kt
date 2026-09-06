@@ -534,4 +534,155 @@ class MainActivity : AppCompatActivity() {
                 for (j in 0 until depths.length()) {
                     val d = depths.getJSONObject(j)
                     sb.append(String.format(
-                        "  depth ≈ %.2f m (range %.2f–%.2f m) from two-wa
+                        "  depth ≈ %.2f m (range %.2f–%.2f m) from two-way time %.1f ns\n",
+                        d.optDouble("depth_m"),
+                        d.optDouble("depth_min_m"),
+                        d.optDouble("depth_max_m"),
+                        d.optDouble("two_way_time_ns")
+                    ))
+                }
+            }
+            val note = g.optString("note", "")
+            if (note.isNotEmpty()) {
+                sb.append("  ").append(note).append("\n")
+            }
+        }
+    }
+
+    /** Renders the AI Debate Engine's output (debate_mobile.run_debate_json())
+     * if it succeeded. This is a ranked heuristic opinion across four rule-
+     * based perspectives, not a verified conclusion -- rendered as such,
+     * matching debate_engine.py's own synthesis framing
+     * (LEADING_INTERPRETATION / CONTESTED / WEAK_SIGNAL / NO_DATA). All four
+     * perspectives are always shown, including any marked insufficient_data
+     * by debate_engine.py (labeled "[insufficient data]" rather than
+     * silently omitted) -- an honest "this perspective had no evidence to
+     * argue from" is itself a real finding this project does not hide.
+     * Each perspective's reasoning bullet points are also rendered. A
+     * top-level "gpr_note" is rendered too, when debate_mobile.py reports
+     * that real GPR evidence existed for this investigation but wasn't
+     * close enough to any candidate to be used in its debate.
+     * candidateId: debate_mobile.py always assigns a real, non-null
+     * "candidate_id", but this still checks isNull() explicitly rather
+     * than relying only on optString()'s fallback -- org.json's
+     * optString(name, fallback) only substitutes the fallback when the
+     * key is ABSENT, not when the key is present holding a JSON null. */
+    private fun appendDebateSection(sb: StringBuilder, debateJsonText: String?) {
+        if (debateJsonText.isNullOrBlank()) return
+        val debateResult = try {
+            JSONObject(debateJsonText)
+        } catch (e: Exception) {
+            return
+        }
+        if (debateResult.has("error")) return
+
+        val debates = debateResult.optJSONArray("debates")
+        if (debates == null || debates.length() == 0) return
+
+        sb.append("\nAI Debate (offline, rule-based -- not a verified conclusion):\n")
+        for (i in 0 until debates.length()) {
+            val debate = debates.getJSONObject(i)
+            val candidateId = if (debate.isNull("candidate_id")) {
+                "#${i + 1}"
+            } else {
+                debate.optString("candidate_id", "#${i + 1}")
+            }
+            sb.append("  Candidate ").append(candidateId).append(":\n")
+
+            val positions = debate.optJSONArray("positions")
+            if (positions != null) {
+                for (j in 0 until positions.length()) {
+                    val p = positions.getJSONObject(j)
+                    val insufficient = p.optBoolean("insufficient_data", false)
+                    sb.append("    - ").append(p.optString("perspective")).append(" [")
+                    sb.append(if (insufficient) "insufficient data" else p.optString("confidence_label"))
+                    sb.append("]: ").append(p.optString("stance")).append("\n")
+
+                    val reasoning = p.optJSONArray("reasoning")
+                    if (reasoning != null) {
+                        for (k in 0 until reasoning.length()) {
+                            sb.append("        · ").append(reasoning.optString(k)).append("\n")
+                        }
+                    }
+                }
+            }
+
+            val synthesis = debate.optJSONObject("synthesis")
+            if (synthesis != null) {
+                sb.append("    Synthesis (").append(synthesis.optString("agreement_level")).append("): ")
+                sb.append(synthesis.optString("steward_note")).append("\n")
+            }
+
+            appendStewardSubsection(sb, debate)
+        }
+
+        val gprNote = debateResult.optString("gpr_note", "")
+        if (gprNote.isNotEmpty()) {
+            sb.append("  ").append(gprNote).append("\n")
+        }
+    }
+
+    /** Renders the Scientific Steward's per-candidate evaluation (Stage 1
+     * of the "Scientific Steward" governance layer -- see steward_engine.py
+     * and debate_mobile.py's _build_steward_report()), when present.
+     *
+     * Absent entirely if debate_mobile.py's Steward evaluation itself
+     * failed for this candidate (debate.has("steward_error")) -- that
+     * failure is shown instead as a short note, never silently hidden,
+     * matching this project's existing honesty conventions elsewhere
+     * (e.g. the NDVI/GPR limitation notes in appendGprSection() /
+     * renderResult()). A Steward failure never hides the real debate
+     * positions/synthesis above it -- those are always rendered first,
+     * unconditionally, by the existing code in appendDebateSection().
+     *
+     * STAGE 1 ONLY: no SHA-256/provenance verification exists yet (that
+     * is Scientific Steward Stage 2, not yet built), so a
+     * PROVENANCE_WARNING appearing on every single candidate right now is
+     * the CORRECT, honest, expected state -- not a bug. Likewise,
+     * confidence currently cannot exceed MODERATE for any candidate
+     * (Stage 1 does not yet claim to have verified/controlled for
+     * environmental confounders the way Stage 3's Team A/B/Judge debate
+     * is meant to) -- also expected, not a bug. */
+    private fun appendStewardSubsection(sb: StringBuilder, debate: JSONObject) {
+        if (debate.has("steward_error")) {
+            sb.append("    [Scientific Steward evaluation failed for this candidate: ")
+            sb.append(debate.optString("steward_error", "unknown error")).append("]\n")
+            return
+        }
+        val steward = debate.optJSONObject("steward") ?: return
+        val trace = steward.optJSONObject("reasoning_trace") ?: return
+        val confidence = trace.optJSONObject("confidence")
+
+        sb.append("    Scientific Steward [").append(steward.optString("pipeline_stage", "?")).append("]")
+        if (confidence != null) {
+            sb.append(": ").append(confidence.optString("band", "?"))
+            sb.append(" (").append(String.format("%.2f", confidence.optDouble("clamped_confidence", 0.0))).append(")")
+        }
+        sb.append("\n")
+
+        val warnings = trace.optJSONArray("warnings")
+        if (warnings != null) {
+            for (j in 0 until warnings.length()) {
+                val w = warnings.getJSONObject(j)
+                sb.append("      ! ").append(w.optString("kind")).append(": ")
+                sb.append(w.optString("message")).append("\n")
+            }
+        }
+
+        val nextAction = trace.optString("recommended_next_action", "")
+        if (nextAction.isNotEmpty()) {
+            sb.append("      Next: ").append(nextAction).append("\n")
+        }
+    }
+
+    private fun setRunning(running: Boolean) {
+        binding.progressBar.visibility = if (running) View.VISIBLE else View.GONE
+        binding.buttonRun.isEnabled = !running
+        if (running) {
+            binding.textConfidence.text = getString(R.string.running)
+            binding.textResults.text = ""
+        }
+    }
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+}
