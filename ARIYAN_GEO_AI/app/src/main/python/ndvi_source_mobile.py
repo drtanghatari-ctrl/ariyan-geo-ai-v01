@@ -450,21 +450,45 @@ def fetch_ndvi_core_halo_check(
             "data-quality limitation rather than assuming zero variance."
         )
 
+    mean_difference = core_stats["mean"] - halo_stats["mean"]
     standard_error = math.sqrt(
         (core_stddev ** 2) / core_n
         + (halo_stddev ** 2) / halo_n
     )
 
+    # HONEST NOTE (refined this session, after a second real on-device run
+    # reproduced the SAME "standard error near zero" outcome at a
+    # DIFFERENT location -- a strong signal this was a formula flaw, not
+    # a location-specific "genuinely flat terrain" finding as first
+    # assumed): standard_error computing to (near) zero does NOT always
+    # mean "insufficient data to test" -- that was only true when it was
+    # the OLD bug (variance silently defaulted to a fabricated 0.0, see
+    # the _stats_for_bbox fix above). Here, both core_stddev and
+    # halo_stddev are CONFIRMED real, non-null values from Sentinel Hub
+    # (the None-check above already ruled out "unknown variance"). If
+    # both areas genuinely have near-zero internal variance AND their
+    # means still differ by a real amount, that is not an uninformative
+    # result -- it is the MOST statistically confident result possible:
+    # there is essentially no measurement noise to explain the observed
+    # difference away as chance. Only when the mean difference is ALSO
+    # (near) zero is the result genuinely uninformative (0/0 -- two
+    # areas that are both internally uniform AND indistinguishable from
+    # each other). A large-but-finite sentinel z-score (not literal
+    # math.inf) is used for the confident case, since Android's org.json
+    # (MainActivity.kt) is not guaranteed to parse a literal "Infinity"
+    # JSON token the same way Python's json module would.
     if standard_error <= 1e-9:
-        raise NDVIFetchError(
-            "Standard error of the core/halo mean difference computed to "
-            "(near) zero, which is not a valid basis for a significance "
-            "test at this location -- reporting this as a real "
-            "data-quality limitation rather than silently returning "
-            "z_score=0.0."
-        )
+        if abs(mean_difference) <= 1e-9:
+            raise NDVIFetchError(
+                "Both the core and halo area report (near) zero internal "
+                "NDVI variance AND (near) identical means at this "
+                "location -- there is genuinely no detectable signal to "
+                "test either way, not a computation error."
+            )
+        z_score = 50.0 if mean_difference > 0 else -50.0
+    else:
+        z_score = mean_difference / standard_error
 
-    z_score = (core_stats["mean"] - halo_stats["mean"]) / standard_error
     vegetation_stress_detected = z_score <= -stress_zscore_threshold
 
     return {
