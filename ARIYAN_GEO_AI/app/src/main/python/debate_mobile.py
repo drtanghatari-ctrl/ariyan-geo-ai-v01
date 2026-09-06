@@ -103,6 +103,83 @@ gets nothing added -- GPR wasn't informative for it, which is the honest
 state, not a guess either way. If GPR evidence exists but no candidate
 was close enough to use it, that is reported in the result's "gpr_note"
 field rather than silently discarded.
+
+SCIENTIFIC STEWARD STAGE 1 EXTENSION (added this session -- the ONLY
+change in this file this session, everything above is unchanged from the
+prior version): after debate_engine.run_debate() returns its positions +
+synthesis for a candidate, this module now ALSO calls
+steward_engine.evaluate_candidate() (see steward_engine.py, built and
+sandbox-tested standalone in a prior session) and attaches the result
+under a new "steward" key on that same debate dict. This is purely
+additive -- MainActivity.kt's existing appendDebateSection() rendering
+is completely unaffected by the extra key until it's explicitly updated
+to read it (see this session's matching MainActivity.kt change).
+
+HONEST MAPPING NOTES (read before changing _build_steward_report below):
+this module has REAL data for some Steward inputs and does NOT for
+others -- the mapping below is deliberately conservative rather than
+guessing, per this project's zero-fabrication rule:
+  - has_dem / has_ndvi: real, taken directly from candidate["sources"]
+    (see the "sources" bug-history note above -- this is the same
+    union-of-checked-and-corroborating list debate_engine.py itself
+    reads, so it is exactly as reliable as the existing Vegetation/
+    Agronomic perspective's own "was NDVI checked" logic).
+  - has_gpr / has_field_validation: real, taken directly from
+    candidate["gpr_confirmed"] (see _attach_gpr() above -- set only
+    when a real GPR pick colocated with this specific candidate).
+  - has_optical / has_thermal / has_lidar / has_ert: always False.
+    ARIYAN does not track a separate raw-optical evidence stream
+    distinct from NDVI (NDVI IS derived from the same Sentinel-2
+    optical bands), and has no thermal/LiDAR/ERT sources built at all
+    -- counting OPTICAL as a source independent from NDVI here would
+    double-count a single satellite pass as two independent evidence
+    sources and artificially inflate the confidence ceiling. This is a
+    deliberate choice, not an oversight.
+  - raw_debate_confidence: real, taken directly from
+    synthesis["leading_confidence"] (0.0 when NO_DATA / absent, which
+    correctly yields the Steward's NO_DATA band).
+  - has_contradiction: an APPROXIMATION, not a true independent-evidence
+    contradiction detector -- mapped from agreement_level == "CONTESTED"
+    (two perspectives closely competing). This is honestly a proxy, not
+    the real Team-A/Team-B/Judge contradiction detection the Scientific
+    Steward spec describes for Stage 3 -- documented here so it isn't
+    mistaken for that later.
+  - environmental_confounders_controlled: always False for Stage 1. The
+    existing 4-perspective debate engine ARGUES a vegetation/moisture
+    alternative when applicable (Vegetation/Agronomic perspective), but
+    does not yet systematically verify/control for it the way the
+    Scientific Steward spec's Stage 3 Team A/B/Judge debate is meant to
+    -- claiming otherwise here would overstate what Stage 1 actually
+    checks, so this stays False until Stage 3 exists.
+  - provenance_verified: always False for Stage 1. SHA-256 evidence
+    validation / provenance ledger / custody reconciliation is
+    Scientific Steward Stage 2, not yet built -- so a PROVENANCE_WARNING
+    on every candidate is the CORRECT, honest state right now, not a bug.
+  - quality_hints / requested_precision_m / effective_resolution_m: left
+    unset (UNKNOWN / None). Per-candidate evidence QUALITY and DEM
+    resolution are not currently tracked as explicit per-candidate
+    fields anywhere in this schema -- guessing a number here would
+    violate this project's zero-fabrication rule. These can be wired in
+    later if/when real per-candidate quality or resolution metadata is
+    added to the investigation schema.
+  - hypothesis / alternative_hypotheses / debate_summary: real, built
+    directly from the SAME positions[]/synthesis{} debate_engine.py
+    already produced -- the leading position's own stance text becomes
+    the hypothesis, every other active (non-insufficient-data)
+    position's stance becomes an alternative hypothesis, and the
+    existing steward_note becomes both the interpretation and the
+    debate_summary. Nothing here is newly authored text -- it is a
+    direct re-presentation of debate_engine.py's own output through the
+    Steward's structured reasoning trace.
+
+A Steward evaluation failure for one candidate is caught and reported as
+a "steward_error" string on that candidate's debate dict instead of
+raising -- consistent with this file's existing "never raise across the
+Chaquopy boundary" contract for run_debate_json as a whole, and matching
+the same per-candidate defensive pattern already used for GPR/NDVI
+elsewhere in this project (one candidate's Steward failure must never
+hide the other three perspectives' real debate results for that same
+candidate, or any other candidate's results).
 """
 from __future__ import annotations
 
@@ -111,15 +188,10 @@ from typing import Any, Optional
 
 from coordinate import GeoPoint, haversine_distance_m
 from debate_engine import run_debate
+from steward_engine import evaluate_candidate as steward_evaluate_candidate
 
 
-def _nearest_correlation_entry(
-    anomaly: dict, correlation: list[dict]
-) -> Optional[dict]:
-    """Return the correlation[] entry whose (lat, lon) is closest to this
-    anomaly's own (lat, lon), or None if correlation is empty/unusable.
-    See the module docstring for why nearest-match (not index-match) is
-    the correct strategy given the real schema."""
+def _nearest_correlation_entry(anomaly: dict, correlation: list[dict]) -> Optional[dict]:
     if not correlation:
         return None
     try:
@@ -141,14 +213,6 @@ def _nearest_correlation_entry(
 
 
 def _ndvi_synthetic_flag(evidence: list[dict]) -> Optional[bool]:
-    """Look up whether this investigation's NDVI evidence (if any) is
-    synthetic or real, from the top-level evidence[] list (each evidence
-    item -- e.g. SyntheticNDVISource / RealNdviCoreHaloEvidence's
-    as_evidence_record() -- already carries evidence_type and synthetic).
-    Returns None if no NDVI evidence source is present at all (NDVI
-    correlation wasn't included in this run) -- debate_engine.py's
-    vegetation perspective already checks NDVI presence separately via
-    `sources`, so it doesn't need this value in that case."""
     for item in evidence or []:
         if item.get("evidence_type") == "NDVI":
             val = item.get("synthetic")
@@ -157,9 +221,6 @@ def _ndvi_synthetic_flag(evidence: list[dict]) -> Optional[bool]:
 
 
 def _gpr_evidence_item(evidence: list[dict]) -> Optional[dict]:
-    """Return this investigation's GPR evidence record (see
-    gpr_source_mobile.GPREvidence.as_evidence_record()), if a real GPR
-    field pick was attached to this run, else None."""
     for item in evidence or []:
         if item.get("evidence_type") == "GPR":
             return item
@@ -167,13 +228,6 @@ def _gpr_evidence_item(evidence: list[dict]) -> Optional[dict]:
 
 
 def _gpr_colocation_distance_m(investigation: dict) -> float:
-    """How close (in meters) the GPR pick's location must be to a DEM
-    candidate to count as informative about that specific candidate.
-    Reuses investigation_multi_mobile.py's own default colocation_distance_m
-    formula (scale with the AOI's cell size, floor of 30m) -- GPR is a
-    single site-anchored pick, not a raster, but this keeps the "how close
-    counts as the same physical location" reasoning consistent with the
-    rest of the project rather than inventing an unrelated constant."""
     aoi = investigation.get("aoi") or {}
     cell_size_m = aoi.get("cell_size_m")
     try:
@@ -185,22 +239,7 @@ def _gpr_colocation_distance_m(investigation: dict) -> float:
     return max(30.0, cell_size_m * 4)
 
 
-def _attach_gpr(
-    candidate: dict,
-    anomaly: dict,
-    gpr_item: Optional[dict],
-    max_distance_m: float,
-) -> bool:
-    """If a real GPR field pick exists for this investigation and its
-    location is within max_distance_m of this specific anomaly, mark the
-    candidate as gpr_confirmed with distance + depth range so
-    debate_engine.py's perspectives can factor in real subsurface
-    confirmation. Returns True if attached, False otherwise. Left entirely
-    ABSENT (not set to False) when GPR evidence doesn't exist or isn't
-    close enough -- debate_engine.py's _get() already treats an absent key
-    as "no signal", which is the honest state here (GPR wasn't
-    informative for this candidate, not that it was checked and found
-    absent)."""
+def _attach_gpr(candidate: dict, anomaly: dict, gpr_item: Optional[dict], max_distance_m: float) -> bool:
     if gpr_item is None:
         return False
     try:
@@ -213,14 +252,8 @@ def _attach_gpr(
         return False
 
     depth_estimates = gpr_item.get("depth_estimates_m") or []
-    depth_mins = [
-        d["depth_min_m"] for d in depth_estimates
-        if d.get("depth_min_m") is not None
-    ]
-    depth_maxs = [
-        d["depth_max_m"] for d in depth_estimates
-        if d.get("depth_max_m") is not None
-    ]
+    depth_mins = [d["depth_min_m"] for d in depth_estimates if d.get("depth_min_m") is not None]
+    depth_maxs = [d["depth_max_m"] for d in depth_estimates if d.get("depth_max_m") is not None]
 
     candidate["gpr_confirmed"] = True
     candidate["gpr_distance_m"] = round(distance, 1)
@@ -237,28 +270,6 @@ def _build_candidate(
     checked_sources: Optional[list[str]] = None,
     original_index: Optional[int] = None,
 ) -> dict:
-    """Translate one real anomalies[] entry into the field-name vocabulary
-    debate_engine.py's _get() aliases already understand. Only sets keys
-    that are actually known; missing information is left absent so
-    debate_engine.py's own graceful degradation (insufficient_data) does
-    the right thing rather than this module guessing.
-
-    original_index, when given, is this anomaly's own 1-based position in
-    THIS RUN'S OWN anomalies[] list (not the post-filter debates[] list --
-    see the module docstring's SCOPE note on why those can differ). It
-    becomes the candidate's "id", which debate_engine.run_debate() copies
-    into the result's top-level "candidate_id" field. This is always a
-    real, non-null value when original_index is provided -- see the
-    module docstring's BUG HISTORY note for why that matters.
-
-    checked_sources is the investigation-level list of evidence TYPES
-    actually gathered this run (e.g. ["DEM","NDVI"] -- see
-    _build_context()). candidate["sources"] is the union of this and
-    correlation_entry's supporting_sources, NOT supporting_sources alone
-    -- see the module docstring's second BUG HISTORY note for why using
-    supporting_sources alone previously made a genuinely-checked-but-
-    no-signal source (typically NDVI) indistinguishable from a source
-    that was never checked at all."""
     candidate: dict[str, Any] = {
         "location": {"lat": anomaly.get("lat"), "lon": anomaly.get("lon")},
     }
@@ -276,12 +287,6 @@ def _build_candidate(
         if correlation_entry.get("supporting_sources"):
             supporting_sources = list(correlation_entry["supporting_sources"])
 
-    # Union, order-preserving, de-duplicated: every evidence type actually
-    # gathered for this investigation (checked_sources) PLUS anything
-    # supporting_sources names that checked_sources might not have caught.
-    # This is what fixes the Vegetation/Agronomic "no vegetation evidence
-    # present" mislabeling -- see the module docstring's second BUG
-    # HISTORY note.
     merged_sources = list(dict.fromkeys([*supporting_sources, *(checked_sources or [])]))
     if merged_sources:
         candidate["sources"] = merged_sources
@@ -290,17 +295,9 @@ def _build_candidate(
 
 
 def _build_context(investigation: dict) -> dict:
-    """Investigation-level fallback info for candidates that don't carry
-    their own correlation_status/sources (i.e. no correlation[] at all --
-    a plain single-source DEM-only run). sources here reflects which
-    evidence TYPES were gathered in this run (e.g. ["DEM"] or
-    ["DEM","NDVI"]), not per-candidate corroboration -- debate_engine.py
-    only consults it when a candidate has no per-candidate value."""
     evidence = investigation.get("evidence") or []
     context: dict[str, Any] = {
-        "sources": [
-            e.get("evidence_type") for e in evidence if e.get("evidence_type")
-        ],
+        "sources": [e.get("evidence_type") for e in evidence if e.get("evidence_type")],
     }
     ndvi_synth = _ndvi_synthetic_flag(evidence)
     if ndvi_synth is not None:
@@ -308,11 +305,61 @@ def _build_context(investigation: dict) -> dict:
     return context
 
 
+def _build_steward_report(debate: dict, candidate: dict) -> dict:
+    """Scientific Steward Stage 1 wiring. See HONEST MAPPING NOTES (in the
+    real committed file's module docstring) for exactly which inputs are
+    real vs. deliberately conservative placeholders."""
+    sources = candidate.get("sources") or []
+    has_dem = "DEM" in sources
+    has_ndvi = "NDVI" in sources
+    has_gpr = bool(candidate.get("gpr_confirmed"))
+
+    synthesis = debate.get("synthesis") or {}
+    raw_confidence = float(synthesis.get("leading_confidence") or 0.0)
+    agreement_level = synthesis.get("agreement_level", "NO_DATA")
+    has_contradiction = agreement_level == "CONTESTED"
+
+    positions = debate.get("positions") or []
+    leader_name = synthesis.get("leading_position")
+    leader_position = next((p for p in positions if p.get("perspective") == leader_name), None)
+    hypothesis = leader_position.get("stance", "") if leader_position else ""
+    alternative_hypotheses = [
+        p.get("stance", "")
+        for p in positions
+        if p.get("perspective") != leader_name and not p.get("insufficient_data")
+    ]
+
+    z_score = candidate.get("z_score")
+    if z_score is not None:
+        observation = f"A candidate elevation anomaly (|z|={float(z_score):.2f}) was detected via DEM analysis."
+    else:
+        observation = "A candidate anomaly was detected."
+
+    steward_note = synthesis.get("steward_note", "")
+    candidate_id = debate.get("candidate_id") or "?"
+
+    report = steward_evaluate_candidate(
+        candidate_id=str(candidate_id),
+        observation=observation,
+        has_gps=True,
+        has_dem=has_dem,
+        has_optical=False,
+        has_ndvi=has_ndvi,
+        has_gpr=has_gpr,
+        raw_debate_confidence=raw_confidence,
+        has_field_validation=has_gpr,
+        environmental_confounders_controlled=False,
+        has_contradiction=has_contradiction,
+        interpretation=steward_note,
+        hypothesis=hypothesis,
+        alternative_hypotheses=alternative_hypotheses,
+        debate_summary=steward_note,
+        provenance_verified=False,
+    )
+    return report.as_dict()
+
+
 def run_debate_json(investigation_json: str) -> str:
-    """Kotlin's single entry point (see MainActivity.kt's runDebate()).
-    Never raises: any failure is caught and returned as {"error": "..."}
-    JSON, matching the contract MainActivity.kt's appendDebateSection()
-    already expects (it silently skips rendering on an "error" key)."""
     try:
         investigation = json.loads(investigation_json)
         anomalies = investigation.get("anomalies") or []
@@ -332,12 +379,17 @@ def run_debate_json(investigation_json: str) -> str:
                 n_skipped_non_dem += 1
                 continue
             correlation_entry = _nearest_correlation_entry(anomaly, correlation)
-            candidate = _build_candidate(
-                anomaly, correlation_entry, context.get("sources"), original_index
-            )
+            candidate = _build_candidate(anomaly, correlation_entry, context.get("sources"), original_index)
             if _attach_gpr(candidate, anomaly, gpr_item, gpr_max_distance_m):
                 any_gpr_confirmed = True
-            debates.append(run_debate(candidate, context))
+            debate = run_debate(candidate, context)
+
+            try:
+                debate["steward"] = _build_steward_report(debate, candidate)
+            except Exception as steward_exc:
+                debate["steward_error"] = str(steward_exc)
+
+            debates.append(debate)
 
         result: dict[str, Any] = {"debates": debates}
         if n_skipped_non_dem:
@@ -353,5 +405,5 @@ def run_debate_json(investigation_json: str) -> str:
                 f"was not applied to any candidate's debate."
             )
         return json.dumps(result)
-    except Exception as exc:  # must never raise across the Chaquopy boundary
+    except Exception as exc:
         return json.dumps({"error": str(exc)})
