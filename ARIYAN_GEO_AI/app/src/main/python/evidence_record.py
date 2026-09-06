@@ -13,6 +13,26 @@ scientific defensibility is much simpler and is implemented here:
   - every anomaly is reported with its supporting numbers, not a verdict
   - the record is a single, inspectable JSON document — not a tool a
     human must trust without reading
+
+FOURTH EVIDENCE SLOT ADDED THIS SESSION (Thermal): mirrors the existing
+`second_evidence`/`second_anomalies` pattern exactly (a single aggregate
+wrapper appended to `evidence`, plus a per-candidate detail list kept
+OUT of `anomalies[]` and reported in its own `fourth_evidence_detail`
+field) rather than the `third_evidence` (GPR) pattern, because Thermal
+-- like NDVI -- is a per-DEM-candidate corroborating check, not a
+single site-anchored field-verification note. `third_evidence` (GPR)
+is unchanged.
+
+CONFIDENCE-STATEMENT FIX (this session): previously, the "co-located
+anomalies in X + Y" phrase listed every evidence_type present in
+`evidence[]`, regardless of whether that source actually corroborated
+anything -- meaning GPR's evidence_type was already being folded into
+that phrase even when GPR never participates in correlation at all.
+This was harmless-but-imprecise with DEM/NDVI/GPR; adding a genuine
+third per-candidate corroborating source (Thermal) would make it
+actively wrong (claiming a source co-located candidates it never
+touched). Fixed to derive the list from the sources that actually
+appear in `supporting_sources` for CORROBORATED candidates specifically.
 """
 from __future__ import annotations
 
@@ -38,6 +58,7 @@ class InvestigationRecord:
     correlation: list[dict] = field(default_factory=list)
     second_evidence_detail: list[dict] = field(default_factory=list)
     third_evidence_detail: list[dict] = field(default_factory=list)
+    fourth_evidence_detail: list[dict] = field(default_factory=list)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(asdict(self), indent=indent, default=str)
@@ -56,6 +77,9 @@ def build_investigation_record(
     second_anomalies_are_candidates: bool = True,
     third_evidence: Any = None,
     third_evidence_type: str | None = None,
+    fourth_evidence: Any = None,
+    fourth_anomalies: list | None = None,
+    fourth_evidence_type: str | None = None,
 ) -> InvestigationRecord:
     """Build the InvestigationRecord JSON payload.
 
@@ -64,7 +88,7 @@ def build_investigation_record(
 
     - True (default): `second_anomalies` are AnomalyCandidate instances
       with the SAME schema as the DEM `anomalies` (e.g. NDVI raster
-      candidates from detect_raster_anomalies in the synthetic-NDVI
+      candidates from detect_raster_anomalies in the offline-fallback
       path). Safe to concatenate into a single uniform `anomalies` list.
 
     - False: `second_anomalies` are a structurally DIFFERENT record type
@@ -80,14 +104,27 @@ def build_investigation_record(
       was actually a real NDVI check result being read through the
       wrong schema.
 
-    third_evidence (optional) is a further, structurally-independent
-    evidence source appended to `evidence` and reported in its own
-    `third_evidence_detail` field (never merged into `anomalies`, same
-    reasoning as the `second_anomalies_are_candidates=False` path above
-    -- e.g. GPREvidence from gpr_source_mobile.py, whose schema
-    (depth_estimates_m, soil_preset, entry_method) has nothing in common
-    with AnomalyCandidate). third_evidence must implement
+    third_evidence (optional) is a further, structurally-independent,
+    SINGLE (not per-candidate) evidence source appended to `evidence`
+    and reported in its own `third_evidence_detail` field (never merged
+    into `anomalies`, same reasoning as the
+    `second_anomalies_are_candidates=False` path above -- e.g.
+    GPREvidence from gpr_source_mobile.py, whose schema
+    (depth_estimates_m, soil_preset, entry_method) has nothing in
+    common with AnomalyCandidate). third_evidence must implement
     .as_evidence_record() the same way every other evidence source does.
+
+    fourth_evidence/fourth_anomalies (optional) follow the EXACT same
+    shape as second_evidence/second_anomalies (a single aggregate
+    wrapper object appended to `evidence`, plus a per-candidate detail
+    list) -- for Thermal's real per-DEM-candidate core/halo check
+    (ThermalCoreHaloResult from investigation_multi_mobile.py, schema:
+    core_mean_kelvin/halo_mean_kelvin/z_score/core_warmer_than_halo).
+    Always kept out of `anomalies[]` (there is no "are_candidates"
+    toggle here, unlike second_anomalies -- a per-candidate core/halo
+    check result is never structurally an AnomalyCandidate) and
+    reported in `fourth_evidence_detail` instead, for the exact same
+    reason `second_anomalies_are_candidates=False` exists.
     """
     evidence = [dem.as_evidence_record()]
     derived_products = [{
@@ -100,6 +137,7 @@ def build_investigation_record(
     anomaly_dicts = [asdict(a) for a in anomalies]
     second_evidence_detail: list[dict] = []
     third_evidence_detail: list[dict] = []
+    fourth_evidence_detail: list[dict] = []
 
     limitations = [
         "Anomalies reflect statistical deviation from local terrain/spectral "
@@ -175,6 +213,27 @@ def build_investigation_record(
         )
         third_evidence_detail = [third_record]
 
+    if fourth_evidence is not None:
+        evidence.append(fourth_evidence.as_evidence_record())
+        if getattr(fourth_evidence, "synthetic", False):
+            limitations.insert(0, (
+                f"THIS RUN USED SYNTHETIC {fourth_evidence_type}, NOT REAL "
+                f"DATA. Every '{fourth_evidence_type}' result below is a "
+                f"statistical description of the synthetic surface, not a "
+                f"claim about any real location."
+            ))
+        derived_products.append({
+            "product": f"{fourth_evidence_type} residual + z-score anomaly map",
+            "derived_from": fourth_evidence.source,
+            "method": "Gaussian regional-trend removal + z-score thresholding",
+            "kernel_sigma_cells": kernel_sigma_cells,
+            "zscore_threshold": zscore_threshold,
+        })
+        fourth_evidence_detail = [
+            {**asdict(a), "evidence_type": fourth_evidence_type}
+            for a in (fourth_anomalies or [])
+        ]
+
     correlation_dicts = []
     if correlation_results:
         for r in correlation_results:
@@ -188,9 +247,21 @@ def build_investigation_record(
             })
         n_corroborated = sum(1 for r in correlation_results if r.status == "CORROBORATED")
         if n_corroborated > 0:
+            # Only list sources that actually corroborated a candidate,
+            # not every evidence source present in the run (see this
+            # module's CONFIDENCE-STATEMENT FIX note above -- GPR, e.g.,
+            # never participates in correlation and must not be implied
+            # to have co-located anything here).
+            corroborating_sources: list[str] = []
+            for r in correlation_results:
+                if r.status != "CORROBORATED":
+                    continue
+                for s in r.supporting_sources:
+                    if s not in corroborating_sources:
+                        corroborating_sources.append(s)
             confidence = (
                 f"{n_corroborated} candidate(s) CORROBORATED by independent evidence "
-                f"sources (co-located anomalies in {' + '.join(evidence[i]['evidence_type'] for i in range(len(evidence)))}). "
+                f"sources (co-located anomalies in {' + '.join(corroborating_sources)}). "
                 f"This is genuine independent corroboration; confidence should be "
                 f"treated as MODERATE to HIGH pending field verification. "
                 f"{len(correlation_results) - n_corroborated} additional single-source "
@@ -235,5 +306,7 @@ def build_investigation_record(
         record_kwargs["second_evidence_detail"] = second_evidence_detail
     if third_evidence_detail:
         record_kwargs["third_evidence_detail"] = third_evidence_detail
+    if fourth_evidence_detail:
+        record_kwargs["fourth_evidence_detail"] = fourth_evidence_detail
 
     return InvestigationRecord(**record_kwargs)
