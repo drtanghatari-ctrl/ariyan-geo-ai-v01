@@ -48,7 +48,7 @@ results are kept (DEM results are never discarded because NDVI failed)
 with a clear limitations note explaining neither NDVI path worked this
 time.
 
-NEW THIS SESSION -- REAL THERMAL (Landsat 8/9 surface temperature) AS A
+REAL THERMAL (Landsat 8/9 brightness temperature) AS A
 GENUINE THIRD PER-CANDIDATE CORROBORATING SOURCE, not a passive
 site-anchored note like GPR: a real, live, per-DEM-candidate Landsat
 core/halo thermal-anomaly check (thermal_source_mobile.
@@ -58,6 +58,21 @@ DEM candidate, using the SAME Copernicus OAuth credentials already
 entered for NDVI (same account, different Sentinel Hub collection --
 see thermal_source_mobile.py). Runs INDEPENDENTLY of whichever NDVI
 path succeeds or fails this run.
+
+CORRECTED AFTER FIRST REAL ON-DEVICE RUN -- LEVEL 1, NOT LEVEL 2: the
+first version requested Landsat Level 2 (`landsat-ot-l2`,
+"SURFACE_TEMPERATURE") and failed with an HTTP 500 for every single
+candidate. Root-caused against Copernicus Data Space Ecosystem's OWN
+Landsat documentation (not the general sentinel-hub.com docs, which
+describe a broader set of collections than any one deployment actually
+serves): CDSE only offers Landsat 8-9 at Level 1 (`landsat-ot-l1`) --
+Level 2 does not exist on this platform. This module's per-candidate
+notes and the evidence record below now honestly describe this as
+Top-of-Atmosphere BRIGHTNESS TEMPERATURE, not atmospherically-corrected
+surface temperature -- a real scientific difference (brightness
+temperature can be influenced by atmospheric conditions on top of any
+real ground-level thermal contrast), not just a renamed field. See
+thermal_source_mobile.py's own docstring for the full detail.
 
 In the common case (live per-candidate NDVI succeeds for at least one
 candidate), NDVI and Thermal results are combined per-candidate via
@@ -264,7 +279,7 @@ class RealThermalCoreHaloEvidence:
     RealNdviCoreHaloEvidence exactly for the real-Thermal-via-
     Statistical-API path."""
 
-    source = "Landsat 8/9 Level 2 (Sentinel Hub Statistical API via Copernicus Data Space Ecosystem, real per-candidate core/halo check)"
+    source = "Landsat 8/9 Level 1 (Sentinel Hub Statistical API via Copernicus Data Space Ecosystem, real per-candidate core/halo check, Top-of-Atmosphere brightness temperature -- corrected this session, see module docstring)"
     synthetic = False
 
     def __init__(self, n_candidates_checked: int, n_fetch_errors: int):
@@ -279,17 +294,20 @@ class RealThermalCoreHaloEvidence:
             "method": (
                 "Same Copernicus Data Space Ecosystem OAuth2 client-"
                 "credentials account used for NDVI (auth-scope compatibility "
-                "not yet on-device confirmed -- see this module's own "
-                "docstring); per-DEM-candidate real Landsat 8/9 surface "
-                "temperature (Kelvin) fetched server-side for a small core "
-                "bbox and a larger halo bbox around each candidate (larger "
-                "than NDVI's -- Landsat's thermal band is 30m resolution, "
-                "resampled from ~100m native, versus Sentinel-2's 10m). A "
-                "thermal anomaly is flagged when the core/halo difference "
-                "clears a z-score threshold in EITHER direction (a buried "
-                "feature can be warmer or cooler than its surroundings "
-                "depending on material, season, and time of day -- no "
-                "direction is assumed)."
+                "confirmed working on-device this session); per-DEM-candidate "
+                "real Landsat 8/9 Level 1 Top-of-Atmosphere brightness "
+                "temperature (Kelvin, NOT atmospherically-corrected surface "
+                "temperature -- a real limitation, see module docstring) "
+                "fetched server-side for a small core bbox and a larger halo "
+                "bbox around each candidate (larger than NDVI's -- Landsat's "
+                "thermal band is 30m resolution, resampled from ~100m native, "
+                "versus Sentinel-2's 10m). A thermal anomaly is flagged when "
+                "the core/halo difference clears a z-score threshold in "
+                "EITHER direction (a buried feature can be warmer or cooler "
+                "than its surroundings depending on material, season, and "
+                "time of day -- no direction is assumed). Brightness "
+                "temperature can additionally be affected by atmospheric "
+                "conditions on top of any real ground-level contrast."
             ),
             "n_candidates_checked": self.n_candidates_checked,
             "n_fetch_errors": self.n_fetch_errors,
@@ -490,14 +508,14 @@ def _build_correlated_candidates(
             sources.append("THERMAL")
             direction = "warmer than" if tr.core_warmer_than_halo else "cooler than"
             notes.append(
-                f"Real Landsat 8/9 surface temperature shows this DEM "
+                f"Real Landsat 8/9 brightness temperature shows this DEM "
                 f"candidate is significantly {direction} its surroundings "
                 f"(core mean={tr.core_mean_kelvin:.1f}K vs halo mean="
                 f"{tr.halo_mean_kelvin:.1f}K, z={tr.z_score:.2f})."
             )
         else:
             notes.append(
-                f"Real Landsat 8/9 surface temperature at this DEM "
+                f"Real Landsat 8/9 brightness temperature at this DEM "
                 f"candidate shows no significant thermal anomaly "
                 f"(core mean={tr.core_mean_kelvin:.1f}K vs halo mean="
                 f"{tr.halo_mean_kelvin:.1f}K, z={tr.z_score:.2f})."
@@ -626,7 +644,8 @@ def run_investigation_multi_json(
     are kept and DEM results are still returned -- an NDVI-side failure
     never blocks the DEM investigation itself.
 
-    THERMAL (new this session): real (Landsat 8/9 via the same
+    THERMAL: real (Landsat 8/9 Level 1, Top-of-Atmosphere brightness
+    temperature -- corrected this session, see module docstring -- via the same
     Copernicus Sentinel Hub Statistical API/account as NDVI,
     per-DEM-candidate core/halo check, see thermal_source_mobile.py)
     always attempted for every DEM candidate, using the SAME shared
@@ -885,9 +904,14 @@ def run_investigation_multi_json(
         "only confirm or fail to confirm a thermal anomaly at locations "
         "DEM already flagged. Landsat's 30m (resampled from ~100m native) "
         "thermal resolution is coarser than Sentinel-2's 10m used for "
-        "NDVI, and a thermal anomaly can arise from many causes besides "
-        "a buried feature (soil moisture, shadow, recent land use) -- no "
-        "causal interpretation should be inferred from this check alone."
+        "NDVI. This is Landsat Level 1 Top-of-Atmosphere BRIGHTNESS "
+        "TEMPERATURE, not atmospherically-corrected surface temperature "
+        "(Copernicus Data Space Ecosystem does not offer Landsat Level 2) "
+        "-- it can be influenced by atmospheric conditions on top of any "
+        "real ground-level thermal contrast, and a thermal anomaly can "
+        "arise from many causes besides a buried feature (soil moisture, "
+        "shadow, recent land use, atmospheric effects) -- no causal "
+        "interpretation should be inferred from this check alone."
     )
     for note in ndvi_limitations:
         record.limitations.append(note)
