@@ -297,16 +297,3 @@ def build_investigation_record(
         evidence=evidence,
         derived_products=derived_products,
         anomalies=anomaly_dicts,
-        limitations=limitations,
-        confidence_statement=confidence,
-    )
-    if correlation_dicts:
-        record_kwargs["correlation"] = correlation_dicts
-    if second_evidence_detail:
-        record_kwargs["second_evidence_detail"] = second_evidence_detail
-    if third_evidence_detail:
-        record_kwargs["third_evidence_detail"] = third_evidence_detail
-    if fourth_evidence_detail:
-        record_kwargs["fourth_evidence_detail"] = fourth_evidence_detail
-
-    return InvestigationRecord(**record_kwargs)
