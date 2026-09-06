@@ -51,47 +51,14 @@ REAL SCHEMA NOTES (why this file looks the way it does):
   and a close match for CORROBORATED ones (centroid of co-located points
   within colocation_distance_m by construction). Nearest-match is
   therefore correct, not a guess, across both modes.
-- "sources" on a candidate (consumed by debate_engine.py's
-  _sources_present()) must mean "which evidence TYPES were actually
-  evaluated for this candidate" (e.g. DEM elevation + NDVI vegetation),
-  not merely "which sources happened to corroborate it".
-  BUG HISTORY (fixed): earlier versions of this file set
-  candidate["sources"] directly from correlation_entry["supporting_sources"]
-  alone. For a SINGLE_SOURCE correlation entry, supporting_sources only
-  lists the source that positively detected the anomaly (e.g. ["DEM"]) --
-  it does NOT include a source like NDVI that was genuinely checked at
-  this candidate's exact location but simply found no corroborating
-  signal. Because debate_engine.py's _sources_present() returns the
-  candidate-level "sources" the moment it is non-empty (never falling
-  back to the broader context-level list), this caused
-  debate_engine.py's Vegetation/Agronomic perspective to wrongly report
-  "no vegetation evidence present for this candidate" (insufficient_data)
-  even when real Copernicus NDVI evidence had actually been fetched and
-  checked for that exact candidate and simply showed no stress signal --
-  an honest "checked, no signal" finding was mislabeled as "not checked
-  at all", exactly the kind of mislabeling this project's zero-fake-data
-  principle exists to prevent. Fixed at the root here: candidate
-  ["sources"] is now the union of correlation_entry's supporting_sources
-  AND the investigation-level list of evidence types that were actually
-  gathered (context["sources"], built in _build_context() from the
-  top-level evidence[] list) -- so a checked-but-no-signal source is
-  never silently indistinguishable from an unchecked one.
-  KNOWN, FLAGGED, NOT-YET-FIXED IMPRECISION (identified this session,
-  NOT changed without explicit confirmation -- this is a real,
-  already-on-device-confirmed-working code path): this union approach
-  cannot distinguish "NDVI genuinely succeeded for THIS candidate" from
-  "NDVI evidence exists somewhere in this run but genuinely failed for
-  EVERY candidate" -- context["sources"] includes "NDVI" whenever an
-  NDVI evidence item exists in evidence[] at all (which it always does
-  once a multi-source run has any second_evidence set, even one whose
-  n_fetch_errors equals n_candidates_checked, i.e. 100% failure). This
-  affects debate_engine.py's Vegetation/Agronomic sources-present check
-  only in the (currently believed rare) case where NDVI fails for
-  literally every candidate in a run. The SAME exact-match technique
-  used below for Thermal (matching second_evidence_detail by lat/lon
-  and checking its own per-candidate error field) could fix this too,
-  if wanted -- deliberately not applied here without asking first,
-  since it would change already-proven on-device behavior.
+- TWO DISTINCT "sources" CONCEPTS, NOW KEPT SEPARATE (fixed this session
+  -- see SOURCES-SPLIT FIX below for the full story): "which sources
+  actually CORROBORATED this candidate" (precise, drives correlation-
+  status reasoning text) and "which sources were CHECKED/attempted for
+  this candidate regardless of outcome" (broader, drives the Vegetation/
+  Agronomic perspective's "was NDVI evaluated at all" question). These
+  used to be silently merged into one field; conflating them was itself
+  the root cause of the bug fixed this session.
 - SCOPE: only anomalies[] entries with evidence_type == "DEM" (or no
   evidence_type at all -- single-source runs) are debated. In synthetic-
   NDVI mode, anomalies[] can also hold NDVI-raster-detected candidates
@@ -120,22 +87,80 @@ state, not a guess either way. If GPR evidence exists but no candidate
 was close enough to use it, that is reported in the result's "gpr_note"
 field rather than silently discarded.
 
-REAL THERMAL EXTENSION (added this session): unlike GPR's single
+REAL THERMAL EXTENSION (added a prior session): unlike GPR's single
 site-anchored pick, real Landsat thermal (evidence_record.py's fourth
 evidence slot -- see thermal_source_mobile.py and
 investigation_multi_mobile.py's _run_thermal_checks) is a per-DEM-
 candidate check, run at EACH candidate's own exact (lat, lon) --
 matching is therefore a TIGHT-tolerance exact match (a few meters, to
 absorb only floating-point noise, not GPR's colocation-radius-style
-"was this nearby" match), via _attach_thermal_detail() below. Unlike
-the has_ndvi union-based approach (see the KNOWN, FLAGGED IMPRECISION
-note above), this uses fourth_evidence_detail's own per-candidate error
-field directly, so it correctly distinguishes "Thermal genuinely
-checked and succeeded for this candidate" from "Thermal was attempted
-for this run but failed for this specific candidate" -- a real, more
-precise signal than what currently exists for NDVI, built this way
-from the start since this is new code with no existing on-device-
-proven behavior to risk regressing.
+"was this nearby" match), via _attach_thermal_detail() below. This uses
+fourth_evidence_detail's own per-candidate error field directly, so it
+correctly distinguishes "Thermal genuinely checked and succeeded for
+this candidate" from "Thermal was attempted for this run but failed for
+this specific candidate" -- unaffected by this session's SOURCES-SPLIT
+FIX below (it was already precise from the start).
+
+SOURCES-SPLIT FIX (this session -- REAL on-device bug): a real
+investigation showed a candidate's Anthropogenic/Archaeological
+reasoning text claiming "CORROBORATED across independent evidence
+sources (DEM, NDVI, GPR, THERMAL)" even though GPR's pick was nowhere
+near that candidate (gpr_confirmed was False for it) and Thermal had
+genuinely failed for that same candidate. The correlation_status
+("CORROBORATED") and confidence numbers were CORRECT throughout --
+only the reasoning sentence's list of *which* sources corroborated was
+wrong.
+
+ROOT CAUSE: candidate["sources"] was being set to the UNION of two
+things that answer genuinely different questions:
+  (a) supporting_sources from this candidate's own correlation_entry --
+      precise, exactly what corroborated THIS candidate (e.g. ["DEM",
+      "NDVI"]).
+  (b) context["sources"] -- every evidence_type present ANYWHERE in
+      the run's evidence[] list, regardless of whether it applied to
+      this specific candidate (this is why GPR/THERMAL leaked in: a GPR
+      evidence item and a Thermal evidence item both existed in this
+      run's evidence[], even though neither corroborated -- or in
+      Thermal's case, even successfully checked -- this particular
+      candidate).
+The union with (b) was NOT a mistake in isolation -- it was deliberately
+added (see the older "sources" BUG HISTORY note above) to fix a REAL,
+separate problem: debate_engine.py's Vegetation/Agronomic perspective
+needs to know "was NDVI evaluated at all for this candidate" even when
+NDVI showed no stress (a SINGLE_SOURCE correlation_entry's
+supporting_sources only lists the source that positively detected an
+anomaly, e.g. ["DEM"], NOT a source that was checked and found nothing).
+Without (b), a genuinely-checked-but-no-signal NDVI result would look
+identical to "NDVI was never attempted at all" to that perspective --
+exactly the mislabeling this project's zero-fake-data principle exists
+to prevent.
+
+The actual bug was collapsing BOTH answers into the SAME field
+(candidate["sources"]), which debate_engine.py's Anthropogenic
+perspective then quoted verbatim as "what corroborated" -- silently
+picking up (b)'s whole-run union in a place that needed (a)'s
+per-candidate precision.
+
+THE FIX: stop merging. candidate["sources"] is now set to
+supporting_sources ONLY (precise, exactly what corroborated this
+candidate) -- this is what debate_engine.py's Anthropogenic/
+Geomorphology perspectives read via _sources_present(), so their
+reasoning text is now always accurate for this candidate specifically.
+A NEW, separate field, candidate["checked_sources"], now carries
+EXACTLY the same union value "sources" used to carry before this fix
+(supporting_sources + context["sources"], deduplicated) -- this is a
+new alias debate_engine.py's Vegetation/Agronomic perspective now reads
+via a new _sources_checked_present() helper (see debate_engine.py's own
+docstring for that change), so its existing, already-on-device-proven
+"was NDVI checked at all" behavior is UNCHANGED, byte-for-byte, just
+reading from a differently-named field.
+
+_build_steward_report() below is updated to match: has_dem/has_ndvi now
+read candidate["checked_sources"] (the broader, historically-used union)
+rather than candidate["sources"] (now precise-only) -- this preserves
+the Scientific Steward's exact existing on-device-confirmed Stage 1
+behavior unchanged; only debate_engine.py's Anthropogenic reasoning text
+changes as a result of this fix.
 
 SCIENTIFIC STEWARD STAGE 1 EXTENSION (added a prior session): after
 debate_engine.run_debate() returns its positions + synthesis for a
@@ -150,24 +175,20 @@ HONEST MAPPING NOTES (read before changing _build_steward_report below):
 this module has REAL data for some Steward inputs and does NOT for
 others -- the mapping below is deliberately conservative rather than
 guessing, per this project's zero-fabrication rule:
-  - has_dem / has_ndvi: real, taken directly from candidate["sources"]
-    (see the "sources" bug-history note above -- this is the same
-    union-of-checked-and-corroborating list debate_engine.py itself
-    reads, so it is exactly as reliable as the existing Vegetation/
-    Agronomic perspective's own "was NDVI checked" logic -- including
-    that logic's own known, flagged imprecision noted above).
+  - has_dem / has_ndvi: real, taken from candidate["checked_sources"]
+    (the broader union -- see SOURCES-SPLIT FIX above for why this is
+    the correct field for Steward to read, unchanged in effect from
+    before this session's fix).
   - has_gpr / has_field_validation: real, taken directly from
     candidate["gpr_confirmed"] (see _attach_gpr() above -- set only
     when a real GPR pick colocated with this specific candidate).
-  - has_thermal (REAL as of this session, previously always False):
-    taken directly from candidate["thermal_checked"] (see
-    _attach_thermal_detail() below -- set only when a real per-
+  - has_thermal: real, taken directly from candidate["thermal_checked"]
+    (see _attach_thermal_detail() below -- set only when a real per-
     candidate Thermal check genuinely succeeded, i.e. its own error
-    field was None, for THIS EXACT candidate -- not merely "Thermal
-    was attempted somewhere in this run", unlike has_ndvi's current
-    union-based approach). If a candidate's Thermal check genuinely
-    failed (network/auth/no-data), has_thermal is honestly False for
-    that candidate, not True.
+    field was None, for THIS EXACT candidate -- not merely "Thermal was
+    attempted somewhere in this run"). If a candidate's Thermal check
+    genuinely failed (network/auth/no-data), has_thermal is honestly
+    False for that candidate, not True.
   - has_optical / has_lidar / has_ert: always False. ARIYAN does not
     track a separate raw-optical evidence stream distinct from NDVI
     (NDVI IS derived from the same Sentinel-2 optical bands -- counting
@@ -329,11 +350,10 @@ def _attach_thermal_detail(
     different/distant candidate, or a genuinely matched entry whose
     error field is set (this candidate's own Thermal check failed).
 
-    This is intentionally MORE PRECISE than has_ndvi's current
-    context-union approach (see this module's HONEST MAPPING NOTES) --
-    built this way from the start since Thermal is new code with no
-    existing on-device-proven behavior to risk regressing by choosing
-    the more precise design immediately.
+    Already precise from the start (unaffected by this session's
+    SOURCES-SPLIT FIX) -- built this way for Thermal since it's new code
+    with no existing on-device-proven behavior to risk regressing by
+    choosing the more precise design immediately.
     """
     best = None
     best_dist = None
@@ -360,6 +380,28 @@ def _build_candidate(
     checked_sources: Optional[list[str]] = None,
     original_index: Optional[int] = None,
 ) -> dict:
+    """Builds the candidate dict debate_engine.py consumes.
+
+    SOURCES-SPLIT FIX (this session): candidate["sources"] is now set to
+    ONLY this candidate's own supporting_sources -- precise, exactly
+    what corroborated THIS candidate. Previously this was merged with
+    checked_sources (the whole-run union of evidence types present
+    anywhere), which caused debate_engine.py's Anthropogenic perspective
+    to falsely list sources (e.g. GPR, THERMAL) that never actually
+    corroborated this specific candidate in its reasoning text -- see
+    this module's own SOURCES-SPLIT FIX docstring note for the full
+    real-on-device bug history.
+
+    candidate["checked_sources"] now separately carries EXACTLY the same
+    union value "sources" used to carry before this fix (supporting_
+    sources + checked_sources param, deduplicated) -- this preserves
+    debate_engine.py's Vegetation/Agronomic perspective's existing,
+    already-on-device-proven "was NDVI checked at all for this
+    candidate" behavior byte-for-byte (see debate_engine.py's new
+    _sources_checked_present(), which now reads this field), and also
+    preserves _build_steward_report()'s existing has_dem/has_ndvi
+    behavior below (updated to read checked_sources instead of sources).
+    """
     candidate: dict[str, Any] = {
         "location": {"lat": anomaly.get("lat"), "lon": anomaly.get("lon")},
     }
@@ -377,9 +419,21 @@ def _build_candidate(
         if correlation_entry.get("supporting_sources"):
             supporting_sources = list(correlation_entry["supporting_sources"])
 
+    if supporting_sources:
+        # Precise: exactly what corroborated THIS candidate. This is
+        # what debate_engine.py's Anthropogenic/Geomorphology
+        # perspectives read for their reasoning text (via
+        # _sources_present()) -- fixed this session, see docstring.
+        candidate["sources"] = supporting_sources
+
     merged_sources = list(dict.fromkeys([*supporting_sources, *(checked_sources or [])]))
     if merged_sources:
-        candidate["sources"] = merged_sources
+        # Broader: the whole-run union, exactly as "sources" used to
+        # mean before this session's fix. Only debate_engine.py's
+        # Vegetation/Agronomic perspective (via the new
+        # _sources_checked_present()) and this module's own
+        # _build_steward_report() below read this field now.
+        candidate["checked_sources"] = merged_sources
 
     return candidate
 
@@ -398,10 +452,18 @@ def _build_context(investigation: dict) -> dict:
 def _build_steward_report(debate: dict, candidate: dict) -> dict:
     """Scientific Steward Stage 1 wiring. See HONEST MAPPING NOTES (in
     this module's own docstring) for exactly which inputs are real vs.
-    deliberately conservative placeholders."""
-    sources = candidate.get("sources") or []
-    has_dem = "DEM" in sources
-    has_ndvi = "NDVI" in sources
+    deliberately conservative placeholders.
+
+    has_dem/has_ndvi read candidate["checked_sources"] (the broader,
+    historically-used union), NOT candidate["sources"] (now precise-only
+    as of this session's SOURCES-SPLIT FIX) -- this keeps the Scientific
+    Steward's exact existing on-device-confirmed Stage 1 behavior
+    unchanged; only debate_engine.py's Anthropogenic reasoning text
+    changes as a result of that fix.
+    """
+    checked_sources = candidate.get("checked_sources") or []
+    has_dem = "DEM" in checked_sources
+    has_ndvi = "NDVI" in checked_sources
     has_gpr = bool(candidate.get("gpr_confirmed"))
     has_thermal = bool(candidate.get("thermal_checked"))
 
