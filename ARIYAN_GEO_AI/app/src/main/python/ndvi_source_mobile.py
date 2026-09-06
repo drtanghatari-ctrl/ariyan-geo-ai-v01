@@ -257,6 +257,7 @@ def _stats_for_bbox(
     total_n = 0
     weighted_mean_sum = 0.0
     weighted_var_sum = 0.0
+    n_pixels_with_stddev = 0
     n_intervals_with_data = 0
 
     for interval in intervals:
@@ -278,7 +279,26 @@ def _stats_for_bbox(
         n_intervals_with_data += 1
         total_n += valid_count
         weighted_mean_sum += mean * valid_count
-        weighted_var_sum += (stdev or 0.0) ** 2 * valid_count
+        # HONEST NOTE (bug fixed this session): a missing/null stDev from
+        # Sentinel Hub for this interval (a real, plausible response when
+        # very few pixels survive cloud/water masking) means the variance
+        # for THIS interval is UNKNOWN -- it does not mean the variance is
+        # verified to be exactly zero. The previous version silently
+        # coerced `stdev or 0.0`, contributing a fabricated zero-variance
+        # sample into the pooled stddev below. That is what produced a
+        # real, on-device pooled_stddev of exactly 0.0 whenever the only
+        # interval(s) with valid pixel data in the 60-day window happened
+        # to have a null stDev -- even though the pooled MEAN (unaffected
+        # by this bug) was computing correctly and showing real, distinct
+        # values per candidate. Fixed by only folding an interval's
+        # variance into the pool when Sentinel Hub actually reported one;
+        # pooled_stddev is now None (not 0.0) if no interval ever reported
+        # a usable stDev, so callers can tell "verified zero variance"
+        # apart from "variance genuinely unknown" and react honestly
+        # (see fetch_ndvi_core_halo_check's own handling of stddev=None).
+        if stdev is not None:
+            weighted_var_sum += (stdev ** 2) * valid_count
+            n_pixels_with_stddev += valid_count
 
     if total_n <= 0:
         raise NDVIFetchError(
@@ -289,7 +309,11 @@ def _stats_for_bbox(
         )
 
     pooled_mean = weighted_mean_sum / total_n
-    pooled_stddev = math.sqrt(weighted_var_sum / total_n)
+    pooled_stddev = (
+        math.sqrt(weighted_var_sum / n_pixels_with_stddev)
+        if n_pixels_with_stddev > 0
+        else None
+    )
 
     return {
         "mean": pooled_mean,
@@ -340,11 +364,47 @@ def fetch_ndvi_core_halo_check(
     Fetches (or reuses, if `access_token` is passed in) exactly ONE token
     for both the core and halo bbox calls.
 
+    STATISTICAL METHOD (fixed this session -- see HONEST NOTE below):
     Flags vegetation_stress_detected=True when the core mean NDVI is
-    significantly below the halo mean NDVI (z-score computed against the
-    halo's own stddev) -- a real, documented remote-sensing signature of
-    vegetation stress that can occur over a buried feature (e.g. reduced
-    root-zone moisture/soil depth altering canopy vigor).
+    significantly below the halo mean NDVI, using a proper two-sample
+    z-test for a difference in means: the standard error of
+    (core_mean - halo_mean) combines BOTH bboxes' pixel-level variance,
+    scaled down by their own valid pixel counts --
+        SE = sqrt(core_stddev^2 / core_n + halo_stddev^2 / halo_n)
+        z  = (core_mean - halo_mean) / SE
+    -- a real, documented remote-sensing signature of vegetation stress
+    that can occur over a buried feature (e.g. reduced root-zone
+    moisture/soil depth altering canopy vigor).
+
+    HONEST NOTE (bug found and fixed this session): the previous version
+    of this function computed z = (core_mean - halo_mean) / halo_stddev,
+    i.e. it divided the difference in MEANS by the halo bbox's raw
+    PIXEL-LEVEL spatial standard deviation. That answers a different
+    question ("how does the core mean compare to the spread of
+    individual halo pixels") rather than "is this mean difference
+    statistically real given how many pixels went into each mean" --
+    and it silently returned z_score=0.0 whenever halo_stddev computed
+    to (near) zero, with no warning. On a real on-device confirmation
+    run, all 4 real candidates reported z=0.00 despite visibly different
+    real core/halo mean gaps (0.008-0.016 raw NDVI units each) -- the
+    telltale sign the old zero-guard branch was firing every time rather
+    than a coincidence of rounding. The field name and response-shape
+    assumptions this function reads from Sentinel Hub (`stats.stDev`,
+    `stats.sampleCount`, etc.) were verified correct against Sentinel
+    Hub's own published Statistical API documentation before writing
+    this fix -- the bug was the STATISTICAL TEST itself, not a
+    key-name/schema mismatch. Standard-error-of-the-difference shrinks
+    with real pixel counts (unlike raw stddev), so genuine small mean
+    shifts at this AOI scale can register instead of structurally
+    vanishing. If either bbox's valid pixel count is too small for a
+    meaningful test (fewer than 2), or the standard error itself
+    computes to (near) zero, this now RAISES NDVIFetchError with an
+    honest explanation instead of silently returning a fabricated
+    z_score=0.0 "no stress detected" result -- matching this project's
+    existing zero-fake-data principle. Callers (see debate_mobile.py)
+    already catch NDVIFetchError per-candidate and record it as an
+    honest SINGLE_SOURCE result with the real reason, so this requires
+    no caller-side changes.
 
     Returns a dict:
       {
@@ -353,9 +413,9 @@ def fetch_ndvi_core_halo_check(
         "core_sample_count": int, "halo_sample_count": int,
       }
 
-    Raises NDVIFetchError on any auth/network/no-data failure. Callers
-    should catch this per candidate and record it as an honest
-    SINGLE_SOURCE result with the real error message, rather than
+    Raises NDVIFetchError on any auth/network/no-data/insufficient-sample
+    failure. Callers should catch this per candidate and record it as an
+    honest SINGLE_SOURCE result with the real error message, rather than
     failing the whole investigation.
     """
     core_bbox = _bbox_from_point(lat, lon, core_radius_m)
@@ -366,12 +426,45 @@ def fetch_ndvi_core_halo_check(
     core_stats = _stats_for_bbox(core_bbox, token, timeout=timeout)
     halo_stats = _stats_for_bbox(halo_bbox, token, timeout=timeout)
 
+    core_n = core_stats["sample_count"]
+    halo_n = halo_stats["sample_count"]
+    core_stddev = core_stats["stddev"]
     halo_stddev = halo_stats["stddev"]
-    if halo_stddev <= 1e-9:
-        z_score = 0.0
-    else:
-        z_score = (core_stats["mean"] - halo_stats["mean"]) / halo_stddev
 
+    if core_n < 2 or halo_n < 2:
+        raise NDVIFetchError(
+            f"Too few valid (non-cloud, non-water) NDVI pixels to compute "
+            f"a meaningful vegetation-stress statistic at this location "
+            f"(core_sample_count={core_n}, halo_sample_count={halo_n}). "
+            f"Reporting this honestly as a real data-quality limitation "
+            f"rather than a fabricated zero/no-stress result."
+        )
+
+    if core_stddev is None or halo_stddev is None:
+        raise NDVIFetchError(
+            "Sentinel Hub did not report a usable standard deviation for "
+            "the core and/or halo area over this time window (this "
+            "commonly happens when very few pixel observations survived "
+            "cloud/water masking) -- a significance test cannot be "
+            "computed honestly without it. Reporting this as a real "
+            "data-quality limitation rather than assuming zero variance."
+        )
+
+    standard_error = math.sqrt(
+        (core_stddev ** 2) / core_n
+        + (halo_stddev ** 2) / halo_n
+    )
+
+    if standard_error <= 1e-9:
+        raise NDVIFetchError(
+            "Standard error of the core/halo mean difference computed to "
+            "(near) zero, which is not a valid basis for a significance "
+            "test at this location -- reporting this as a real "
+            "data-quality limitation rather than silently returning "
+            "z_score=0.0."
+        )
+
+    z_score = (core_stats["mean"] - halo_stats["mean"]) / standard_error
     vegetation_stress_detected = z_score <= -stress_zscore_threshold
 
     return {
@@ -380,6 +473,6 @@ def fetch_ndvi_core_halo_check(
         "halo_stddev": halo_stddev,
         "z_score": z_score,
         "vegetation_stress_detected": vegetation_stress_detected,
-        "core_sample_count": core_stats["sample_count"],
-        "halo_sample_count": halo_stats["sample_count"],
+        "core_sample_count": core_n,
+        "halo_sample_count": halo_n,
     }
