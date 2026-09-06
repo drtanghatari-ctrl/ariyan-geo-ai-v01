@@ -76,6 +76,22 @@ REAL SCHEMA NOTES (why this file looks the way it does):
   gathered (context["sources"], built in _build_context() from the
   top-level evidence[] list) -- so a checked-but-no-signal source is
   never silently indistinguishable from an unchecked one.
+  KNOWN, FLAGGED, NOT-YET-FIXED IMPRECISION (identified this session,
+  NOT changed without explicit confirmation -- this is a real,
+  already-on-device-confirmed-working code path): this union approach
+  cannot distinguish "NDVI genuinely succeeded for THIS candidate" from
+  "NDVI evidence exists somewhere in this run but genuinely failed for
+  EVERY candidate" -- context["sources"] includes "NDVI" whenever an
+  NDVI evidence item exists in evidence[] at all (which it always does
+  once a multi-source run has any second_evidence set, even one whose
+  n_fetch_errors equals n_candidates_checked, i.e. 100% failure). This
+  affects debate_engine.py's Vegetation/Agronomic sources-present check
+  only in the (currently believed rare) case where NDVI fails for
+  literally every candidate in a run. The SAME exact-match technique
+  used below for Thermal (matching second_evidence_detail by lat/lon
+  and checking its own per-candidate error field) could fix this too,
+  if wanted -- deliberately not applied here without asking first,
+  since it would change already-proven on-device behavior.
 - SCOPE: only anomalies[] entries with evidence_type == "DEM" (or no
   evidence_type at all -- single-source runs) are debated. In synthetic-
   NDVI mode, anomalies[] can also hold NDVI-raster-detected candidates
@@ -104,16 +120,31 @@ state, not a guess either way. If GPR evidence exists but no candidate
 was close enough to use it, that is reported in the result's "gpr_note"
 field rather than silently discarded.
 
-SCIENTIFIC STEWARD STAGE 1 EXTENSION (added this session -- the ONLY
-change in this file this session, everything above is unchanged from the
-prior version): after debate_engine.run_debate() returns its positions +
-synthesis for a candidate, this module now ALSO calls
-steward_engine.evaluate_candidate() (see steward_engine.py, built and
-sandbox-tested standalone in a prior session) and attaches the result
-under a new "steward" key on that same debate dict. This is purely
-additive -- MainActivity.kt's existing appendDebateSection() rendering
-is completely unaffected by the extra key until it's explicitly updated
-to read it (see this session's matching MainActivity.kt change).
+REAL THERMAL EXTENSION (added this session): unlike GPR's single
+site-anchored pick, real Landsat thermal (evidence_record.py's fourth
+evidence slot -- see thermal_source_mobile.py and
+investigation_multi_mobile.py's _run_thermal_checks) is a per-DEM-
+candidate check, run at EACH candidate's own exact (lat, lon) --
+matching is therefore a TIGHT-tolerance exact match (a few meters, to
+absorb only floating-point noise, not GPR's colocation-radius-style
+"was this nearby" match), via _attach_thermal_detail() below. Unlike
+the has_ndvi union-based approach (see the KNOWN, FLAGGED IMPRECISION
+note above), this uses fourth_evidence_detail's own per-candidate error
+field directly, so it correctly distinguishes "Thermal genuinely
+checked and succeeded for this candidate" from "Thermal was attempted
+for this run but failed for this specific candidate" -- a real, more
+precise signal than what currently exists for NDVI, built this way
+from the start since this is new code with no existing on-device-
+proven behavior to risk regressing.
+
+SCIENTIFIC STEWARD STAGE 1 EXTENSION (added a prior session): after
+debate_engine.run_debate() returns its positions + synthesis for a
+candidate, this module also calls steward_engine.evaluate_candidate()
+(see steward_engine.py, built and sandbox-tested standalone in a prior
+session) and attaches the result under a new "steward" key on that same
+debate dict. This is purely additive -- MainActivity.kt's existing
+appendDebateSection() rendering is completely unaffected by the extra
+key until it's explicitly updated to read it.
 
 HONEST MAPPING NOTES (read before changing _build_steward_report below):
 this module has REAL data for some Steward inputs and does NOT for
@@ -123,18 +154,27 @@ guessing, per this project's zero-fabrication rule:
     (see the "sources" bug-history note above -- this is the same
     union-of-checked-and-corroborating list debate_engine.py itself
     reads, so it is exactly as reliable as the existing Vegetation/
-    Agronomic perspective's own "was NDVI checked" logic).
+    Agronomic perspective's own "was NDVI checked" logic -- including
+    that logic's own known, flagged imprecision noted above).
   - has_gpr / has_field_validation: real, taken directly from
     candidate["gpr_confirmed"] (see _attach_gpr() above -- set only
     when a real GPR pick colocated with this specific candidate).
-  - has_optical / has_thermal / has_lidar / has_ert: always False.
-    ARIYAN does not track a separate raw-optical evidence stream
-    distinct from NDVI (NDVI IS derived from the same Sentinel-2
-    optical bands), and has no thermal/LiDAR/ERT sources built at all
-    -- counting OPTICAL as a source independent from NDVI here would
-    double-count a single satellite pass as two independent evidence
-    sources and artificially inflate the confidence ceiling. This is a
-    deliberate choice, not an oversight.
+  - has_thermal (REAL as of this session, previously always False):
+    taken directly from candidate["thermal_checked"] (see
+    _attach_thermal_detail() below -- set only when a real per-
+    candidate Thermal check genuinely succeeded, i.e. its own error
+    field was None, for THIS EXACT candidate -- not merely "Thermal
+    was attempted somewhere in this run", unlike has_ndvi's current
+    union-based approach). If a candidate's Thermal check genuinely
+    failed (network/auth/no-data), has_thermal is honestly False for
+    that candidate, not True.
+  - has_optical / has_lidar / has_ert: always False. ARIYAN does not
+    track a separate raw-optical evidence stream distinct from NDVI
+    (NDVI IS derived from the same Sentinel-2 optical bands -- counting
+    OPTICAL as independent here would double-count a single satellite
+    pass as two independent evidence sources and artificially inflate
+    the confidence ceiling), and has no LiDAR/ERT sources built at all.
+    Deliberate, not an oversight.
   - raw_debate_confidence: real, taken directly from
     synthesis["leading_confidence"] (0.0 when NO_DATA / absent, which
     correctly yields the Steward's NO_DATA band).
@@ -176,10 +216,10 @@ A Steward evaluation failure for one candidate is caught and reported as
 a "steward_error" string on that candidate's debate dict instead of
 raising -- consistent with this file's existing "never raise across the
 Chaquopy boundary" contract for run_debate_json as a whole, and matching
-the same per-candidate defensive pattern already used for GPR/NDVI
-elsewhere in this project (one candidate's Steward failure must never
-hide the other three perspectives' real debate results for that same
-candidate, or any other candidate's results).
+the same per-candidate defensive pattern already used for GPR/NDVI/
+Thermal elsewhere in this project (one candidate's Steward failure must
+never hide the other three perspectives' real debate results for that
+same candidate, or any other candidate's results).
 """
 from __future__ import annotations
 
@@ -189,6 +229,15 @@ from typing import Any, Optional
 from coordinate import GeoPoint, haversine_distance_m
 from debate_engine import run_debate
 from steward_engine import evaluate_candidate as steward_evaluate_candidate
+
+# Tolerance for matching a DEM candidate to its OWN per-candidate Thermal
+# detail entry. Deliberately tight (a few meters) -- unlike GPR's
+# colocation-radius-style tolerance for "was this nearby", Thermal
+# detail entries are built directly from the SAME dem_candidate.lat/lon
+# (see investigation_multi_mobile.py's _run_thermal_checks), so any real
+# distance here should only ever reflect floating-point noise, not a
+# genuine "different but nearby location" case.
+_THERMAL_DETAIL_MATCH_TOLERANCE_M = 5.0
 
 
 def _nearest_correlation_entry(anomaly: dict, correlation: list[dict]) -> Optional[dict]:
@@ -264,6 +313,47 @@ def _attach_gpr(candidate: dict, anomaly: dict, gpr_item: Optional[dict], max_di
     return True
 
 
+def _attach_thermal_detail(
+    candidate: dict,
+    anomaly: dict,
+    fourth_evidence_detail: list[dict],
+    tolerance_m: float = _THERMAL_DETAIL_MATCH_TOLERANCE_M,
+) -> None:
+    """Sets candidate["thermal_checked"] = True only when a real
+    per-candidate Thermal result exists for THIS exact candidate (tight
+    tolerance -- see module-level constant's own comment) AND that
+    result's own error field is None (i.e. the check genuinely
+    succeeded for this candidate, regardless of whether it detected an
+    anomaly). False for: no Thermal detail present at all (Thermal
+    never attempted this run), a detail entry existing only for a
+    different/distant candidate, or a genuinely matched entry whose
+    error field is set (this candidate's own Thermal check failed).
+
+    This is intentionally MORE PRECISE than has_ndvi's current
+    context-union approach (see this module's HONEST MAPPING NOTES) --
+    built this way from the start since Thermal is new code with no
+    existing on-device-proven behavior to risk regressing by choosing
+    the more precise design immediately.
+    """
+    best = None
+    best_dist = None
+    for entry in fourth_evidence_detail:
+        try:
+            e_point = GeoPoint(entry["lat"], entry["lon"])
+            a_point = GeoPoint(anomaly["lat"], anomaly["lon"])
+            dist = haversine_distance_m(a_point, e_point)
+        except (KeyError, TypeError):
+            continue
+        if best_dist is None or dist < best_dist:
+            best = entry
+            best_dist = dist
+
+    if best is None or best_dist is None or best_dist > tolerance_m:
+        candidate["thermal_checked"] = False
+        return
+    candidate["thermal_checked"] = best.get("error") is None
+
+
 def _build_candidate(
     anomaly: dict,
     correlation_entry: Optional[dict],
@@ -306,13 +396,14 @@ def _build_context(investigation: dict) -> dict:
 
 
 def _build_steward_report(debate: dict, candidate: dict) -> dict:
-    """Scientific Steward Stage 1 wiring. See HONEST MAPPING NOTES (in the
-    real committed file's module docstring) for exactly which inputs are
-    real vs. deliberately conservative placeholders."""
+    """Scientific Steward Stage 1 wiring. See HONEST MAPPING NOTES (in
+    this module's own docstring) for exactly which inputs are real vs.
+    deliberately conservative placeholders."""
     sources = candidate.get("sources") or []
     has_dem = "DEM" in sources
     has_ndvi = "NDVI" in sources
     has_gpr = bool(candidate.get("gpr_confirmed"))
+    has_thermal = bool(candidate.get("thermal_checked"))
 
     synthesis = debate.get("synthesis") or {}
     raw_confidence = float(synthesis.get("leading_confidence") or 0.0)
@@ -346,6 +437,7 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
         has_optical=False,
         has_ndvi=has_ndvi,
         has_gpr=has_gpr,
+        has_thermal=has_thermal,
         raw_debate_confidence=raw_confidence,
         has_field_validation=has_gpr,
         environmental_confounders_controlled=False,
@@ -365,6 +457,7 @@ def run_debate_json(investigation_json: str) -> str:
         anomalies = investigation.get("anomalies") or []
         correlation = investigation.get("correlation") or []
         evidence = investigation.get("evidence") or []
+        fourth_evidence_detail = investigation.get("fourth_evidence_detail") or []
         context = _build_context(investigation)
 
         gpr_item = _gpr_evidence_item(evidence)
@@ -382,6 +475,7 @@ def run_debate_json(investigation_json: str) -> str:
             candidate = _build_candidate(anomaly, correlation_entry, context.get("sources"), original_index)
             if _attach_gpr(candidate, anomaly, gpr_item, gpr_max_distance_m):
                 any_gpr_confirmed = True
+            _attach_thermal_detail(candidate, anomaly, fourth_evidence_detail)
             debate = run_debate(candidate, context)
 
             try:
