@@ -39,6 +39,35 @@ Anthropogenic/Archaeological, and Data Artifact/Skeptic perspectives) --
 GPR is a genuinely new kind of evidence (a real subsurface measurement,
 not another surface-level proxy like elevation or NDVI), so it earns its
 own treatment rather than being folded into an existing alias.
+
+TWO DISTINCT "SOURCES PRESENT" QUESTIONS (added this session -- real
+on-device bug fix, see _sources_present() and _sources_checked_present()
+below): a candidate's evidence sources can be read in two genuinely
+different ways, and this module previously only had ONE function trying
+to answer both. "Which sources actually CORROBORATED this candidate"
+(precise -- what should drive any reasoning text that claims corroboration,
+e.g. the Anthropogenic/Archaeological perspective's "CORROBORATED across
+independent evidence sources (...)" sentence) is a DIFFERENT question
+from "which sources were CHECKED/attempted for this candidate at all,
+regardless of whether they found anything" (broader -- needed by the
+Vegetation/Agronomic perspective, which must distinguish "NDVI was
+evaluated here and found no stress" from "NDVI was never evaluated
+here at all"). A real investigation surfaced this: a candidate's
+Anthropogenic reasoning text listed GPR and THERMAL as if they'd
+corroborated it, when in fact neither had even been successfully
+checked for that specific candidate -- only DEM and NDVI genuinely had.
+Root cause was entirely upstream in debate_mobile.py (which had been
+merging both concepts into one "sources" field before this fix); the
+fix here is additive only: _sources_present() is UNCHANGED (still
+reads candidate "sources"/"source_types"/"evidence_sources", the
+precise concept, now that debate_mobile.py sends the precise value
+there), and a NEW _sources_checked_present() reads a DIFFERENT set of
+candidate-level keys ("checked_sources", "evaluated_sources",
+"attempted_sources") for the broader concept, used ONLY by
+_vegetation_position() below. No existing perspective's rule LOGIC
+changed -- only which field _vegetation_position() reads from, exactly
+matching this file's own stated design philosophy of using _get()-style
+aliasing rather than changing rules when a schema question arises.
 """
 
 from __future__ import annotations
@@ -81,7 +110,36 @@ def _correlation_status(candidate: dict, context: dict) -> str:
 
 
 def _sources_present(candidate: dict, context: dict) -> list[str]:
+    """Which sources actually CORROBORATED this candidate -- precise.
+    Drives any reasoning text that claims corroboration (e.g. the
+    Anthropogenic/Archaeological perspective's source list) and the
+    Geomorphology perspective's "DEM only" check. See this module's
+    docstring, TWO DISTINCT "SOURCES PRESENT" QUESTIONS, for why this is
+    kept separate from _sources_checked_present() below -- this function
+    itself is UNCHANGED by that fix; only what debate_mobile.py now puts
+    in candidate["sources"] changed (from a whole-run union to this
+    candidate's own precise supporting_sources)."""
     srcs = _get(candidate, "sources", "source_types", "evidence_sources")
+    if srcs:
+        return [str(s).upper() for s in srcs]
+    srcs = _get(context, "sources", "source_types", "evidence_sources", default=[])
+    return [str(s).upper() for s in srcs]
+
+
+def _sources_checked_present(candidate: dict, context: dict) -> list[str]:
+    """Which sources were CHECKED/attempted for this candidate at all,
+    regardless of whether they found anything -- broader. Used ONLY by
+    _vegetation_position() below, which must distinguish "NDVI was
+    evaluated here and found no stress" from "NDVI was never evaluated
+    here at all" (a SINGLE_SOURCE correlation result's precise
+    supporting_sources only lists the source that positively detected
+    an anomaly, so it alone can't answer this). Added this session --
+    see this module's docstring, TWO DISTINCT "SOURCES PRESENT"
+    QUESTIONS, for the real on-device bug this split fixes. Same
+    aliasing/fallback pattern as _sources_present(), different key
+    names, matching debate_mobile.py's new candidate["checked_sources"]
+    field."""
+    srcs = _get(candidate, "checked_sources", "evaluated_sources", "attempted_sources")
     if srcs:
         return [str(s).upper() for s in srcs]
     srcs = _get(context, "sources", "source_types", "evidence_sources", default=[])
@@ -400,8 +458,15 @@ def _vegetation_position(candidate: dict, context: dict) -> Position:
     """Argues that the anomaly is primarily a vegetation-driven signal
     (e.g. a crop mark or soil-moisture-linked NDVI effect) rather than a
     true elevation feature. Only takes a substantive position when NDVI
-    evidence is actually present for this candidate."""
-    sources = _sources_present(candidate, context)
+    evidence is actually present for this candidate.
+
+    Reads _sources_checked_present() (NOT _sources_present()) -- this
+    perspective's question is "was NDVI evaluated at all here", not "did
+    NDVI corroborate here", so it needs the broader checked/attempted
+    concept, which correctly includes a genuinely-checked-but-no-stress
+    NDVI result. See this module's docstring, TWO DISTINCT "SOURCES
+    PRESENT" QUESTIONS, for why these are now two separate functions."""
+    sources = _sources_checked_present(candidate, context)
     ndvi_synth = _ndvi_is_synthetic(candidate, context)
 
     if "NDVI" not in sources:
