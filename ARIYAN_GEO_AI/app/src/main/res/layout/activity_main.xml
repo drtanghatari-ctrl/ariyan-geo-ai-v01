@@ -270,7 +270,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:hint="Resistivity (Ω·m), as read off the inverted profile"
+            android:hint="Resistivity (ohm-m), as read off the inverted profile"
             android:visibility="gone">
             <com.google.android.material.textfield.TextInputEditText
                 android:id="@+id/inputErtResistivity"
