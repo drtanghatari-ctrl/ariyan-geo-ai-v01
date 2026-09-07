@@ -94,7 +94,7 @@ import java.io.File
  * perspectives).
  *
  * Optional ERT field reading (opt-in via switchErt, ADDED THIS SESSION):
- * a single real manual reading -- a resistivity value (Ω·m) a human has
+ * a single real manual reading -- a resistivity value (ohm-m) a human has
  * already read off an inverted ERT profile, at a specific known depth
  * -- classified against documented reference resistivity ranges via
  * ert_source_mobile.py / ert_resistivity_model.py, and attached as a
@@ -300,7 +300,7 @@ class MainActivity : AppCompatActivity() {
             toast("ERT only attaches via the multi-evidence path -- turn on \"Include NDVI correlation\" above too, or turn off \"Attach ERT field reading\""); return
         }
         if (useErt && (ertResistivityOhmM == null || ertResistivityOhmM <= 0.0)) {
-            toast("Enter a positive resistivity value (Ω·m) for the ERT reading"); return
+            toast("Enter a positive resistivity value (ohm-m) for the ERT reading"); return
         }
         if (useErt && (ertDepthM == null || ertDepthM < 0.0)) {
             toast("Enter a non-negative depth (m) for the ERT reading"); return
@@ -634,7 +634,7 @@ class MainActivity : AppCompatActivity() {
         for (i in 0 until sixthEvidenceDetail.length()) {
             val e = sixthEvidenceDetail.getJSONObject(i)
             sb.append(String.format(
-                "  resistivity = %.1f Ω·m at %.2f m depth  entry: %s\n",
+                "  resistivity = %.1f ohm-m at %.2f m depth  entry: %s\n",
                 e.optDouble("resistivity_ohm_m"),
                 e.optDouble("depth_m"),
                 e.optString("entry_method")
