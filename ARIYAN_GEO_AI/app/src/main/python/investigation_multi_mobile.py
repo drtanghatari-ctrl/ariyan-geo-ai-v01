@@ -1,7 +1,7 @@
 """
 investigation_multi_mobile.py -- Multi-evidence-source investigation entry
 point called from Kotlin (via Chaquopy): DEM + NDVI + Thermal + Optical
-correlation.
+correlation, plus optional single-reading GPR + ERT field verification.
 
 Mirrors investigation_mobile.py's pattern (JSON string return, no
 scipy, no file I/O) but runs DEM through anomaly detection, then
@@ -9,8 +9,10 @@ independently checks each DEM candidate against real Copernicus
 Sentinel-2 NDVI, real Landsat 8/9 thermal data, AND real Sentinel-2
 visible-band optical brightness, cross-referencing all four via a
 per-candidate combiner to produce CORROBORATED / SINGLE_SOURCE status --
-and now which of NDVI, THERMAL, and/or OPTICAL actually corroborated
-each candidate.
+plus which of NDVI, THERMAL, and/or OPTICAL actually corroborated each
+candidate. GPR and ERT (both optional, single-reading, site-anchored)
+are handled separately (see their own sections below) since neither is
+a per-candidate corroborating check.
 
 REWRITTEN A PRIOR SESSION -- SYNTHETIC PATH REMOVED ENTIRELY, BOTH DEM AND
 NDVI. Previously, DEM had a use_real_dem switch (default False,
@@ -60,7 +62,7 @@ OAuth credentials already entered for NDVI (same account, different
 Sentinel Hub collection -- see thermal_source_mobile.py). Runs
 INDEPENDENTLY of whichever NDVI path succeeds or fails this run.
 
-REAL OPTICAL, ADDED THIS SESSION -- A GENUINE FOURTH PER-CANDIDATE
+REAL OPTICAL (a prior session) -- A GENUINE FOURTH PER-CANDIDATE
 CORROBORATING SOURCE (real Sentinel-2 visible-band brightness /
 "soilmark" check, see optical_source_mobile.py for the full
 physical/statistical reasoning and the honest masking-design-decision
@@ -102,17 +104,28 @@ slot), reported honestly with its own uncertainty range. Not yet fed
 into the AI Debate Engine from this file directly -- that happens in
 debate_mobile.py, called separately by MainActivity.kt.
 
+ERT, ADDED THIS SESSION: when use_ert=True, a single real ERT manual
+reading (a human-read resistivity value + depth, already read off an
+already-inverted profile -- see ert_source_mobile.py) anchored at this
+investigation's (lat, lon) is classified against documented reference
+resistivity ranges and attached as a fixed, site-anchored (not
+per-candidate) evidence entry (evidence_record.py's sixth_evidence
+slot), mirroring GPR's own wiring exactly via _build_ert_evidence()
+below. Like GPR, not fed into the AI Debate Engine from this file
+directly -- that happens in debate_mobile.py.
+
 TOKEN-CACHING + PROGRESS-REPORTING FIX (a prior session, EXTENDED across
-Thermal and now Optical too): a real on-device airplane-mode test showed
-this module could appear to hang for several minutes with a
-multi-candidate grid, because the old NDVI loop fetched a brand-new
-OAuth token independently for every candidate (see ndvi_source_mobile.py's
-own docstring for the full explanation) with zero visible progress in
-the meantime. Fixed two ways: (1) ONE access token is now fetched for
-the whole run and reused for EVERY candidate across NDVI, Thermal, AND
-Optical (all three use the same Copernicus account); (2) this module
-writes a small investigation_status.json into offline_data_root as it
-works (phase = "dem" / "ndvi" / "thermal" / "optical" / "done", plus
+Thermal and Optical): a real on-device airplane-mode test showed this
+module could appear to hang for several minutes with a multi-candidate
+grid, because the old NDVI loop fetched a brand-new OAuth token
+independently for every candidate (see ndvi_source_mobile.py's own
+docstring for the full explanation) with zero visible progress in the
+meantime. Fixed two ways: (1) ONE access token is now fetched for the
+whole run and reused for EVERY candidate across NDVI, Thermal, AND
+Optical (all three use the same Copernicus account -- GPR and ERT need
+no token at all, being manual-entry-only); (2) this module writes a
+small investigation_status.json into offline_data_root as it works
+(phase = "dem" / "ndvi" / "thermal" / "optical" / "done", plus
 done/total counts for each per-candidate loop), mirroring the exact
 JSON shape offline_data_manager.py already writes for offline downloads.
 MainActivity.kt polls this file on a separate coroutine so "Running..."
@@ -140,13 +153,14 @@ dem_source_mobile.py's own docstring for the full explanation.
 
 CREDENTIAL NAMING NOTE: the ndvi_client_id/ndvi_client_secret parameters
 below are now used for NDVI, Thermal, AND Optical (same Copernicus Data
-Space Ecosystem account, verified this session and a prior session
-against Copernicus's own Sentinel-2/Landsat 8-9 documentation) -- they
-were deliberately NOT renamed to something more source-neutral (e.g.
-copernicus_client_id) to avoid a breaking change to existing Kotlin call
-sites that already pass these by keyword. New parameters were added
-instead; only NEW arguments need to be added at the Kotlin call site,
-not renamed ones.
+Space Ecosystem account, verified against Copernicus's own Sentinel-2/
+Landsat 8-9 documentation) -- they were deliberately NOT renamed to
+something more source-neutral (e.g. copernicus_client_id) to avoid a
+breaking change to existing Kotlin call sites that already pass these
+by keyword. New parameters were added instead; only NEW arguments need
+to be added at the Kotlin call site, not renamed ones. GPR and ERT need
+no credentials at all (manual-entry-only), so this naming note does not
+apply to either.
 """
 from __future__ import annotations
 
@@ -166,6 +180,8 @@ import optical_source_mobile
 from optical_source_mobile import OpticalFetchError
 from gpr_source_mobile import GPRSurvey, GPRPick, estimate_depths, GPREvidence
 from gpr_depth_model import GPRDepthModelError
+from ert_source_mobile import ERTSurvey, ERTReading, classify_survey, ERTEvidence
+from ert_resistivity_model import ERTResistivityModelError
 from dem_source_mobile import OpenTopographyAAIGridSource, OpenTopographyFetchError
 from offline_evidence_fallback import fetch_offline_dem, fetch_offline_ndvi, OfflineDataUnavailableError
 
@@ -230,13 +246,13 @@ class ThermalCoreHaloResult:
 @dataclass
 class OpticalCoreHaloResult:
     """One real per-candidate Sentinel-2 visible-brightness core/halo
-    check result (or a recorded failure), added this session -- used
-    exactly like NdviCoreHaloResult/ThermalCoreHaloResult -- kept as a
-    plain dataclass so evidence_record.py's asdict() call works on it,
-    routed into fifth_evidence_detail (never merged into anomalies[])
-    since its schema (core_mean/halo_mean/z_score/core_brighter_than_halo)
-    has nothing in common with AnomalyCandidate, same reasoning as the
-    other two per-candidate check results above."""
+    check result (or a recorded failure) -- used exactly like
+    NdviCoreHaloResult/ThermalCoreHaloResult -- kept as a plain
+    dataclass so evidence_record.py's asdict() call works on it, routed
+    into fifth_evidence_detail (never merged into anomalies[]) since its
+    schema (core_mean/halo_mean/z_score/core_brighter_than_halo) has
+    nothing in common with AnomalyCandidate, same reasoning as the other
+    two per-candidate check results above."""
     lat: float
     lon: float
     core_mean: float | None
@@ -322,9 +338,9 @@ class RealThermalCoreHaloEvidence:
 
 class RealOpticalCoreHaloEvidence:
     """Wrapper satisfying build_investigation_record's `fifth_evidence`
-    interface (.as_evidence_record(), .source, .synthetic), added this
-    session, mirroring RealThermalCoreHaloEvidence exactly for the
-    real-Optical-via-Statistical-API path."""
+    interface (.as_evidence_record(), .source, .synthetic), mirroring
+    RealThermalCoreHaloEvidence exactly for the real-Optical-via-
+    Statistical-API path."""
 
     source = "Sentinel-2 L2A visible bands B02/B03/B04 (Sentinel Hub Statistical API via Copernicus Data Space Ecosystem, real per-candidate core/halo check)"
     synthetic = False
@@ -368,10 +384,9 @@ def _get_shared_copernicus_token(
 ) -> tuple[str | None, str | None]:
     """Fetches ONE OAuth access token to be shared across the NDVI,
     Thermal, AND Optical per-candidate checks this run (all three use
-    the same Copernicus Data Space Ecosystem account) -- extends the
-    existing one-token-per-run fix (originally NDVI-only, then extended
-    to Thermal) to also cover Optical, so none of the three sources
-    independently re-fetches its own token per candidate or per source.
+    the same Copernicus Data Space Ecosystem account) -- GPR and ERT
+    need no token at all (manual-entry-only), so neither is involved
+    here.
 
     Returns (token_or_None, error_message_or_None). Missing credentials
     is treated exactly like a fetch failure -- callers get a uniform
@@ -517,10 +532,10 @@ def _run_optical_checks(
 ) -> list[OpticalCoreHaloResult]:
     """For each DEM candidate, run a real Sentinel-2 visible-brightness
     core/halo check anchored at that candidate's location, using the
-    SAME pre-fetched shared token as NDVI/Thermal. Added this session,
-    mirrors _run_thermal_checks exactly. Runs regardless of whether
-    NDVI's or Thermal's own checks succeeded or failed for any given
-    candidate -- all three sources are fully independent."""
+    SAME pre-fetched shared token as NDVI/Thermal. Mirrors
+    _run_thermal_checks exactly. Runs regardless of whether NDVI's or
+    Thermal's own checks succeeded or failed for any given candidate --
+    all three sources are fully independent."""
     results: list[OpticalCoreHaloResult] = []
     total = len(dem_candidates)
     for i, dem_candidate in enumerate(dem_candidates):
@@ -572,7 +587,10 @@ def _build_correlated_candidates(
     source(s) actually corroborated it. supporting_sources is always DEM
     plus zero, one, two, or all three of NDVI/THERMAL/OPTICAL, in that
     order -- NEVER a candidate that "loses" a real corroborating result
-    just because another source also happened to succeed or fail.
+    just because another source also happened to succeed or fail. GPR
+    and ERT are deliberately NOT part of this combiner -- both are
+    single site-anchored readings handled separately by debate_mobile.py,
+    never full per-candidate correlation sources.
 
     A per-candidate failure on any source is recorded honestly in the
     combined_confidence_note (not silently dropped), and does not
@@ -690,7 +708,7 @@ def _build_gpr_evidence(
     limitation_message_or_None) -- a failure (bad soil preset key,
     non-positive travel time) is recorded as an honest limitation
     string rather than raised, so one bad GPR input never fails the
-    whole DEM/NDVI/Thermal/Optical investigation it's attached to.
+    whole DEM/NDVI/Thermal/Optical/ERT investigation it's attached to.
 
     Raises ValueError only for the caller-programming-error case of
     use_gpr=True with a missing soil preset or travel time.
@@ -720,6 +738,48 @@ def _build_gpr_evidence(
         )
 
 
+def _build_ert_evidence(
+    lat: float,
+    lon: float,
+    use_ert: bool,
+    ert_resistivity_ohm_m: float | None,
+    ert_depth_m: float | None,
+    ert_entry_method: str,
+    ert_device_note: str,
+) -> tuple[object | None, str | None]:
+    """Build an ERTEvidence from a single real manually-entered
+    resistivity reading anchored at (lat, lon), if use_ert=True. Mirrors
+    _build_gpr_evidence() exactly in shape and error-handling
+    philosophy -- a bad input (non-positive resistivity) is recorded as
+    an honest limitation string rather than raised, so one bad ERT
+    input never fails the whole investigation it's attached to.
+
+    Raises ValueError only for the caller-programming-error case of
+    use_ert=True with a missing resistivity value or depth.
+    """
+    if not use_ert:
+        return None, None
+    if ert_resistivity_ohm_m is None or ert_depth_m is None:
+        raise ValueError(
+            "use_ert=True requires both ert_resistivity_ohm_m and ert_depth_m"
+        )
+    survey = ERTSurvey(
+        lat=lat,
+        lon=lon,
+        readings=[ERTReading(resistivity_ohm_m=ert_resistivity_ohm_m, depth_m=ert_depth_m)],
+        entry_method=ert_entry_method,
+        device_note=ert_device_note,
+    )
+    try:
+        classified = classify_survey(survey)
+        return ERTEvidence(survey, classified), None
+    except ERTResistivityModelError as exc:
+        return None, (
+            f"Real ERT reading entry failed: {exc}. Recorded honestly; "
+            f"this investigation continues without ERT evidence for this run."
+        )
+
+
 def run_investigation_multi_json(
     lat: float,
     lon: float,
@@ -745,6 +805,11 @@ def run_investigation_multi_json(
     gpr_two_way_time_ns: float | None = None,
     gpr_entry_method: str = "manual",
     gpr_device_note: str = "",
+    use_ert: bool = False,
+    ert_resistivity_ohm_m: float | None = None,
+    ert_depth_m: float | None = None,
+    ert_entry_method: str = "manual",
+    ert_device_note: str = "",
 ) -> str:
     """Run a DEM + NDVI + Thermal + Optical investigation and return the
     InvestigationRecord as a JSON string. This is the function
@@ -779,12 +844,12 @@ def run_investigation_multi_json(
     candidate, using the SAME shared access token as NDVI/Optical. Runs
     independently of NDVI's own success or failure.
 
-    OPTICAL (new this session): real (Sentinel-2 L2A visible-band
-    brightness via the SAME Copernicus Sentinel Hub Statistical
-    API/account as NDVI/Thermal, per-DEM-candidate core/halo check, see
-    optical_source_mobile.py) always attempted for every DEM candidate,
-    using the SAME shared access token. Runs independently of NDVI's
-    and Thermal's own success or failure.
+    OPTICAL: real (Sentinel-2 L2A visible-band brightness via the SAME
+    Copernicus Sentinel Hub Statistical API/account as NDVI/Thermal,
+    per-DEM-candidate core/halo check, see optical_source_mobile.py)
+    always attempted for every DEM candidate, using the SAME shared
+    access token. Runs independently of NDVI's and Thermal's own
+    success or failure.
 
     In the common case (live NDVI succeeds for at least one candidate),
     NDVI, Thermal, and Optical results are combined per-candidate so a
@@ -804,17 +869,27 @@ def run_investigation_multi_json(
     (lat, lon), attached as a single, site-anchored (not per-candidate)
     evidence entry. All gpr_* parameters default to off/empty.
 
+    ERT (optional, use_ert=True, ADDED THIS SESSION): a single real
+    manual reading (resistivity in ohm-meters + the depth at which it
+    was read off an already-inverted profile) anchored at this
+    investigation's (lat, lon), classified against documented reference
+    resistivity ranges and attached as a single, site-anchored (not
+    per-candidate) evidence entry -- mirrors GPR's own wiring exactly.
+    All ert_* parameters default to off/empty.
+
     Writes investigation_status.json into offline_data_root as it works
     (phase "dem" / "ndvi" / "thermal" / "optical" / "done"), polled by
     MainActivity.kt for live progress display. Best-effort -- never
     raises on its own.
 
     Raises ValueError if use_gpr=True without both gpr_soil_preset_key
-    and gpr_two_way_time_ns. Raises OpenTopographyFetchError if DEM is
-    unavailable both live and offline (see above) -- this is the only
-    hard failure; every NDVI-side, Thermal-side, Optical-side, and
-    GPR-side failure degrades gracefully with an honest limitations[]
-    entry instead.
+    and gpr_two_way_time_ns, or if use_ert=True without both
+    ert_resistivity_ohm_m and ert_depth_m. Raises
+    OpenTopographyFetchError if DEM is unavailable both live and
+    offline (see above) -- this is the only hard failure; every
+    NDVI-side, Thermal-side, Optical-side, GPR-side, and ERT-side
+    failure degrades gracefully with an honest limitations[] entry
+    instead.
     """
     _write_investigation_status(offline_data_root, "dem", 0, 1)
 
@@ -859,6 +934,10 @@ def run_investigation_multi_json(
     gpr_evidence, gpr_limitation = _build_gpr_evidence(
         lat, lon, use_gpr, gpr_soil_preset_key, gpr_two_way_time_ns,
         gpr_entry_method, gpr_device_note,
+    )
+    ert_evidence, ert_limitation = _build_ert_evidence(
+        lat, lon, use_ert, ert_resistivity_ohm_m, ert_depth_m,
+        ert_entry_method, ert_device_note,
     )
 
     # --- Shared Copernicus token, fetched ONCE for NDVI, Thermal, AND Optical ---
@@ -1056,6 +1135,8 @@ def run_investigation_multi_json(
         fifth_evidence=fifth_evidence,
         fifth_anomalies=optical_results,
         fifth_evidence_type="OPTICAL",
+        sixth_evidence=ert_evidence,
+        sixth_evidence_type="ERT",
     )
 
     if used_offline_dem:
@@ -1123,6 +1204,8 @@ def run_investigation_multi_json(
         record.limitations.append(note)
     if gpr_limitation:
         record.limitations.append(gpr_limitation)
+    if ert_limitation:
+        record.limitations.append(ert_limitation)
 
     _write_investigation_status(offline_data_root, "done", max(1, n_candidates), max(1, n_candidates))
 
