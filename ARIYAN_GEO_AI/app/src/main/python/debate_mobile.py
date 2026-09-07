@@ -38,16 +38,17 @@ REAL SCHEMA NOTES (why this file looks the way it does):
   and a close match for CORROBORATED ones (centroid of co-located points
   within colocation_distance_m by construction). Nearest-match is
   therefore correct, not a guess, across both modes.
-- TWO DISTINCT "sources" CONCEPTS, KEPT SEPARATE (fixed a prior session
-  -- see SOURCES-SPLIT FIX note below for the full story): "which sources
+- TWO DISTINCT "sources" CONCEPTS, KEPT SEPARATE (a prior session -- see
+  SOURCES-SPLIT FIX note below for the full story): "which sources
   actually CORROBORATED this candidate" (precise, drives correlation-
   status reasoning text) and "which sources were CHECKED/attempted for
   this candidate regardless of outcome" (broader, drives the Vegetation/
   Agronomic perspective's "was NDVI evaluated at all" question). These
   used to be silently merged into one field; conflating them was the
-  root cause of a real on-device bug, now fixed and unaffected by this
-  session's Optical addition (Optical follows the SAME precise/checked
-  split from the start).
+  root cause of a real on-device bug, now fixed and unaffected by
+  Optical's or ERT's addition (both follow the same precise/checked
+  split, or in ERT's case the same GPR-style site-anchored match, from
+  the start).
 - SCOPE: only anomalies[] entries with evidence_type == "DEM" (or no
   evidence_type at all -- single-source runs) are debated. In synthetic-
   NDVI mode, anomalies[] can also hold NDVI-raster-detected candidates
@@ -89,18 +90,34 @@ correctly distinguishes "Thermal genuinely checked and succeeded for
 this candidate" from "Thermal was attempted for this run but failed for
 this specific candidate".
 
-REAL OPTICAL EXTENSION (ADDED THIS SESSION): like Thermal, real
-Sentinel-2 visible-brightness (evidence_record.py's fifth evidence slot
--- see optical_source_mobile.py and
-investigation_multi_mobile.py's _run_optical_checks) is a per-DEM-
-candidate check, run at EACH candidate's own exact (lat, lon).
-_attach_optical_detail() below mirrors _attach_thermal_detail() exactly
--- same tight-tolerance exact-match approach against fifth_evidence_detail
-by lat/lon, checking that specific entry's own error field, for the same
-reasons documented on _attach_thermal_detail() itself.
+REAL OPTICAL EXTENSION (a prior session): like Thermal, real Sentinel-2
+visible-brightness (evidence_record.py's fifth evidence slot -- see
+optical_source_mobile.py and investigation_multi_mobile.py's
+_run_optical_checks) is a per-DEM-candidate check, run at EACH
+candidate's own exact (lat, lon). _attach_optical_detail() below
+mirrors _attach_thermal_detail() exactly -- same tight-tolerance
+exact-match approach against fifth_evidence_detail by lat/lon, checking
+that specific entry's own error field, for the same reasons documented
+on _attach_thermal_detail() itself.
+
+REAL ERT EXTENSION, ADDED THIS SESSION: unlike Thermal/Optical, real
+ERT (evidence_record.py's sixth evidence slot -- see
+ert_source_mobile.py) is a SINGLE, site-anchored field-verification
+reading, architecturally like GPR -- NOT a per-candidate check. This
+module therefore matches the ERT reading to whichever DEM candidate(s)
+are close enough via the SAME colocation-radius-style approach as GPR
+(see _ert_colocation_distance_m() below, identical logic to
+_gpr_colocation_distance_m() -- kept as a separate small function
+rather than reusing/renaming the GPR one, to avoid touching that
+already-proven code path), and attaches ert_confirmed/ert_distance_m/
+ert_resistivity_ohm_m/ert_depth_m/ert_matched_bands/ert_lean to just
+those candidates via _attach_ert() below. A candidate too far from the
+ERT reading gets nothing added, exactly like GPR. If ERT evidence
+exists but no candidate was close enough to use it, that is reported
+in the result's "ert_note" field, mirroring "gpr_note".
 
 SOURCES-SPLIT FIX (a prior session -- REAL on-device bug, unaffected by
-this session's Optical addition): candidate["sources"] is the PRECISE
+Optical's or ERT's addition): candidate["sources"] is the PRECISE
 list of sources that actually corroborated this candidate (drives
 debate_engine.py's Anthropogenic/Geomorphology reasoning text via
 _sources_present()). candidate["checked_sources"] is the BROADER union
@@ -112,20 +129,24 @@ this exact same split from the start: it is exact-match-precise (via
 _attach_optical_detail(), just like Thermal) rather than routed through
 the whole-run union checked_sources currently used for NDVI (see the
 KNOWN, FLAGGED, NOT-YET-FIXED IMPRECISION note below, unchanged and
-unaffected by Optical's addition).
+unaffected by Optical's or ERT's addition). ERT does not participate in
+this "sources"/"checked_sources" concept at all -- like GPR, it is read
+only via its own dedicated ert_confirmed/... fields, never folded into
+either sources list, since neither GPR nor ERT ever participates in
+correlation().
 
 KNOWN, FLAGGED, NOT-YET-FIXED IMPRECISION (identified a prior session,
 NOT changed without explicit confirmation -- this is a real,
 already-on-device-confirmed-working code path, and remains exactly as
-it was before this session): candidate["checked_sources"] (the
-whole-run union used for has_ndvi and Vegetation/Agronomic's "was NDVI
-checked" question) cannot distinguish "NDVI genuinely succeeded for
-THIS candidate" from "NDVI evidence exists somewhere in this run but
-genuinely failed for EVERY candidate". The SAME exact-match technique
-now used for both Thermal (_attach_thermal_detail()) and Optical
-(_attach_optical_detail()) could fix this too, if wanted -- deliberately
-not applied to NDVI here without asking first, since it would change
-already-proven on-device behavior.
+it was before): candidate["checked_sources"] (the whole-run union used
+for has_ndvi and Vegetation/Agronomic's "was NDVI checked" question)
+cannot distinguish "NDVI genuinely succeeded for THIS candidate" from
+"NDVI evidence exists somewhere in this run but genuinely failed for
+EVERY candidate". The SAME exact-match technique now used for both
+Thermal (_attach_thermal_detail()) and Optical (_attach_optical_detail())
+could fix this too, if wanted -- deliberately not applied to NDVI here
+without asking first, since it would change already-proven on-device
+behavior.
 
 SCIENTIFIC STEWARD STAGE 1 EXTENSION: after debate_engine.run_debate()
 returns its positions + synthesis for a candidate, this module also
@@ -148,21 +169,21 @@ guessing, per this project's zero-fabrication rule:
     (see _attach_thermal_detail() below -- set only when a real per-
     candidate Thermal check genuinely succeeded, i.e. its own error
     field was None, for THIS EXACT candidate).
-  - has_optical (REAL AS OF THIS SESSION, previously always False):
-    taken directly from candidate["optical_checked"] (see
-    _attach_optical_detail() below -- set only when a real per-
-    candidate Optical check genuinely succeeded, i.e. its own error
-    field was None, for THIS EXACT candidate -- not merely "Optical was
-    attempted somewhere in this run"). If a candidate's Optical check
-    genuinely failed (network/auth/no-data), has_optical is honestly
-    False for that candidate, not True. This REMOVES Optical from every
-    future Steward DATA_GAP warning for candidates where it genuinely
-    succeeded -- real progress toward filling the DATA_GAP list this
-    whole evidence-source-expansion effort was undertaken to close.
-  - has_lidar / has_ert: always False. Neither has been built (LiDAR has
-    no real data source available for this project's operating region;
-    ERT is designed but not yet built -- see the project's own history
-    notes). Deliberate, not an oversight.
+  - has_optical: real, taken directly from candidate["optical_checked"]
+    (see _attach_optical_detail() below -- same "genuinely succeeded
+    for THIS EXACT candidate" semantics as has_thermal).
+  - has_ert (REAL AS OF THIS SESSION, previously always False): taken
+    directly from candidate["ert_confirmed"] (see _attach_ert() below
+    -- set only when a real ERT reading colocated with this specific
+    candidate, exactly like has_gpr/has_field_validation above). Note
+    has_field_validation below is NOT updated to include ERT -- it
+    remains gpr-only, since the Scientific Steward spec's "field
+    validation" concept was defined around GPR specifically in Stage 1;
+    revisiting that definition to also include ERT is a Steward-side
+    decision, not something to fold in silently here.
+  - has_lidar: always False. LiDAR has not been built (no real data
+    source available for this project's operating region). Deliberate,
+    not an oversight.
   - raw_debate_confidence: real, taken directly from
     synthesis["leading_confidence"] (0.0 when NO_DATA / absent, which
     correctly yields the Steward's NO_DATA band).
@@ -197,9 +218,9 @@ from steward_engine import evaluate_candidate as steward_evaluate_candidate
 
 # Tolerance for matching a DEM candidate to its OWN per-candidate Thermal
 # or Optical detail entry. Deliberately tight (a few meters) -- unlike
-# GPR's colocation-radius-style tolerance for "was this nearby", both
-# Thermal and Optical detail entries are built directly from the SAME
-# dem_candidate.lat/lon (see investigation_multi_mobile.py's
+# GPR's/ERT's colocation-radius-style tolerance for "was this nearby",
+# both Thermal and Optical detail entries are built directly from the
+# SAME dem_candidate.lat/lon (see investigation_multi_mobile.py's
 # _run_thermal_checks/_run_optical_checks), so any real distance here
 # should only ever reflect floating-point noise, not a genuine
 # "different but nearby location" case. Shared by both
@@ -243,7 +264,32 @@ def _gpr_evidence_item(evidence: list[dict]) -> Optional[dict]:
     return None
 
 
+def _ert_evidence_item(evidence: list[dict]) -> Optional[dict]:
+    """Mirrors _gpr_evidence_item() exactly -- finds the single ERT
+    evidence item (evidence_record.py's sixth_evidence slot), if any."""
+    for item in evidence or []:
+        if item.get("evidence_type") == "ERT":
+            return item
+    return None
+
+
 def _gpr_colocation_distance_m(investigation: dict) -> float:
+    aoi = investigation.get("aoi") or {}
+    cell_size_m = aoi.get("cell_size_m")
+    try:
+        cell_size_m = float(cell_size_m) if cell_size_m is not None else None
+    except (TypeError, ValueError):
+        cell_size_m = None
+    if cell_size_m is None:
+        return 50.0
+    return max(30.0, cell_size_m * 4)
+
+
+def _ert_colocation_distance_m(investigation: dict) -> float:
+    """Identical logic to _gpr_colocation_distance_m() above -- kept as
+    a separate function (small, deliberate duplication) rather than
+    reusing or renaming the GPR one, to avoid any risk of touching
+    GPR's already-proven-on-device code path while adding ERT."""
     aoi = investigation.get("aoi") or {}
     cell_size_m = aoi.get("cell_size_m")
     try:
@@ -280,6 +326,40 @@ def _attach_gpr(candidate: dict, anomaly: dict, gpr_item: Optional[dict], max_di
     return True
 
 
+def _attach_ert(candidate: dict, anomaly: dict, ert_item: Optional[dict], max_distance_m: float) -> bool:
+    """Mirrors _attach_gpr() exactly -- ERT (evidence_record.py's
+    sixth_evidence slot) is a single, site-anchored reading, not a
+    per-candidate check, so it uses the same colocation-radius match
+    style as GPR rather than the tight exact-match style used by
+    Thermal/Optical below. Sets ert_confirmed/ert_distance_m/
+    ert_resistivity_ohm_m/ert_depth_m/ert_matched_bands/ert_lean on the
+    candidate only when the ERT reading is close enough to plausibly be
+    about the same physical location."""
+    if ert_item is None:
+        return False
+    try:
+        anomaly_point = GeoPoint(anomaly["lat"], anomaly["lon"])
+        ert_point = GeoPoint(ert_item["lat"], ert_item["lon"])
+        distance = haversine_distance_m(anomaly_point, ert_point)
+    except (KeyError, TypeError):
+        return False
+    if distance > max_distance_m:
+        return False
+
+    candidate["ert_confirmed"] = True
+    candidate["ert_distance_m"] = round(distance, 1)
+    if ert_item.get("resistivity_ohm_m") is not None:
+        candidate["ert_resistivity_ohm_m"] = ert_item["resistivity_ohm_m"]
+    if ert_item.get("depth_m") is not None:
+        candidate["ert_depth_m"] = ert_item["depth_m"]
+    matched_bands = ert_item.get("matched_bands") or []
+    if matched_bands:
+        candidate["ert_matched_bands"] = [b.get("label") for b in matched_bands if b.get("label")]
+    if ert_item.get("overall_lean"):
+        candidate["ert_lean"] = ert_item["overall_lean"]
+    return True
+
+
 def _attach_per_candidate_detail(
     candidate: dict,
     anomaly: dict,
@@ -298,11 +378,12 @@ def _attach_per_candidate_detail(
     genuinely matched entry whose error field is set (this candidate's
     own check failed).
 
-    Factored out this session so Thermal's and Optical's identical
-    matching logic isn't duplicated verbatim -- both public functions
-    below are now thin wrappers naming their own detail list and flag
-    key, preserving each one's own exact previously-proven behavior
-    (Thermal's) or newly-built behavior (Optical's) unchanged.
+    Thermal's and Optical's identical matching logic isn't duplicated
+    verbatim -- both public functions below are thin wrappers naming
+    their own detail list and flag key, preserving each one's own
+    previously-proven behavior unchanged. Not used by ERT -- ERT is
+    site-anchored (colocation-radius match via _attach_ert() above),
+    not per-candidate.
     """
     best = None
     best_dist = None
@@ -331,9 +412,7 @@ def _attach_thermal_detail(
 ) -> None:
     """Sets candidate["thermal_checked"] -- see
     _attach_per_candidate_detail()'s own docstring for the exact
-    matching semantics (unchanged from before this session's
-    refactor -- this is the same logic, just factored into the shared
-    helper above rather than duplicated)."""
+    matching semantics."""
     _attach_per_candidate_detail(candidate, anomaly, fourth_evidence_detail, "thermal_checked", tolerance_m)
 
 
@@ -343,13 +422,9 @@ def _attach_optical_detail(
     fifth_evidence_detail: list[dict],
     tolerance_m: float = _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M,
 ) -> None:
-    """Sets candidate["optical_checked"] -- ADDED THIS SESSION, mirrors
+    """Sets candidate["optical_checked"] -- mirrors
     _attach_thermal_detail() exactly via the shared
-    _attach_per_candidate_detail() helper above. Already precise from
-    the start (built the more-precise way immediately, like Thermal,
-    rather than routed through the whole-run checked_sources union like
-    NDVI currently is -- see this module's own KNOWN, FLAGGED
-    IMPRECISION note)."""
+    _attach_per_candidate_detail() helper above."""
     _attach_per_candidate_detail(candidate, anomaly, fifth_evidence_detail, "optical_checked", tolerance_m)
 
 
@@ -363,12 +438,13 @@ def _build_candidate(
 
     candidate["sources"] is set to ONLY this candidate's own
     supporting_sources -- precise, exactly what corroborated THIS
-    candidate (now correctly includes OPTICAL whenever
+    candidate (already correctly includes OPTICAL whenever
     investigation_multi_mobile.py's _build_correlated_candidates()
     determined it genuinely corroborated this candidate, with no
     changes needed here -- this function already treats
     correlation_entry["supporting_sources"] generically, however many
-    real source types it lists).
+    real source types it lists). ERT (like GPR) never appears here --
+    neither ever participates in correlation().
 
     candidate["checked_sources"] carries the whole-run union
     (supporting_sources + checked_sources param, deduplicated) -- read
@@ -376,7 +452,9 @@ def _build_candidate(
     Agronomic perspective) and this module's own _build_steward_report()
     below for has_dem/has_ndvi. Optical does NOT feed into this
     broader/imprecise union -- it uses the precise exact-match
-    _attach_optical_detail() above instead, exactly like Thermal.
+    _attach_optical_detail() above instead, exactly like Thermal. ERT
+    does not feed into it either, for the same reason GPR doesn't --
+    it's read only via its own dedicated ert_confirmed/... fields.
     """
     candidate: dict[str, Any] = {
         "location": {"lat": anomaly.get("lat"), "lon": anomaly.get("lon")},
@@ -421,16 +499,17 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
     this module's own docstring) for exactly which inputs are real vs.
     deliberately conservative placeholders.
 
-    has_optical is real as of this session -- see this module's own
+    has_ert is real as of this session -- see this module's own
     docstring, HONEST MAPPING NOTES, for exactly what "real" means here
-    (precise per-candidate success, via candidate["optical_checked"]).
-    """
+    (a real ERT reading colocated with this specific candidate, via
+    candidate["ert_confirmed"])."""
     checked_sources = candidate.get("checked_sources") or []
     has_dem = "DEM" in checked_sources
     has_ndvi = "NDVI" in checked_sources
     has_gpr = bool(candidate.get("gpr_confirmed"))
     has_thermal = bool(candidate.get("thermal_checked"))
     has_optical = bool(candidate.get("optical_checked"))
+    has_ert = bool(candidate.get("ert_confirmed"))
 
     synthesis = debate.get("synthesis") or {}
     raw_confidence = float(synthesis.get("leading_confidence") or 0.0)
@@ -465,6 +544,7 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
         has_ndvi=has_ndvi,
         has_gpr=has_gpr,
         has_thermal=has_thermal,
+        has_ert=has_ert,
         raw_debate_confidence=raw_confidence,
         has_field_validation=has_gpr,
         environmental_confounders_controlled=False,
@@ -490,10 +570,13 @@ def run_debate_json(investigation_json: str) -> str:
 
         gpr_item = _gpr_evidence_item(evidence)
         gpr_max_distance_m = _gpr_colocation_distance_m(investigation)
+        ert_item = _ert_evidence_item(evidence)
+        ert_max_distance_m = _ert_colocation_distance_m(investigation)
 
         debates = []
         n_skipped_non_dem = 0
         any_gpr_confirmed = False
+        any_ert_confirmed = False
         for original_index, anomaly in enumerate(anomalies):
             evidence_type = anomaly.get("evidence_type", "DEM")
             if evidence_type != "DEM":
@@ -503,6 +586,8 @@ def run_debate_json(investigation_json: str) -> str:
             candidate = _build_candidate(anomaly, correlation_entry, context.get("sources"), original_index)
             if _attach_gpr(candidate, anomaly, gpr_item, gpr_max_distance_m):
                 any_gpr_confirmed = True
+            if _attach_ert(candidate, anomaly, ert_item, ert_max_distance_m):
+                any_ert_confirmed = True
             _attach_thermal_detail(candidate, anomaly, fourth_evidence_detail)
             _attach_optical_detail(candidate, anomaly, fifth_evidence_detail)
             debate = run_debate(candidate, context)
@@ -526,6 +611,13 @@ def run_debate_json(investigation_json: str) -> str:
                 f"investigation, but no DEM candidate was within "
                 f"{gpr_max_distance_m:.0f}m of the GPR pick location, so it "
                 f"was not applied to any candidate's debate."
+            )
+        if ert_item is not None and not any_ert_confirmed:
+            result["ert_note"] = (
+                f"Real ERT field-reading evidence was present for this "
+                f"investigation, but no DEM candidate was within "
+                f"{ert_max_distance_m:.0f}m of the ERT reading location, so "
+                f"it was not applied to any candidate's debate."
             )
         return json.dumps(result)
     except Exception as exc:
