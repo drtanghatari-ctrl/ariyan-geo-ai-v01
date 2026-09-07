@@ -40,7 +40,29 @@ GPR is a genuinely new kind of evidence (a real subsurface measurement,
 not another surface-level proxy like elevation or NDVI), so it earns its
 own treatment rather than being folded into an existing alias.
 
-TWO DISTINCT "SOURCES PRESENT" QUESTIONS (added this session -- real
+ERT (electrical resistivity tomography) FIELD-READING EXTENSION, ADDED
+THIS SESSION: candidates may optionally carry ert_confirmed (bool),
+ert_distance_m, ert_resistivity_ohm_m, ert_depth_m, ert_matched_bands
+(list of reference-band labels), ert_lean ("natural" / "anthropogenic"
+/ "ambiguous") -- set by debate_mobile.py only when a real ERT manual
+reading (see ert_source_mobile.py) was matched close enough to this
+candidate's location. UNLIKE GPR -- which is a simple presence/absence
+signal (a real reflector was or wasn't found, always weakening "just
+surface variation" and always weakening "shared artifact" a little,
+regardless of what it is) -- ERT carries a genuine DIRECTIONAL
+interpretation (ert_lean), because a resistivity reading can itself
+point toward either a natural or a constructed explanation depending
+on which reference band(s) it falls into (see
+ert_resistivity_model.py's own docstring for the real, deliberate
+ambiguity this reflects). _ert_confirmation() below therefore returns
+that lean, and each perspective below applies it in the direction that
+actually makes sense for that perspective's own argument, not GPR's
+uniform always-weakens-natural / always-strengthens-anthropogenic
+pattern. Only the Skeptic perspective treats ERT the same way GPR is
+treated (any real confirmed subsurface property contrast reduces
+"shared processing artifact" doubt, regardless of what it indicates).
+
+TWO DISTINCT "SOURCES PRESENT" QUESTIONS (a prior session -- real
 on-device bug fix, see _sources_present() and _sources_checked_present()
 below): a candidate's evidence sources can be read in two genuinely
 different ways, and this module previously only had ONE function trying
@@ -67,7 +89,10 @@ candidate-level keys ("checked_sources", "evaluated_sources",
 _vegetation_position() below. No existing perspective's rule LOGIC
 changed -- only which field _vegetation_position() reads from, exactly
 matching this file's own stated design philosophy of using _get()-style
-aliasing rather than changing rules when a schema question arises.
+aliasing rather than changing rules when a schema question arises. ERT
+(like GPR) never participates in correlation() and is entirely outside
+this "sources present" concept -- it is read only via
+_ert_confirmation(), a separate mechanism, exactly like GPR.
 """
 
 from __future__ import annotations
@@ -133,12 +158,11 @@ def _sources_checked_present(candidate: dict, context: dict) -> list[str]:
     evaluated here and found no stress" from "NDVI was never evaluated
     here at all" (a SINGLE_SOURCE correlation result's precise
     supporting_sources only lists the source that positively detected
-    an anomaly, so it alone can't answer this). Added this session --
-    see this module's docstring, TWO DISTINCT "SOURCES PRESENT"
-    QUESTIONS, for the real on-device bug this split fixes. Same
-    aliasing/fallback pattern as _sources_present(), different key
-    names, matching debate_mobile.py's new candidate["checked_sources"]
-    field."""
+    an anomaly, so it alone can't answer this). See this module's
+    docstring, TWO DISTINCT "SOURCES PRESENT" QUESTIONS, for the real
+    on-device bug this split fixes. Same aliasing/fallback pattern as
+    _sources_present(), different key names, matching debate_mobile.py's
+    candidate["checked_sources"] field."""
     srcs = _get(candidate, "checked_sources", "evaluated_sources", "attempted_sources")
     if srcs:
         return [str(s).upper() for s in srcs]
@@ -179,6 +203,29 @@ def _gpr_confirmation(candidate: dict) -> Optional[dict]:
         "distance_m": _get(candidate, "gpr_distance_m"),
         "depth_min_m": _get(candidate, "gpr_depth_min_m"),
         "depth_max_m": _get(candidate, "gpr_depth_max_m"),
+    }
+
+
+def _ert_confirmation(candidate: dict) -> Optional[dict]:
+    """Return {"distance_m", "resistivity_ohm_m", "depth_m",
+    "matched_bands", "lean"} if a real ERT manual reading was matched
+    close enough to this candidate to count as independent subsurface
+    confirmation, else None. Same non-matching-itself contract as
+    _gpr_confirmation() above -- this module only reads what
+    debate_mobile.py already decided was close enough (see
+    debate_mobile._attach_ert()). "lean" is "natural" / "anthropogenic"
+    / "ambiguous" (see ert_resistivity_model.overall_lean()) and is what
+    lets each perspective below apply ERT's real interpretive direction,
+    unlike GPR's uniform presence/absence signal -- see this module's
+    own docstring for why."""
+    if not _get(candidate, "ert_confirmed"):
+        return None
+    return {
+        "distance_m": _get(candidate, "ert_distance_m"),
+        "resistivity_ohm_m": _get(candidate, "ert_resistivity_ohm_m"),
+        "depth_m": _get(candidate, "ert_depth_m"),
+        "matched_bands": _get(candidate, "ert_matched_bands", default=[]),
+        "lean": _get(candidate, "ert_lean", default="ambiguous"),
     }
 
 
@@ -289,6 +336,39 @@ def _geomorphology_position(candidate: dict, context: dict) -> Position:
             "full-area GPR survey."
         )
 
+    ert = _ert_confirmation(candidate)
+    if ert is not None:
+        bands_str = ", ".join(ert["matched_bands"]) if ert["matched_bands"] else "an unspecified band"
+        resistivity_str = (
+            f"{ert['resistivity_ohm_m']:.0f}" if ert["resistivity_ohm_m"] is not None else "?"
+        )
+        if ert["lean"] == "natural":
+            score += 0.15
+            reasoning.append(
+                f"A real ERT resistivity reading ({resistivity_str} Ω·m) near "
+                f"this candidate matches reference range(s) typical of "
+                f"natural material ({bands_str}), which supports (but does "
+                f"not prove) a natural-terrain explanation. This is a "
+                f"single manual reading, not a full survey line."
+            )
+        elif ert["lean"] == "anthropogenic":
+            score -= 0.15
+            reasoning.append(
+                f"A real ERT resistivity reading ({resistivity_str} Ω·m) near "
+                f"this candidate matches reference range(s) typical of "
+                f"anthropogenic material ({bands_str}), which weakens a "
+                f"natural-terrain explanation. This is a single manual "
+                f"reading, not a full survey line."
+            )
+        else:
+            reasoning.append(
+                f"A real ERT resistivity reading ({resistivity_str} Ω·m) near "
+                f"this candidate falls in a genuinely ambiguous reference "
+                f"range ({bands_str}) that cannot on its own distinguish "
+                f"natural material from constructed/anthropogenic material "
+                f"-- no directional adjustment applied for this reading."
+            )
+
     score = max(0.0, min(1.0, score))
     return Position(
         "Geomorphology",
@@ -381,6 +461,50 @@ def _anthropogenic_position(candidate: dict, context: dict) -> Position:
         )
         score = max(0.0, min(1.0, score))
 
+    ert = _ert_confirmation(candidate)
+    if ert is not None:
+        # Applied AFTER the synthetic-NDVI cap and the GPR adjustment,
+        # same reasoning as GPR's own placement above: ERT is a further
+        # independent evidence source and should not be capped by an
+        # unrelated NDVI honesty concern. Unlike GPR, ERT's effect here
+        # is DIRECTIONAL (see this module's own docstring) -- it only
+        # strengthens the constructed-feature case when the reading
+        # itself leans anthropogenic.
+        bands_str = ", ".join(ert["matched_bands"]) if ert["matched_bands"] else "an unspecified band"
+        resistivity_str = (
+            f"{ert['resistivity_ohm_m']:.0f}" if ert["resistivity_ohm_m"] is not None else "?"
+        )
+        depth_str = f" at {ert['depth_m']:.2f} m depth" if ert["depth_m"] is not None else ""
+        if ert["lean"] == "anthropogenic":
+            score += 0.20
+            reasoning.append(
+                f"A real ERT resistivity reading ({resistivity_str} Ω·m{depth_str}) "
+                f"close to this candidate's location matches reference "
+                f"range(s) typical of anthropogenic material ({bands_str}) "
+                f"-- direct subsurface confirmation consistent with a "
+                f"constructed feature. This is a single manual reading, "
+                f"not a full survey line."
+            )
+        elif ert["lean"] == "natural":
+            score -= 0.15
+            reasoning.append(
+                f"A real ERT resistivity reading ({resistivity_str} Ω·m{depth_str}) "
+                f"close to this candidate's location matches reference "
+                f"range(s) typical of natural material ({bands_str}), which "
+                f"weakens (but does not rule out) a constructed-feature "
+                f"explanation. This is a single manual reading, not a full "
+                f"survey line."
+            )
+        else:
+            reasoning.append(
+                f"A real ERT resistivity reading ({resistivity_str} Ω·m{depth_str}) "
+                f"close to this candidate's location falls in a genuinely "
+                f"ambiguous reference range ({bands_str}) that cannot on its "
+                f"own confirm or rule out a constructed feature -- no "
+                f"directional adjustment applied for this reading."
+            )
+        score = max(0.0, min(1.0, score))
+
     return Position(
         "Anthropogenic / Archaeological",
         "possible constructed / human-modified feature",
@@ -444,6 +568,25 @@ def _artifact_skeptic_position(candidate: dict, context: dict) -> Position:
             "unrelated instruments (DEM/NDVI and GPR) less likely."
         )
 
+    ert = _ert_confirmation(candidate)
+    if ert is not None:
+        # Unlike Geomorphology/Anthropogenic above, the Skeptic's concern
+        # (is this a shared processing artifact at all?) is addressed by
+        # ERT's mere presence as a real, independent, physically distinct
+        # measurement -- REGARDLESS of which reference band it leans
+        # toward. A genuinely confirmed electrical-property contrast
+        # makes a coincidental shared artifact across unrelated
+        # instruments (DEM/NDVI and ERT) less likely either way, exactly
+        # like GPR's own treatment here.
+        score -= 0.15
+        reasoning.append(
+            "A real ERT resistivity reading independently confirmed a "
+            "genuine subsurface electrical-property contrast at this "
+            "location, which makes a shared measurement/processing "
+            "artifact across unrelated instruments (DEM/NDVI and ERT) "
+            "less likely, regardless of which material it indicates."
+        )
+
     score = max(0.0, min(1.0, score))
     return Position(
         "Data Artifact / Skeptic",
@@ -465,7 +608,8 @@ def _vegetation_position(candidate: dict, context: dict) -> Position:
     NDVI corroborate here", so it needs the broader checked/attempted
     concept, which correctly includes a genuinely-checked-but-no-stress
     NDVI result. See this module's docstring, TWO DISTINCT "SOURCES
-    PRESENT" QUESTIONS, for why these are now two separate functions."""
+    PRESENT" QUESTIONS, for why these are now two separate functions.
+    Unaffected by GPR or ERT -- neither is a vegetation-linked source."""
     sources = _sources_checked_present(candidate, context)
     ndvi_synth = _ndvi_is_synthetic(candidate, context)
 
