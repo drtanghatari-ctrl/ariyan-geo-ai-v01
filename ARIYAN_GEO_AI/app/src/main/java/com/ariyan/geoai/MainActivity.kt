@@ -31,9 +31,9 @@ import java.io.File
  *
  * Calls investigation_mobile.run_investigation_json() (single-source DEM)
  * or investigation_multi_mobile.run_investigation_multi_json()
- * (DEM + NDVI correlation, optionally + a third GPR evidence entry)
- * depending on the "Include NDVI correlation" switch, and renders the
- * returned evidence record.
+ * (DEM + NDVI correlation, optionally + a GPR and/or ERT site-anchored
+ * evidence entry) depending on the "Include NDVI correlation" switch, and
+ * renders the returned evidence record.
  *
  * REAL-DATA-FIRST REDESIGN (a prior session) -- SYNTHETIC MODE REMOVED
  * ENTIRELY. Previously this Activity had switchRealDem/switchRealNdvi
@@ -93,6 +93,29 @@ import java.io.File
  * Geomorphology / Anthropogenic-Archaeological / Data-Artifact-Skeptic
  * perspectives).
  *
+ * Optional ERT field reading (opt-in via switchErt, ADDED THIS SESSION):
+ * a single real manual reading -- a resistivity value (Ω·m) a human has
+ * already read off an inverted ERT profile, at a specific known depth
+ * -- classified against documented reference resistivity ranges via
+ * ert_source_mobile.py / ert_resistivity_model.py, and attached as a
+ * further, independent, site-anchored evidence entry (evidence_record.py's
+ * sixth_evidence slot, rendered here from the record's
+ * "sixth_evidence_detail" field). Architecturally identical to GPR --
+ * a single site-anchored field-verification check, not a per-candidate
+ * scan -- so it has the SAME restriction: ONLY supported by
+ * investigation_multi_mobile.run_investigation_multi_json(), so
+ * switchErt requires switchNdviCorrelation to also be on, validated the
+ * same explicit way as GPR in onRunClicked() below. Unlike GPR, there
+ * is no soil-preset picker for ERT -- the resistivity value is
+ * classified automatically against fixed reference bands, and the
+ * classification can honestly come back "ambiguous" when a reading
+ * plausibly matches more than one real material's range (see
+ * ert_resistivity_model.py's own docstring). Also fed into the AI
+ * Debate Engine (debate_mobile.py matches the ERT reading to nearby DEM
+ * candidates by distance, exactly like GPR, and factors the reading's
+ * natural/anthropogenic/ambiguous lean into the Geomorphology /
+ * Anthropogenic-Archaeological / Data-Artifact-Skeptic perspectives).
+ *
  * After a successful investigation, the AI Debate Engine
  * (debate_mobile.run_debate_json()) is called and, if it succeeds, its
  * per-candidate positions/synthesis are appended to the results view.
@@ -100,18 +123,18 @@ import java.io.File
  * the investigation results themselves -- it is caught and simply omits
  * the debate section.
  *
- * LIVE PROGRESS REPORTING (this session): a real on-device airplane-mode
- * test showed a multi-candidate NDVI-correlation run could take several
- * minutes with zero on-screen indication of what was happening -- not
- * actually stuck, just genuinely slow, but indistinguishable from a
- * hang. investigation_multi_mobile.py now writes a small
- * investigation_status.json into offlineDataRoot as it works (see that
- * file's own docstring). This Activity now polls that file on a
- * separate coroutine (pollInvestigationProgress below) while the real
- * investigation coroutine runs, updating the "Running..." label with
- * real progress (e.g. "NDVI check 3 of 7") instead of a silent spinner.
- * This is purely a UI change -- it does not alter what the investigation
- * does or how it decides live-vs-offline fallback.
+ * LIVE PROGRESS REPORTING (a prior session): a real on-device
+ * airplane-mode test showed a multi-candidate NDVI-correlation run
+ * could take several minutes with zero on-screen indication of what
+ * was happening -- not actually stuck, just genuinely slow, but
+ * indistinguishable from a hang. investigation_multi_mobile.py now
+ * writes a small investigation_status.json into offlineDataRoot as it
+ * works (see that file's own docstring). This Activity now polls that
+ * file on a separate coroutine (pollInvestigationProgress below) while
+ * the real investigation coroutine runs, updating the "Running..."
+ * label with real progress (e.g. "NDVI check 3 of 7") instead of a
+ * silent spinner. This is purely a UI change -- it does not alter what
+ * the investigation does or how it decides live-vs-offline fallback.
  *
  * HONEST STATE (keep this note truthful, don't just delete it):
  * debate_engine.py (rule-based, offline, four perspectives: Geomorphology,
@@ -123,9 +146,13 @@ import java.io.File
  * correctly landed on CONTESTED for a genuinely ambiguous candidate).
  * insufficient-data positions render explicitly labeled "[insufficient
  * data]" rather than being silently omitted. GPR manual-pick entry has
- * been CONFIRMED WORKING ON-DEVICE as a third evidence source. There is
- * no automatic GPR device-export parsing in this build (manual pick
- * entry only -- see gpr_source_mobile.py's own honest-state docstring).
+ * been CONFIRMED WORKING ON-DEVICE as a third evidence source. ERT
+ * manual-reading entry (this session) has been sandbox-tested on the
+ * Python side only -- NOT YET CONFIRMED ON-DEVICE, unlike GPR above;
+ * update this note once it is. There is no automatic GPR or ERT
+ * device-export parsing in this build (manual entry only for both --
+ * see gpr_source_mobile.py's and ert_source_mobile.py's own honest-state
+ * docstrings).
  *
  * OFFLINE-DATA NAV BUTTON: buttonOfflineData launches OfflineDataActivity
  * via a plain Intent -- pure navigation, unchanged this session.
@@ -188,6 +215,11 @@ class MainActivity : AppCompatActivity() {
         }
         setGprUiVisible(false)
 
+        binding.switchErt.setOnCheckedChangeListener { _, checked ->
+            setErtUiVisible(checked)
+        }
+        setErtUiVisible(false)
+
         binding.buttonRun.setOnClickListener { onRunClicked() }
         binding.buttonUseLocation.setOnClickListener { onUseLocationClicked() }
         binding.buttonOfflineData.setOnClickListener {
@@ -215,6 +247,16 @@ class MainActivity : AppCompatActivity() {
         binding.textRealGprNotice.visibility = if (useGpr) View.VISIBLE else View.GONE
     }
 
+    /** Mirrors setGprUiVisible() exactly -- ERT has no soil-preset field
+     * (classification is automatic, not user-selected), so only three
+     * fields plus the explanatory notice toggle here. */
+    private fun setErtUiVisible(useErt: Boolean) {
+        binding.layoutErtResistivity.visibility = if (useErt) View.VISIBLE else View.GONE
+        binding.layoutErtDepth.visibility = if (useErt) View.VISIBLE else View.GONE
+        binding.layoutErtDeviceNote.visibility = if (useErt) View.VISIBLE else View.GONE
+        binding.textRealErtNotice.visibility = if (useErt) View.VISIBLE else View.GONE
+    }
+
     private fun onRunClicked() {
         val coordsParts = binding.inputCoords.text?.toString()?.trim().orEmpty().split(",").map { it.trim() }
         val lat = coordsParts.getOrNull(0)?.toDoubleOrNull()
@@ -231,6 +273,10 @@ class MainActivity : AppCompatActivity() {
         val gprSoilPresetKey = binding.inputGprSoilPreset.text?.toString()?.trim().orEmpty()
         val gprTwoWayTimeNs = binding.inputGprTwoWayTime.text?.toString()?.trim()?.toDoubleOrNull()
         val gprDeviceNote = binding.inputGprDeviceNote.text?.toString()?.trim().orEmpty()
+        val useErt = binding.switchErt.isChecked
+        val ertResistivityOhmM = binding.inputErtResistivity.text?.toString()?.trim()?.toDoubleOrNull()
+        val ertDepthM = binding.inputErtDepth.text?.toString()?.trim()?.toDoubleOrNull()
+        val ertDeviceNote = binding.inputErtDeviceNote.text?.toString()?.trim().orEmpty()
 
         if (lat == null || lat < -90.0 || lat > 90.0 || lon == null || lon < -180.0 || lon > 180.0) {
             toast("Enter coordinates as \"lat, lon\", e.g. 51.1789, -1.8262"); return
@@ -249,6 +295,15 @@ class MainActivity : AppCompatActivity() {
         }
         if (useGpr && (gprTwoWayTimeNs == null || gprTwoWayTimeNs <= 0.0)) {
             toast("Enter a positive two-way travel time (ns) for the GPR pick"); return
+        }
+        if (useErt && !includeNdvi) {
+            toast("ERT only attaches via the multi-evidence path -- turn on \"Include NDVI correlation\" above too, or turn off \"Attach ERT field reading\""); return
+        }
+        if (useErt && (ertResistivityOhmM == null || ertResistivityOhmM <= 0.0)) {
+            toast("Enter a positive resistivity value (Ω·m) for the ERT reading"); return
+        }
+        if (useErt && (ertDepthM == null || ertDepthM < 0.0)) {
+            toast("Enter a non-negative depth (m) for the ERT reading"); return
         }
         // NOTE: apiKey / ndviClientId / ndviClientSecret are intentionally
         // NOT required here anymore. Real data is always attempted first
@@ -271,7 +326,7 @@ class MainActivity : AppCompatActivity() {
 
         setRunning(true)
 
-        // LIVE PROGRESS REPORTING (this session, see class doc comment):
+        // LIVE PROGRESS REPORTING (see class doc comment):
         // investigation_multi_mobile.py writes investigation_status.json
         // into offlineDataRoot as it works. Clear any stale status left
         // over from a previous run, then poll it on a separate coroutine
@@ -296,7 +351,8 @@ class MainActivity : AppCompatActivity() {
                         lat, lon, radius, grid,
                         apiKey, demType,
                         includeNdvi, ndviClientId, ndviClientSecret,
-                        useGpr, gprSoilPresetKey, gprTwoWayTimeNs, gprDeviceNote
+                        useGpr, gprSoilPresetKey, gprTwoWayTimeNs, gprDeviceNote,
+                        useErt, ertResistivityOhmM, ertDepthM, ertDeviceNote
                     )
                 }
                 // The debate engine is rule-based, offline, and stdlib-only
@@ -317,10 +373,11 @@ class MainActivity : AppCompatActivity() {
                 // "something went wrong" -- this app is a scientific
                 // instrument, not a consumer toy, and dem_source_mobile.py
                 // / ndvi_source_mobile.py / gpr_source_mobile.py /
-                // offline_evidence_fallback.py already produce
-                // human-readable messages for every network/HTTP/parsing/
-                // offline-availability failure. Show just that message, not
-                // the full traceback noise Chaquopy appends.
+                // ert_source_mobile.py / offline_evidence_fallback.py
+                // already produce human-readable messages for every
+                // network/HTTP/parsing/offline-availability failure. Show
+                // just that message, not the full traceback noise
+                // Chaquopy appends.
                 binding.textConfidence.text = "Investigation failed"
                 binding.textResults.text = cleanErrorMessage(e.message)
             } finally {
@@ -404,7 +461,9 @@ class MainActivity : AppCompatActivity() {
         includeNdvi: Boolean,
         ndviClientId: String, ndviClientSecret: String,
         useGpr: Boolean, gprSoilPresetKey: String, gprTwoWayTimeNs: Double?,
-        gprDeviceNote: String
+        gprDeviceNote: String,
+        useErt: Boolean, ertResistivityOhmM: Double?, ertDepthM: Double?,
+        ertDeviceNote: String
     ): String {
         return if (includeNdvi) {
             val module = python.getModule("investigation_multi_mobile")
@@ -420,7 +479,12 @@ class MainActivity : AppCompatActivity() {
                 Kwarg("gpr_soil_preset_key", gprSoilPresetKey),
                 Kwarg("gpr_two_way_time_ns", gprTwoWayTimeNs),
                 Kwarg("gpr_entry_method", "manual"),
-                Kwarg("gpr_device_note", gprDeviceNote)
+                Kwarg("gpr_device_note", gprDeviceNote),
+                Kwarg("use_ert", useErt),
+                Kwarg("ert_resistivity_ohm_m", ertResistivityOhmM),
+                Kwarg("ert_depth_m", ertDepthM),
+                Kwarg("ert_entry_method", "manual"),
+                Kwarg("ert_device_note", ertDeviceNote)
             )
             result.toString()
         } else {
@@ -496,6 +560,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         appendGprSection(sb, record)
+        appendErtSection(sb, record)
 
         val limitations = record.optJSONArray("limitations")
         if (limitations != null && limitations.length() > 0) {
@@ -549,6 +614,47 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Renders evidence_record.py's optional "sixth_evidence_detail" array
+     * -- currently only ever populated by a real ERT manual reading (see
+     * ert_source_mobile.ERTEvidence.as_evidence_record()). Added this
+     * session, mirrors appendGprSection() exactly in structure: absent
+     * entirely when switchErt was off, or when the ERT classification
+     * itself failed for this run (that failure instead shows up as an
+     * honest entry in "limitations", not here -- see
+     * investigation_multi_mobile._build_ert_evidence()). Every matched
+     * reference band is listed (there can be more than one, by design --
+     * see ert_resistivity_model.py's own docstring on deliberate,
+     * honestly-reported ambiguity), along with the overall natural /
+     * anthropogenic / ambiguous lean the AI Debate Engine itself used. */
+    private fun appendErtSection(sb: StringBuilder, record: JSONObject) {
+        val sixthEvidenceDetail = record.optJSONArray("sixth_evidence_detail")
+        if (sixthEvidenceDetail == null || sixthEvidenceDetail.length() == 0) return
+
+        sb.append("\nERT (single-site field verification, not a full-area scan):\n")
+        for (i in 0 until sixthEvidenceDetail.length()) {
+            val e = sixthEvidenceDetail.getJSONObject(i)
+            sb.append(String.format(
+                "  resistivity = %.1f Ω·m at %.2f m depth  entry: %s\n",
+                e.optDouble("resistivity_ohm_m"),
+                e.optDouble("depth_m"),
+                e.optString("entry_method")
+            ))
+            val bands = e.optJSONArray("matched_bands")
+            if (bands != null && bands.length() > 0) {
+                val labels = mutableListOf<String>()
+                for (j in 0 until bands.length()) {
+                    labels.add(bands.getJSONObject(j).optString("label"))
+                }
+                sb.append("  matches reference band(s): ").append(labels.joinToString("; ")).append("\n")
+            }
+            sb.append("  overall lean: ").append(e.optString("overall_lean", "?")).append("\n")
+            val note = e.optString("note", "")
+            if (note.isNotEmpty()) {
+                sb.append("  ").append(note).append("\n")
+            }
+        }
+    }
+
     /** Renders the AI Debate Engine's output (debate_mobile.run_debate_json())
      * if it succeeded. This is a ranked heuristic opinion across four rule-
      * based perspectives, not a verified conclusion -- rendered as such,
@@ -559,9 +665,10 @@ class MainActivity : AppCompatActivity() {
      * silently omitted) -- an honest "this perspective had no evidence to
      * argue from" is itself a real finding this project does not hide.
      * Each perspective's reasoning bullet points are also rendered. A
-     * top-level "gpr_note" is rendered too, when debate_mobile.py reports
-     * that real GPR evidence existed for this investigation but wasn't
-     * close enough to any candidate to be used in its debate.
+     * top-level "gpr_note" and/or "ert_note" is rendered too, when
+     * debate_mobile.py reports that real GPR and/or ERT evidence existed
+     * for this investigation but wasn't close enough to any candidate to
+     * be used in its debate.
      * candidateId: debate_mobile.py always assigns a real, non-null
      * "candidate_id", but this still checks isNull() explicitly rather
      * than relying only on optString()'s fallback -- org.json's
@@ -620,6 +727,10 @@ class MainActivity : AppCompatActivity() {
         if (gprNote.isNotEmpty()) {
             sb.append("  ").append(gprNote).append("\n")
         }
+        val ertNote = debateResult.optString("ert_note", "")
+        if (ertNote.isNotEmpty()) {
+            sb.append("  ").append(ertNote).append("\n")
+        }
     }
 
     /** Renders the Scientific Steward's per-candidate evaluation (Stage 1
@@ -630,10 +741,11 @@ class MainActivity : AppCompatActivity() {
      * failed for this candidate (debate.has("steward_error")) -- that
      * failure is shown instead as a short note, never silently hidden,
      * matching this project's existing honesty conventions elsewhere
-     * (e.g. the NDVI/GPR limitation notes in appendGprSection() /
-     * renderResult()). A Steward failure never hides the real debate
-     * positions/synthesis above it -- those are always rendered first,
-     * unconditionally, by the existing code in appendDebateSection().
+     * (e.g. the NDVI/GPR/ERT limitation notes in appendGprSection() /
+     * appendErtSection() / renderResult()). A Steward failure never
+     * hides the real debate positions/synthesis above it -- those are
+     * always rendered first, unconditionally, by the existing code in
+     * appendDebateSection().
      *
      * STAGE 1 ONLY: no SHA-256/provenance verification exists yet (that
      * is Scientific Steward Stage 2, not yet built), so a
