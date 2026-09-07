@@ -23,7 +23,7 @@ field) rather than the `third_evidence` (GPR) pattern, because Thermal
 single site-anchored field-verification note. `third_evidence` (GPR)
 is unchanged.
 
-FIFTH EVIDENCE SLOT ADDED THIS SESSION (Optical): follows the EXACT same
+FIFTH EVIDENCE SLOT (Optical, a prior session): follows the EXACT same
 shape as `fourth_evidence`/`fourth_anomalies` (itself modeled on
 `second_evidence`/`second_anomalies`) -- a single aggregate wrapper
 object appended to `evidence`, plus a per-candidate detail list kept
@@ -34,19 +34,31 @@ per-DEM-candidate corroborating check -- not a single site-anchored
 note like GPR -- so it gets its own aggregate-plus-detail slot rather
 than being folded into GPR's third_evidence pattern.
 
+SIXTH EVIDENCE SLOT ADDED THIS SESSION (ERT): unlike Thermal/Optical,
+ERT (electrical resistivity tomography, see ert_source_mobile.py) is
+architecturally like GPR -- a SINGLE, site-anchored field-verification
+reading (a human-entered resistivity value at a known depth, classified
+against fixed reference ranges), not a per-DEM-candidate corroborating
+check. It therefore follows the `third_evidence`/`third_evidence_type`
+pattern (single record appended to `evidence`, reported in its own
+`sixth_evidence_detail` field, no per-candidate anomalies list), NOT the
+fourth/fifth pattern, even though it is numbered "sixth" simply because
+it is the sixth evidence slot added to this record chronologically.
+
 CONFIDENCE-STATEMENT FIX (a prior session): previously, the "co-located
 anomalies in X + Y" phrase listed every evidence_type present in
 `evidence[]`, regardless of whether that source actually corroborated
 anything -- meaning GPR's evidence_type was already being folded into
 that phrase even when GPR never participates in correlation at all.
 This was harmless-but-imprecise with DEM/NDVI/GPR; adding a genuine
-third per-candidate corroborating source (Thermal, and now a fourth --
+third per-candidate corroborating source (Thermal, and then a fourth --
 Optical) would make it actively wrong (claiming a source co-located
 candidates it never touched). Fixed to derive the list from the sources
 that actually appear in `supporting_sources` for CORROBORATED candidates
 specifically -- this logic needed no further change to accommodate
-Optical, since it already generalizes to however many real corroborating
-source types a given run's `supporting_sources` lists.
+Optical, and needs none for ERT either: ERT, like GPR, never
+participates in correlation() and never appears in supporting_sources,
+so this phrase correctly never mentions it.
 """
 from __future__ import annotations
 
@@ -74,6 +86,7 @@ class InvestigationRecord:
     third_evidence_detail: list[dict] = field(default_factory=list)
     fourth_evidence_detail: list[dict] = field(default_factory=list)
     fifth_evidence_detail: list[dict] = field(default_factory=list)
+    sixth_evidence_detail: list[dict] = field(default_factory=list)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(asdict(self), indent=indent, default=str)
@@ -98,6 +111,8 @@ def build_investigation_record(
     fifth_evidence: Any = None,
     fifth_anomalies: list | None = None,
     fifth_evidence_type: str | None = None,
+    sixth_evidence: Any = None,
+    sixth_evidence_type: str | None = None,
 ) -> InvestigationRecord:
     """Build the InvestigationRecord JSON payload.
 
@@ -144,13 +159,26 @@ def build_investigation_record(
     reported in `fourth_evidence_detail` instead, for the exact same
     reason `second_anomalies_are_candidates=False` exists.
 
-    fifth_evidence/fifth_anomalies (optional, ADDED THIS SESSION) follow
-    the IDENTICAL shape as fourth_evidence/fourth_anomalies -- for
-    Optical's real per-DEM-candidate visible-brightness core/halo check
+    fifth_evidence/fifth_anomalies (optional) follow the IDENTICAL shape
+    as fourth_evidence/fourth_anomalies -- for Optical's real
+    per-DEM-candidate visible-brightness core/halo check
     (OpticalCoreHaloResult from investigation_multi_mobile.py, schema:
     core_mean/halo_mean/z_score/core_brighter_than_halo). Always kept
     out of `anomalies[]` for the same reason as fourth_evidence, and
     reported in `fifth_evidence_detail` instead.
+
+    sixth_evidence (optional, ADDED THIS SESSION) is ERT's real,
+    SINGLE, site-anchored (not per-candidate) evidence source, appended
+    to `evidence` and reported in its own `sixth_evidence_detail` field
+    -- follows the third_evidence (GPR) pattern, NOT the fourth/fifth
+    (Thermal/Optical) pattern, since ERT -- like GPR -- is a single
+    manual field reading anchored at the investigation's own (lat,
+    lon), not a per-DEM-candidate corroborating check
+    (ERTEvidence from ert_source_mobile.py, whose schema
+    (resistivity_ohm_m, depth_m, matched_bands, overall_lean) has
+    nothing in common with AnomalyCandidate either). sixth_evidence
+    must implement .as_evidence_record() the same way every other
+    evidence source does.
     """
     evidence = [dem.as_evidence_record()]
     derived_products = [{
@@ -165,6 +193,7 @@ def build_investigation_record(
     third_evidence_detail: list[dict] = []
     fourth_evidence_detail: list[dict] = []
     fifth_evidence_detail: list[dict] = []
+    sixth_evidence_detail: list[dict] = []
 
     limitations = [
         "Anomalies reflect statistical deviation from local terrain/spectral "
@@ -282,6 +311,21 @@ def build_investigation_record(
             for a in (fifth_anomalies or [])
         ]
 
+    if sixth_evidence is not None:
+        sixth_record = sixth_evidence.as_evidence_record()
+        evidence.append(sixth_record)
+        limitations.append(
+            f"{sixth_evidence_type} evidence in this run is a single, "
+            f"site-anchored field-verification check (not an independent "
+            f"full-area scan like DEM/NDVI) and classifies a single "
+            f"human-entered resistivity reading against documented "
+            f"reference ranges (which meaningfully overlap between "
+            f"several real materials) rather than a site-calibrated "
+            f"inversion -- see the evidence item's own record above for "
+            f"the real value, depth, and matching reference band(s)."
+        )
+        sixth_evidence_detail = [sixth_record]
+
     correlation_dicts = []
     if correlation_results:
         for r in correlation_results:
@@ -297,10 +341,10 @@ def build_investigation_record(
         if n_corroborated > 0:
             # Only list sources that actually corroborated a candidate,
             # not every evidence source present in the run (see this
-            # module's CONFIDENCE-STATEMENT FIX note above -- GPR, e.g.,
-            # never participates in correlation and must not be implied
-            # to have co-located anything here). Generalizes to however
-            # many real corroborating source types are present.
+            # module's CONFIDENCE-STATEMENT FIX note above -- GPR/ERT,
+            # e.g., never participate in correlation and must not be
+            # implied to have co-located anything here). Generalizes to
+            # however many real corroborating source types are present.
             corroborating_sources: list[str] = []
             for r in correlation_results:
                 if r.status != "CORROBORATED":
@@ -359,5 +403,7 @@ def build_investigation_record(
         record_kwargs["fourth_evidence_detail"] = fourth_evidence_detail
     if fifth_evidence_detail:
         record_kwargs["fifth_evidence_detail"] = fifth_evidence_detail
+    if sixth_evidence_detail:
+        record_kwargs["sixth_evidence_detail"] = sixth_evidence_detail
 
     return InvestigationRecord(**record_kwargs)
