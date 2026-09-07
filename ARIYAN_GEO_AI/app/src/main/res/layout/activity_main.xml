@@ -192,7 +192,7 @@
             android:id="@+id/textGprNotice"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Requires a real two-way travel time read off an actual radargram (no GPR device is parsed automatically yet). Only attaches when "Include NDVI correlation" above is also enabled, since only that investigation path currently supports a third evidence source."
+            android:text="Requires a real two-way travel time read off an actual radargram (no GPR device is parsed automatically yet). Only attaches when 'Include NDVI correlation' above is also enabled, since only that investigation path currently supports a third evidence source."
             android:textColor="@color/ariyan_text_secondary"
             android:textSize="11sp"
             android:paddingTop="2dp" />
@@ -260,7 +260,7 @@
             android:id="@+id/textErtNotice"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Requires a real resistivity value already read off an inverted ERT profile at a known depth (no ERT device is parsed automatically). Only attaches when "Include NDVI correlation" above is also enabled, since only that investigation path currently supports this evidence source."
+            android:text="Requires a real resistivity value already read off an inverted ERT profile at a known depth (no ERT device is parsed automatically). Only attaches when 'Include NDVI correlation' above is also enabled, since only that investigation path currently supports this evidence source."
             android:textColor="@color/ariyan_text_secondary"
             android:textSize="11sp"
             android:paddingTop="2dp" />
