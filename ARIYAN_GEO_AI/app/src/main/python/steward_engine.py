@@ -263,3 +263,4 @@ def _infer_pipeline_stage(matrix: EvidenceMatrix, confidence_result, has_field_v
     if confidence_result.band == ConfidenceBand.MODERATE:
         return PipelineStage.HYPOTHESIS
     return PipelineStage.CANDIDATE
+
