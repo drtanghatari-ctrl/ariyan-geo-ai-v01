@@ -10,6 +10,34 @@ it never boosts a model's confidence, and it never lets a raw AI/debate
 confidence value pass through unexamined.
 
 "The AI's enthusiasm must never override scientific evidence."
+
+DETECTION STABILITY EXTENSION (added this session): real on-device
+testing (18+ live investigations, see project notes) found that
+detect_anomalies() -- run once per investigation, against whatever DEM
+raster this run's specific AOI window happened to fetch -- can
+genuinely disagree with itself when re-run at a slightly different
+window center. Candidates well above the detection threshold were
+rock-solid across every re-fetch tested; candidates close to threshold
+frequently failed to reproduce. A `stability_score` (fraction of
+independently re-fetched offset windows that reproduced this candidate
+-- see investigation_multi_mobile.py's _run_stability_check()) is now
+an optional input here.
+
+This is placed at the SAME priority tier as has_contradiction --
+BEFORE has_field_validation, source count, or quality are ever
+consulted -- and deliberately so: field-validating (GPR/ERT) a
+candidate whose underlying elevation anomaly itself may not reliably
+exist doesn't rescue it, it just validates a possible artifact. A low
+stability_score therefore caps the ceiling unconditionally, the same
+way a contradiction does, rather than being averaged in with other
+positive factors.
+
+stability_score=None (the default, and the actual value for any
+candidate the automatic check did not run against -- see
+investigation_multi_mobile.py for exactly which candidates qualify)
+means "not tested," not "unstable" -- it applies NO cap and changes
+NOTHING about this function's existing behavior. Only a candidate that
+WAS tested and came back fragile is affected.
 """
 
 from __future__ import annotations
@@ -18,6 +46,16 @@ from dataclasses import dataclass
 from enum import Enum
 
 from steward_evidence_matrix import EvidenceMatrix, EvidenceQuality
+
+# Thresholds derived from real testing (see project notes): the
+# observed fragile band was roughly |z| 2.6-3.0 against a 2.5 DEM
+# threshold, with reproduction rates ranging from 0.0 (total failure)
+# up through roughly 0.5 (mixed) up to 1.0 (rock-solid, |z| >~3.2).
+# These two cutoffs are a first real calibration from that data, not a
+# settled scientific constant -- expect them to be revisited as more
+# real investigations accumulate.
+STABILITY_LOW_CAP_THRESHOLD = 0.4   # below this: cap at LOW, unconditionally
+STABILITY_MODERATE_CAP_THRESHOLD = 0.7  # below this (and >= LOW threshold): cap at MODERATE
 
 
 class ConfidenceBand(Enum):
@@ -73,12 +111,20 @@ def compute_confidence_band(
     has_field_validation: bool,  # GPR/ERT pick that colocates with this candidate
     environmental_confounders_controlled: bool,
     has_contradiction: bool,
+    stability_score: float | None = None,
+    stability_z_range: tuple[float, float] | None = None,
 ) -> tuple[ConfidenceBand, list[str]]:
     """
     Derives a ConfidenceBand from real, caller-supplied facts about a
     candidate's evidence. This is intentionally a small set of clear,
     explainable rules (not a black-box score) so every ceiling decision
     can be explained in plain language in the reasoning trace.
+
+    stability_score (0-1, or None if the detection-stability check was
+    never run for this candidate -- see module docstring) is checked
+    immediately after has_contradiction, BEFORE has_field_validation or
+    source count/quality are consulted -- a low score caps the ceiling
+    unconditionally, the same way a contradiction does.
     """
     reasoning: list[str] = []
 
@@ -100,6 +146,31 @@ def compute_confidence_band(
             "confidence is capped at LOW regardless of other factors."
         )
         return ConfidenceBand.LOW, reasoning
+
+    if stability_score is not None and stability_score < STABILITY_LOW_CAP_THRESHOLD:
+        range_note = ""
+        if stability_z_range is not None:
+            range_note = f" (z-score ranged {stability_z_range[0]:.2f} to {stability_z_range[1]:.2f} across the windows where it did reproduce)"
+        reasoning.append(
+            f"Detection stability check found this candidate reproduced in "
+            f"only {stability_score:.0%} of independently re-fetched "
+            f"sampling windows{range_note} -- the underlying elevation "
+            f"anomaly itself is not reliably reproducible at this z-score "
+            f"margin, independent of how many other sources corroborate "
+            f"it. Confidence is capped at LOW regardless of other factors "
+            f"(including field validation)."
+        )
+        return ConfidenceBand.LOW, reasoning
+
+    if stability_score is not None and stability_score < STABILITY_MODERATE_CAP_THRESHOLD:
+        reasoning.append(
+            f"Detection stability check found this candidate reproduced in "
+            f"only {stability_score:.0%} of independently re-fetched "
+            f"sampling windows -- moderate sensitivity to exact AOI "
+            f"placement. Confidence is capped at MODERATE regardless of "
+            f"other factors (including field validation)."
+        )
+        return ConfidenceBand.MODERATE, reasoning
 
     if independent_sources == 1:
         reasoning.append(
@@ -143,6 +214,8 @@ def govern_confidence(
     has_field_validation: bool = False,
     environmental_confounders_controlled: bool = False,
     has_contradiction: bool = False,
+    stability_score: float | None = None,
+    stability_z_range: tuple[float, float] | None = None,
 ) -> ConfidenceCeilingResult:
     """
     Main entry point. Takes a raw confidence value (e.g. from the
@@ -152,6 +225,10 @@ def govern_confidence(
 
     This NEVER increases raw_confidence -- clamped_confidence is always
     min(raw_confidence, ceiling).
+
+    stability_score/stability_z_range are optional (default None =
+    "not tested for this candidate" -- see module docstring); passed
+    straight through to compute_confidence_band().
     """
     raw_confidence = max(0.0, min(1.0, raw_confidence))
 
@@ -160,6 +237,8 @@ def govern_confidence(
         has_field_validation,
         environmental_confounders_controlled,
         has_contradiction,
+        stability_score=stability_score,
+        stability_z_range=stability_z_range,
     )
     ceiling = band.numeric_ceiling
     clamped = min(raw_confidence, ceiling)
