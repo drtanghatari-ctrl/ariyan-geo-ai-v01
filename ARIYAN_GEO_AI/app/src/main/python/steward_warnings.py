@@ -7,6 +7,13 @@ Generates the Steward's scientific alerts. These are meant to be shown
 directly in the Android UI (not buried in logs), so each warning is a
 short, plain-language, non-dramatic sentence plus a machine-readable
 kind for the UI to badge/sort by.
+
+WINDOW_SENSITIVITY_WARNING added this session (see
+steward_confidence_ceiling.py's own docstring for the full detection-
+stability background). Fires only when a candidate's stability_score
+is both present (the automatic check actually ran for it) and below
+the MODERATE-cap threshold -- a candidate that was never tested gets no
+warning, since absence of a test is not evidence of instability.
 """
 
 from __future__ import annotations
@@ -14,7 +21,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from steward_confidence_ceiling import ConfidenceCeilingResult
+from steward_confidence_ceiling import (
+    ConfidenceCeilingResult,
+    STABILITY_LOW_CAP_THRESHOLD,
+    STABILITY_MODERATE_CAP_THRESHOLD,
+)
 from steward_evidence_matrix import EvidenceMatrix
 
 
@@ -26,6 +37,7 @@ class WarningKind(Enum):
     CONFIDENCE = "CONFIDENCE_WARNING"
     CONTRADICTION = "CONTRADICTION_WARNING"
     DATA_GAP = "DATA_GAP"
+    WINDOW_SENSITIVITY = "WINDOW_SENSITIVITY_WARNING"
 
 
 @dataclass(frozen=True)
@@ -46,9 +58,12 @@ def generate_warnings(
     confounder_notes: list[str] | None = None,
     has_contradiction: bool = False,
     raw_model_confidence: float | None = None,
+    stability_score: float | None = None,
+    stability_windows_detected: int | None = None,
+    stability_windows_fetched: int | None = None,
 ) -> list[StewardWarning]:
     """
-    Builds the applicable subset of the 7 Steward warning types from
+    Builds the applicable subset of the Steward warning types from
     real, caller-supplied facts about a candidate. Never invents a
     warning that isn't actually supported by the inputs -- if nothing
     applies, this returns an empty list.
@@ -115,6 +130,29 @@ def generate_warnings(
             StewardWarning(
                 WarningKind.CONTRADICTION,
                 "Independent evidence does not support the current hypothesis.",
+            )
+        )
+
+    # WINDOW_SENSITIVITY_WARNING: only when the stability check actually
+    # ran (stability_score is not None) AND came back below the
+    # MODERATE-cap threshold. A candidate never tested (None) gets no
+    # warning -- absence of a test is not evidence of instability.
+    if stability_score is not None and stability_score < STABILITY_MODERATE_CAP_THRESHOLD:
+        severity = "significant" if stability_score < STABILITY_LOW_CAP_THRESHOLD else "moderate"
+        windows_note = ""
+        if stability_windows_detected is not None and stability_windows_fetched:
+            windows_note = (
+                f" (reproduced in {stability_windows_detected} of "
+                f"{stability_windows_fetched} independently tested sampling windows)"
+            )
+        warnings.append(
+            StewardWarning(
+                WarningKind.WINDOW_SENSITIVITY,
+                f"This candidate shows {severity} sensitivity to exact AOI "
+                f"sampling-window placement{windows_note} -- its elevation "
+                f"anomaly may not be a stable, reproducible feature of the "
+                f"terrain rather than an artifact of this run's specific "
+                f"DEM fetch.",
             )
         )
 
