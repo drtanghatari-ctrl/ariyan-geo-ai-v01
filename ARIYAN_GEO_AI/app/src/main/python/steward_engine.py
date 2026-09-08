@@ -4,10 +4,10 @@ steward_engine.py
 Scientific Steward -- Stage 1 (Steward Foundation)
 
 Top-level orchestrator. This is the single entry point the rest of the
-app will eventually call (from investigation_multi_mobile.py, once
-Stage 1 is confirmed and wired in) to get a full Steward evaluation for
-one candidate: evidence matrix, confidence ceiling, warnings, and a
-structured reasoning trace, plus honest OBSERVED/HYPOTHESIZED wording.
+app calls (from debate_mobile.py's _build_steward_report()) to get a
+full Steward evaluation for one candidate: evidence matrix, confidence
+ceiling, warnings, and a structured reasoning trace, plus honest
+OBSERVED/HYPOTHESIZED wording.
 
 STAGE 1 SCOPE (per the Scientific Steward spec's 5-stage build plan):
   - evidence states (steward_evidence_states.py)
@@ -25,10 +25,20 @@ OUT OF SCOPE for Stage 1 (later stages per the spec):
   - Candidate scoring / validation-priority ranking (Stage 4)
   - Adaptive "what evidence would reduce uncertainty most" reasoning (Stage 5)
 
+DETECTION STABILITY EXTENSION (added this session): evaluate_candidate()
+now accepts optional stability_score/stability_windows_detected/
+stability_windows_fetched/stability_z_range parameters, threaded
+straight through to steward_confidence_ceiling.govern_confidence() and
+steward_warnings.generate_warnings() -- see those modules' own
+docstrings for the full detection-stability background. All default to
+None ("not tested for this candidate"), which changes NOTHING about
+this function's existing behavior for any candidate the automatic
+check didn't run against.
+
 This module is intentionally self-contained (new files only, zero
-changes to any existing file) so it can be sandbox-tested in full
-before anything in MainActivity.kt, investigation_multi_mobile.py, or
-debate_engine.py is touched -- same discipline used for every other
+changes to any existing file outside the Steward chain) so it can be
+sandbox-tested in full before anything in MainActivity.kt or
+debate_mobile.py is touched -- same discipline used for every other
 module in this project.
 """
 
@@ -105,6 +115,10 @@ def evaluate_candidate(
     has_field_validation: bool = False,
     environmental_confounders_controlled: bool = False,
     has_contradiction: bool = False,
+    stability_score: float | None = None,
+    stability_windows_detected: int | None = None,
+    stability_windows_fetched: int | None = None,
+    stability_z_range: tuple[float, float] | None = None,
     interpretation: str = "",
     hypothesis: str = "",
     alternative_hypotheses: list[str] | None = None,
@@ -128,6 +142,13 @@ def evaluate_candidate(
     engine's synthesis confidence (0-1) -- this function NEVER
     increases it, only ever clamps it down to what the evidence
     actually supports.
+
+    `stability_score`/`stability_windows_detected`/
+    `stability_windows_fetched`/`stability_z_range` describe the
+    optional, automatic detection-stability check (see
+    steward_confidence_ceiling.py's docstring) -- all default to None,
+    meaning "not tested for this candidate," which applies no cap and
+    generates no warning.
     """
     alternative_hypotheses = alternative_hypotheses or []
     contradictions = contradictions or []
@@ -153,6 +174,8 @@ def evaluate_candidate(
         has_field_validation=has_field_validation,
         environmental_confounders_controlled=environmental_confounders_controlled,
         has_contradiction=has_contradiction,
+        stability_score=stability_score,
+        stability_z_range=stability_z_range,
     )
 
     warnings = generate_warnings(
@@ -164,6 +187,9 @@ def evaluate_candidate(
         confounder_notes=confounder_notes,
         has_contradiction=has_contradiction,
         raw_model_confidence=raw_debate_confidence,
+        stability_score=stability_score,
+        stability_windows_detected=stability_windows_detected,
+        stability_windows_fetched=stability_windows_fetched,
     )
 
     trace = ReasoningTrace(
