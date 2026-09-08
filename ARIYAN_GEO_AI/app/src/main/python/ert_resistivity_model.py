@@ -51,6 +51,49 @@ the "best" one), and overall_lean() honestly reports "ambiguous" rather
 than forcing a single natural/anthropogenic call whenever the matched
 bands don't agree. Every consumer of this module's output must treat
 that as real, reportable ambiguity, not a defect to average away.
+
+WHY "conductive_metal" IS LABELED "ambiguous", NOT "anthropogenic"
+(decided 2026-09-08, see the module's git history / HANDOFF.md for the
+full discussion that led here):
+An earlier version of this file labeled conductive_metal's lean as
+"anthropogenic", on the reasoning that very low resistivity (0-10
+ohm-m) is typical of buried metal (rebar, pipes, metal artifacts).
+That claim does not survive scrutiny against the same standard
+references this file already cites: saline groundwater and saline
+clay can genuinely read below 10 ohm-m (published field-calibrated
+studies report saline clay as low as <5 ohm-m, and fresh-water-bearing
+clay <15 ohm-m), and even non-saline, fully natural saturated fine
+sediment (e.g. saturated loess) has been directly measured at ~10
+ohm-m with no salinity or metal involved at all. There is no floor
+below which "it must be metal, not natural saturated ground" holds --
+as salinity rises, natural material resistivity can drop arbitrarily
+low (seawater itself is ~0.2 ohm-m). So water_filled_void's overlap
+with conductive_metal's full range is not a bug to fix by narrowing
+the bands -- narrowing them would mean inventing a boundary the
+literature does not support, exactly the kind of fabricated precision
+this project's evidence sources must never produce.
+The only real, physics-based way to add trustworthy discriminating
+power here is a second, independent method -- magnetometry is the
+standard one: ferrous metal produces a genuine magnetic dipole
+anomaly that plain water/void/clay does not, so it can make a clean
+metal call that resistivity alone cannot. Induced Polarization
+(chargeability) was also considered and rejected for this file: it CAN
+rule out a plain water-filled void (water has no polarization
+mechanism), but it cannot cleanly separate metal from clay (both
+polarize, via different mechanisms -- electrode polarization for
+metal, membrane polarization for clay), and it has no universal
+numeric reference table the way resistivity does (chargeability units
+and typical values vary by instrument, with no standard equivalent to
+RESISTIVITY_BANDS). Building either path into this app now, without
+owning the hardware or a confirmed real data source, would repeat the
+mistake this project has deliberately avoided elsewhere (see LiDAR:
+parked indefinitely, no real data source, never built speculatively).
+So: conductive_metal is honestly "ambiguous", overall_lean() currently
+can never return "anthropogenic" from any resistivity value in this
+model, and that is a correct, permanent statement about what a single
+DC resistivity reading can tell you -- not an open bug. It only
+changes if a magnetometer (or other independent method) is added as a
+genuinely new evidence source, which is not currently planned/owned.
 """
 from __future__ import annotations
 
@@ -76,12 +119,18 @@ class ResistivityBand:
 # module docstring's HONEST, DELIBERATE AMBIGUITY section).
 RESISTIVITY_BANDS: dict[str, ResistivityBand] = {
     "conductive_metal": ResistivityBand(
-        "conductive_metal", "Metal / highly conductive anthropogenic material",
-        0.0, 10.0, "anthropogenic",
+        "conductive_metal", "Metal / highly conductive material (metal or saline/saturated ground)",
+        0.0, 10.0, "ambiguous",
         "Buried metal objects, rebar, pipes, or similarly conductive "
-        "man-made material read far below natural background. Natural "
-        "metallic ore bodies exist but are rare in typical archaeological "
-        "survey contexts.",
+        "man-made material CAN read this low -- but so can purely "
+        "natural saline groundwater, saline clay, or ordinary saturated "
+        "fine sediment (published field studies report natural material "
+        "reading well below 10 ohm-m with no metal or human activity "
+        "involved). Resistivity alone cannot distinguish these -- see "
+        "module docstring's note on why this band is not labeled "
+        "anthropogenic. A magnetometer reading (not currently an "
+        "evidence source in this app) is the real, trustworthy way to "
+        "confirm metal specifically.",
     ),
     "water_filled_void": ResistivityBand(
         "water_filled_void", "Water-filled void / saturated conductive fill",
@@ -188,6 +237,18 @@ def overall_lean(bands: list[ResistivityBand]) -> str:
     This is deliberately conservative: a reading that plausibly matches
     both a natural and an anthropogenic band is genuinely ambiguous and
     must not be forced toward either interpretation.
+
+    NOTE (2026-09-08): with the current RESISTIVITY_BANDS, no band is
+    labeled "anthropogenic" (see conductive_metal's notes and the
+    module docstring's "WHY conductive_metal IS LABELED ambiguous"
+    section) -- so this function currently can never return
+    "anthropogenic" for any input. That is intentional and correct,
+    not a bug: it reflects that a single DC resistivity reading, on its
+    own, cannot trustworthily confirm anthropogenic origin. The logic
+    below is left exactly as originally written (untouched) so that if
+    a future evidence source (e.g. magnetometry) ever justifies adding
+    a real anthropogenic-leaning band, "anthropogenic" becomes
+    reachable again with zero changes needed here.
     """
     if not bands:
         return "ambiguous"
