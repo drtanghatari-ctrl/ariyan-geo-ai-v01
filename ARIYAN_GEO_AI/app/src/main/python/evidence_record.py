@@ -34,8 +34,8 @@ per-DEM-candidate corroborating check -- not a single site-anchored
 note like GPR -- so it gets its own aggregate-plus-detail slot rather
 than being folded into GPR's third_evidence pattern.
 
-SIXTH EVIDENCE SLOT ADDED THIS SESSION (ERT): unlike Thermal/Optical,
-ERT (electrical resistivity tomography, see ert_source_mobile.py) is
+SIXTH EVIDENCE SLOT (ERT, a prior session): unlike Thermal/Optical, ERT
+(electrical resistivity tomography, see ert_source_mobile.py) is
 architecturally like GPR -- a SINGLE, site-anchored field-verification
 reading (a human-entered resistivity value at a known depth, classified
 against fixed reference ranges), not a per-DEM-candidate corroborating
@@ -44,6 +44,30 @@ pattern (single record appended to `evidence`, reported in its own
 `sixth_evidence_detail` field, no per-candidate anomalies list), NOT the
 fourth/fifth pattern, even though it is numbered "sixth" simply because
 it is the sixth evidence slot added to this record chronologically.
+
+SEVENTH EVIDENCE SLOT ADDED THIS SESSION (Detection Stability): real
+on-device testing (18+ live investigations, see project notes) found
+that detect_anomalies() can genuinely disagree with itself when re-run
+against a differently-centered AOI window -- candidates close to the
+detection threshold were found to frequently fail to reproduce, while
+candidates well above it were consistently robust. investigation_
+multi_mobile.py now AUTOMATICALLY re-fetches+re-detects around any DEM
+candidate whose |z| falls within a margin of dem_zscore_threshold (see
+that module's _run_stability_check()), for at most a small, bounded
+number of candidates per run (network-cost control). This follows the
+FOURTH/FIFTH pattern, NOT third/sixth (GPR/ERT) -- like Thermal/
+Optical, it is fundamentally a list of per-candidate results (one
+StabilityResult per auto-tested candidate, 0 to a few per run), kept
+OUT of `anomalies[]` for the same reason fourth/fifth are (a
+StabilityResult's schema -- stability_score/n_windows_fetched/z_min/
+z_max -- has nothing in common with AnomalyCandidate), and reported in
+its own `seventh_evidence_detail` field. UNLIKE Thermal/Optical, it is
+NOT run for every DEM candidate -- only borderline ones qualify, so
+`seventh_evidence_detail` will often be empty or short even when many
+DEM candidates exist. `seventh_evidence` is only appended to `evidence`
+at all when at least one candidate was actually tested this run (an
+investigation where nothing qualified carries no stability evidence
+item, rather than a misleading "0 candidates tested" entry every time).
 
 CONFIDENCE-STATEMENT FIX (a prior session): previously, the "co-located
 anomalies in X + Y" phrase listed every evidence_type present in
@@ -56,9 +80,9 @@ Optical) would make it actively wrong (claiming a source co-located
 candidates it never touched). Fixed to derive the list from the sources
 that actually appear in `supporting_sources` for CORROBORATED candidates
 specifically -- this logic needed no further change to accommodate
-Optical, and needs none for ERT either: ERT, like GPR, never
-participates in correlation() and never appears in supporting_sources,
-so this phrase correctly never mentions it.
+Optical, ERT, or Stability: none of these three ever participates in
+correlation() or appears in supporting_sources, so this phrase
+correctly never mentions any of them.
 """
 from __future__ import annotations
 
@@ -87,6 +111,7 @@ class InvestigationRecord:
     fourth_evidence_detail: list[dict] = field(default_factory=list)
     fifth_evidence_detail: list[dict] = field(default_factory=list)
     sixth_evidence_detail: list[dict] = field(default_factory=list)
+    seventh_evidence_detail: list[dict] = field(default_factory=list)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(asdict(self), indent=indent, default=str)
@@ -113,6 +138,9 @@ def build_investigation_record(
     fifth_evidence_type: str | None = None,
     sixth_evidence: Any = None,
     sixth_evidence_type: str | None = None,
+    seventh_evidence: Any = None,
+    seventh_anomalies: list | None = None,
+    seventh_evidence_type: str | None = None,
 ) -> InvestigationRecord:
     """Build the InvestigationRecord JSON payload.
 
@@ -128,57 +156,49 @@ def build_investigation_record(
       (e.g. NdviCoreHaloResult from the real-NDVI per-candidate check --
       core_mean/halo_mean/z_score fields, no area_cells/peak_zscore/
       polarity). These are kept OUT of `anomalies` and reported in the
-      separate `second_evidence_detail` field instead. Mixing them into
-      `anomalies` previously caused downstream consumers (including
-      MainActivity.kt's renderResult(), which reads every anomalies[]
-      entry assuming AnomalyCandidate fields) to silently default
-      missing fields to fake values -- area=0, |z|=NaN, polarity="" --
-      which looked exactly like a degenerate/empty DEM candidate but
-      was actually a real NDVI check result being read through the
-      wrong schema.
+      separate `second_evidence_detail` field instead.
 
     third_evidence (optional) is a further, structurally-independent,
     SINGLE (not per-candidate) evidence source appended to `evidence`
     and reported in its own `third_evidence_detail` field (never merged
-    into `anomalies`, same reasoning as the
-    `second_anomalies_are_candidates=False` path above -- e.g.
-    GPREvidence from gpr_source_mobile.py, whose schema
-    (depth_estimates_m, soil_preset, entry_method) has nothing in
-    common with AnomalyCandidate). third_evidence must implement
+    into `anomalies`). third_evidence must implement
     .as_evidence_record() the same way every other evidence source does.
 
     fourth_evidence/fourth_anomalies (optional) follow the EXACT same
     shape as second_evidence/second_anomalies (a single aggregate
     wrapper object appended to `evidence`, plus a per-candidate detail
-    list) -- for Thermal's real per-DEM-candidate core/halo check
-    (ThermalCoreHaloResult from investigation_multi_mobile.py, schema:
-    core_mean_kelvin/halo_mean_kelvin/z_score/core_warmer_than_halo).
-    Always kept out of `anomalies[]` (there is no "are_candidates"
-    toggle here, unlike second_anomalies -- a per-candidate core/halo
-    check result is never structurally an AnomalyCandidate) and
-    reported in `fourth_evidence_detail` instead, for the exact same
-    reason `second_anomalies_are_candidates=False` exists.
+    list) -- for Thermal's real per-DEM-candidate core/halo check.
+    Always kept out of `anomalies[]` and reported in
+    `fourth_evidence_detail` instead.
 
     fifth_evidence/fifth_anomalies (optional) follow the IDENTICAL shape
     as fourth_evidence/fourth_anomalies -- for Optical's real
-    per-DEM-candidate visible-brightness core/halo check
-    (OpticalCoreHaloResult from investigation_multi_mobile.py, schema:
-    core_mean/halo_mean/z_score/core_brighter_than_halo). Always kept
+    per-DEM-candidate visible-brightness core/halo check. Always kept
     out of `anomalies[]` for the same reason as fourth_evidence, and
     reported in `fifth_evidence_detail` instead.
 
-    sixth_evidence (optional, ADDED THIS SESSION) is ERT's real,
-    SINGLE, site-anchored (not per-candidate) evidence source, appended
-    to `evidence` and reported in its own `sixth_evidence_detail` field
-    -- follows the third_evidence (GPR) pattern, NOT the fourth/fifth
-    (Thermal/Optical) pattern, since ERT -- like GPR -- is a single
-    manual field reading anchored at the investigation's own (lat,
-    lon), not a per-DEM-candidate corroborating check
-    (ERTEvidence from ert_source_mobile.py, whose schema
-    (resistivity_ohm_m, depth_m, matched_bands, overall_lean) has
-    nothing in common with AnomalyCandidate either). sixth_evidence
-    must implement .as_evidence_record() the same way every other
-    evidence source does.
+    sixth_evidence (optional) is ERT's real, SINGLE, site-anchored (not
+    per-candidate) evidence source, appended to `evidence` and reported
+    in its own `sixth_evidence_detail` field -- follows the
+    third_evidence (GPR) pattern, NOT the fourth/fifth (Thermal/Optical)
+    pattern.
+
+    seventh_evidence/seventh_anomalies (optional, ADDED THIS SESSION) are
+    Detection Stability's real per-candidate re-fetch/re-detect check
+    results (StabilityResult from investigation_multi_mobile.py, schema:
+    lat/lon/target_zscore/stability_score/n_windows_fetched/
+    n_windows_detected/z_min/z_max/offset_errors -- nothing in common
+    with AnomalyCandidate). Follows the fourth/fifth pattern (aggregate
+    wrapper + per-item detail list, kept out of `anomalies[]`) with one
+    difference: unlike Thermal/Optical, this is NOT run for every DEM
+    candidate -- only the borderline subset that qualified this run, so
+    `seventh_anomalies` may be an empty list even when other evidence
+    slots are fully populated. `seventh_evidence` (the aggregate
+    wrapper describing the method/margin/offsets used) is only appended
+    to `evidence` when `seventh_anomalies` is non-empty -- an
+    investigation where no candidate qualified for the automatic check
+    carries no stability evidence item at all, rather than a misleading
+    zero-candidates entry appearing on every single run.
     """
     evidence = [dem.as_evidence_record()]
     derived_products = [{
@@ -194,6 +214,7 @@ def build_investigation_record(
     fourth_evidence_detail: list[dict] = []
     fifth_evidence_detail: list[dict] = []
     sixth_evidence_detail: list[dict] = []
+    seventh_evidence_detail: list[dict] = []
 
     limitations = [
         "Anomalies reflect statistical deviation from local terrain/spectral "
@@ -234,9 +255,6 @@ def build_investigation_record(
         })
 
         if second_anomalies_are_candidates:
-            # second_anomalies really are AnomalyCandidate instances
-            # (same schema as the DEM anomalies) -- safe to merge into
-            # one uniform list.
             anomaly_dicts.extend([
                 {**asdict(a), "evidence_type": second_evidence_type}
                 for a in (second_anomalies or [])
@@ -244,11 +262,6 @@ def build_investigation_record(
             for a in anomaly_dicts[:len(anomalies)]:
                 a.setdefault("evidence_type", "DEM")
         else:
-            # second_anomalies have a DIFFERENT schema (e.g. the real-NDVI
-            # per-candidate core/halo check). Keep them out of `anomalies`
-            # so nothing downstream defaults missing AnomalyCandidate
-            # fields to fake 0 / NaN / "" values -- report them in their
-            # own field instead.
             for a in anomaly_dicts:
                 a.setdefault("evidence_type", "DEM")
             second_evidence_detail = [
@@ -326,6 +339,31 @@ def build_investigation_record(
         )
         sixth_evidence_detail = [sixth_record]
 
+    # Stability (seventh) is only appended when at least one candidate
+    # actually qualified/was tested this run -- an investigation where
+    # nothing was borderline enough to trigger the automatic check
+    # carries no stability evidence item at all (see this function's
+    # own docstring).
+    if seventh_anomalies:
+        if seventh_evidence is not None:
+            evidence.append(seventh_evidence.as_evidence_record())
+        limitations.append(
+            f"Detection stability evidence in this run automatically "
+            f"re-fetched and re-detected around {len(seventh_anomalies)} "
+            f"DEM candidate(s) whose z-score was close to the detection "
+            f"threshold, to check whether their detection is robust to "
+            f"exact AOI sampling-window placement or an artifact of this "
+            f"run's specific DEM fetch -- see the evidence item's own "
+            f"record above and each candidate's own stability_score for "
+            f"the real per-candidate results. Candidates well above "
+            f"threshold are not automatically tested; their stability is "
+            f"simply unknown/untested, not assumed stable."
+        )
+        seventh_evidence_detail = [
+            {**asdict(a), "evidence_type": seventh_evidence_type}
+            for a in seventh_anomalies
+        ]
+
     correlation_dicts = []
     if correlation_results:
         for r in correlation_results:
@@ -339,12 +377,6 @@ def build_investigation_record(
             })
         n_corroborated = sum(1 for r in correlation_results if r.status == "CORROBORATED")
         if n_corroborated > 0:
-            # Only list sources that actually corroborated a candidate,
-            # not every evidence source present in the run (see this
-            # module's CONFIDENCE-STATEMENT FIX note above -- GPR/ERT,
-            # e.g., never participate in correlation and must not be
-            # implied to have co-located anything here). Generalizes to
-            # however many real corroborating source types are present.
             corroborating_sources: list[str] = []
             for r in correlation_results:
                 if r.status != "CORROBORATED":
@@ -405,5 +437,7 @@ def build_investigation_record(
         record_kwargs["fifth_evidence_detail"] = fifth_evidence_detail
     if sixth_evidence_detail:
         record_kwargs["sixth_evidence_detail"] = sixth_evidence_detail
+    if seventh_evidence_detail:
+        record_kwargs["seventh_evidence_detail"] = seventh_evidence_detail
 
     return InvestigationRecord(**record_kwargs)
