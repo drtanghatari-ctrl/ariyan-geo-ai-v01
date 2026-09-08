@@ -51,7 +51,6 @@ def meters_per_degree(lat_deg: float) -> tuple[float, float]:
     lat = math.radians(lat_deg)
     sin_lat = math.sin(lat)
 
-    # Radius of curvature in the meridian (N-S) and prime vertical (E-W)
     m = WGS84_A * (1 - WGS84_E2) / (1 - WGS84_E2 * sin_lat ** 2) ** 1.5
     n = WGS84_A / math.sqrt(1 - WGS84_E2 * sin_lat ** 2)
 
@@ -70,6 +69,22 @@ def haversine_distance_m(a: GeoPoint, b: GeoPoint) -> float:
     h = (math.sin(dlat / 2) ** 2
          + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2)
     return 2 * r * math.asin(min(1.0, math.sqrt(h)))
+
+
+def offset_point(center: GeoPoint, north_m: float, east_m: float) -> GeoPoint:
+    """Return a new GeoPoint offset from `center` by north_m/east_m meters,
+    using the same real WGS84 meters_per_degree() conversion already used
+    throughout this module for build_aoi() -- not a flat-earth
+    approximation, and not a second, independently-drifting formula.
+
+    Used by investigation_multi_mobile.py's automatic detection-stability
+    check to compute genuinely different re-fetch centers around a
+    borderline DEM candidate (see that module's _run_stability_check()).
+    """
+    m_per_deg_lat, m_per_deg_lon = meters_per_degree(center.lat)
+    dlat = north_m / m_per_deg_lat
+    dlon = east_m / m_per_deg_lon
+    return GeoPoint(center.lat + dlat, center.lon + dlon)
 
 
 def build_aoi(center: GeoPoint, radius_m: float, grid_size: int = 256) -> AreaOfInterest:
