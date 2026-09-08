@@ -46,9 +46,8 @@ REAL SCHEMA NOTES (why this file looks the way it does):
   Agronomic perspective's "was NDVI evaluated at all" question). These
   used to be silently merged into one field; conflating them was the
   root cause of a real on-device bug, now fixed and unaffected by
-  Optical's or ERT's addition (both follow the same precise/checked
-  split, or in ERT's case the same GPR-style site-anchored match, from
-  the start).
+  Optical's, ERT's, or Stability's addition (each follows its own
+  documented, distinct match strategy, never touching this split).
 - SCOPE: only anomalies[] entries with evidence_type == "DEM" (or no
   evidence_type at all -- single-source runs) are debated. In synthetic-
   NDVI mode, anomalies[] can also hold NDVI-raster-detected candidates
@@ -100,7 +99,7 @@ exact-match approach against fifth_evidence_detail by lat/lon, checking
 that specific entry's own error field, for the same reasons documented
 on _attach_thermal_detail() itself.
 
-REAL ERT EXTENSION, ADDED THIS SESSION: unlike Thermal/Optical, real
+REAL ERT EXTENSION (a prior session): unlike Thermal/Optical, real
 ERT (evidence_record.py's sixth evidence slot -- see
 ert_source_mobile.py) is a SINGLE, site-anchored field-verification
 reading, architecturally like GPR -- NOT a per-candidate check. This
@@ -116,24 +115,50 @@ ERT reading gets nothing added, exactly like GPR. If ERT evidence
 exists but no candidate was close enough to use it, that is reported
 in the result's "ert_note" field, mirroring "gpr_note".
 
+DETECTION STABILITY EXTENSION, ADDED THIS SESSION: unlike GPR/ERT
+(single site-anchored readings) and unlike Thermal/Optical (run for
+EVERY DEM candidate), Detection Stability (evidence_record.py's
+seventh evidence slot -- see investigation_multi_mobile.py's
+_run_stability_check()) is a per-candidate check run only for the
+borderline subset of candidates that automatically qualified this run
+(possibly zero, possibly all, typically a small number -- see that
+module's _select_stability_candidates()). Each result IS anchored at
+its own specific candidate's exact (lat, lon) (mirrors Thermal/
+Optical's per-candidate anchoring, not GPR/ERT's colocation-radius
+"was this nearby" style), so matching uses the SAME tight-tolerance
+exact-match approach as _attach_thermal_detail()/_attach_optical_detail()
+via the shared _attach_per_candidate_detail() helper -- see
+_attach_stability_detail() below. Unlike Thermal/Optical's boolean
+"checked" flag, this attaches the REAL stability_score (and, when
+detected in at least one window, the real z_min/z_max range) onto the
+candidate, since Scientific Steward needs the actual score value, not
+just a yes/no -- see _build_steward_report() below for exactly how it's
+read and passed through to steward_engine.evaluate_candidate().
+
 SOURCES-SPLIT FIX (a prior session -- REAL on-device bug, unaffected by
-Optical's or ERT's addition): candidate["sources"] is the PRECISE
-list of sources that actually corroborated this candidate (drives
-debate_engine.py's Anthropogenic/Geomorphology reasoning text via
-_sources_present()). candidate["checked_sources"] is the BROADER union
-of every source genuinely checked for this candidate regardless of
-outcome (drives debate_engine.py's Vegetation/Agronomic perspective via
-_sources_checked_present(), and this module's own
+Optical's, ERT's, or Stability's addition): candidate["sources"] is the
+PRECISE list of sources that actually corroborated this candidate
+(drives debate_engine.py's Anthropogenic/Geomorphology reasoning text
+via _sources_present()). candidate["checked_sources"] is the BROADER
+union of every source genuinely checked for this candidate regardless
+of outcome (drives debate_engine.py's Vegetation/Agronomic perspective
+via _sources_checked_present(), and this module's own
 _build_steward_report() below for has_dem/has_ndvi). Optical follows
 this exact same split from the start: it is exact-match-precise (via
 _attach_optical_detail(), just like Thermal) rather than routed through
 the whole-run union checked_sources currently used for NDVI (see the
 KNOWN, FLAGGED, NOT-YET-FIXED IMPRECISION note below, unchanged and
-unaffected by Optical's or ERT's addition). ERT does not participate in
-this "sources"/"checked_sources" concept at all -- like GPR, it is read
-only via its own dedicated ert_confirmed/... fields, never folded into
-either sources list, since neither GPR nor ERT ever participates in
-correlation().
+unaffected by Optical's, ERT's, or Stability's addition). ERT does not
+participate in this "sources"/"checked_sources" concept at all -- like
+GPR, it is read only via its own dedicated ert_confirmed/... fields,
+never folded into either sources list, since neither GPR nor ERT ever
+participates in correlation(). Detection Stability doesn't participate
+in it either, for a different reason: it isn't a corroborating evidence
+source at all (a stable detection isn't NEW evidence for a hypothesis,
+it's a statement about how much the existing DEM evidence can be
+trusted) -- see steward_confidence_ceiling.py's own docstring for why
+it's read as a confidence-ceiling modifier instead, never counted as an
+EvidenceCategory or folded into either sources list here.
 
 KNOWN, FLAGGED, NOT-YET-FIXED IMPRECISION (identified a prior session,
 NOT changed without explicit confirmation -- this is a real,
@@ -142,11 +167,10 @@ it was before): candidate["checked_sources"] (the whole-run union used
 for has_ndvi and Vegetation/Agronomic's "was NDVI checked" question)
 cannot distinguish "NDVI genuinely succeeded for THIS candidate" from
 "NDVI evidence exists somewhere in this run but genuinely failed for
-EVERY candidate". The SAME exact-match technique now used for both
-Thermal (_attach_thermal_detail()) and Optical (_attach_optical_detail())
-could fix this too, if wanted -- deliberately not applied to NDVI here
-without asking first, since it would change already-proven on-device
-behavior.
+EVERY candidate". The SAME exact-match technique now used for Thermal,
+Optical, and Stability could fix this too, if wanted -- deliberately
+not applied to NDVI here without asking first, since it would change
+already-proven on-device behavior.
 
 SCIENTIFIC STEWARD STAGE 1 EXTENSION: after debate_engine.run_debate()
 returns its positions + synthesis for a candidate, this module also
@@ -172,18 +196,31 @@ guessing, per this project's zero-fabrication rule:
   - has_optical: real, taken directly from candidate["optical_checked"]
     (see _attach_optical_detail() below -- same "genuinely succeeded
     for THIS EXACT candidate" semantics as has_thermal).
-  - has_ert (REAL AS OF THIS SESSION, previously always False): taken
-    directly from candidate["ert_confirmed"] (see _attach_ert() below
-    -- set only when a real ERT reading colocated with this specific
-    candidate, exactly like has_gpr/has_field_validation above). Note
-    has_field_validation below is NOT updated to include ERT -- it
-    remains gpr-only, since the Scientific Steward spec's "field
-    validation" concept was defined around GPR specifically in Stage 1;
-    revisiting that definition to also include ERT is a Steward-side
-    decision, not something to fold in silently here.
+  - has_ert: real, taken directly from candidate["ert_confirmed"] (see
+    _attach_ert() below -- set only when a real ERT reading colocated
+    with this specific candidate, exactly like has_gpr/
+    has_field_validation above). Note has_field_validation below is NOT
+    updated to include ERT -- it remains gpr-only, since the Scientific
+    Steward spec's "field validation" concept was defined around GPR
+    specifically in Stage 1; revisiting that definition to also include
+    ERT is a Steward-side decision, not something to fold in silently
+    here.
   - has_lidar: always False. LiDAR has not been built (no real data
     source available for this project's operating region). Deliberate,
     not an oversight.
+  - stability_score / stability_windows_detected /
+    stability_windows_fetched / stability_z_range (ADDED THIS SESSION):
+    real, taken directly from candidate["stability_score"] etc. (see
+    _attach_stability_detail() below -- set only when this specific
+    candidate qualified for and completed the automatic detection-
+    stability check this run, via a tight exact-match against
+    seventh_evidence_detail, same style as has_thermal/has_optical). A
+    candidate that never qualified (well above dem_zscore_threshold, or
+    the per-investigation cap was already reached by other candidates)
+    has NO stability entry at all -- these four values all default to
+    None, meaning "not tested," not "unstable." See
+    steward_confidence_ceiling.py's own docstring for exactly how these
+    feed into the confidence ceiling.
   - raw_debate_confidence: real, taken directly from
     synthesis["leading_confidence"] (0.0 when NO_DATA / absent, which
     correctly yields the Steward's NO_DATA band).
@@ -216,15 +253,16 @@ from coordinate import GeoPoint, haversine_distance_m
 from debate_engine import run_debate
 from steward_engine import evaluate_candidate as steward_evaluate_candidate
 
-# Tolerance for matching a DEM candidate to its OWN per-candidate Thermal
-# or Optical detail entry. Deliberately tight (a few meters) -- unlike
-# GPR's/ERT's colocation-radius-style tolerance for "was this nearby",
-# both Thermal and Optical detail entries are built directly from the
-# SAME dem_candidate.lat/lon (see investigation_multi_mobile.py's
-# _run_thermal_checks/_run_optical_checks), so any real distance here
-# should only ever reflect floating-point noise, not a genuine
-# "different but nearby location" case. Shared by both
-# _attach_thermal_detail() and _attach_optical_detail() below.
+# Tolerance for matching a DEM candidate to its OWN per-candidate Thermal,
+# Optical, or Stability detail entry. Deliberately tight (a few meters) --
+# unlike GPR's/ERT's colocation-radius-style tolerance for "was this
+# nearby", Thermal/Optical/Stability detail entries are all built
+# directly from the SAME dem_candidate.lat/lon (see
+# investigation_multi_mobile.py's _run_thermal_checks/_run_optical_checks/
+# _run_stability_check), so any real distance here should only ever
+# reflect floating-point noise, not a genuine "different but nearby
+# location" case. Shared by _attach_thermal_detail(),
+# _attach_optical_detail(), and _attach_stability_detail().
 _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M = 5.0
 
 
@@ -331,7 +369,7 @@ def _attach_ert(candidate: dict, anomaly: dict, ert_item: Optional[dict], max_di
     sixth_evidence slot) is a single, site-anchored reading, not a
     per-candidate check, so it uses the same colocation-radius match
     style as GPR rather than the tight exact-match style used by
-    Thermal/Optical below. Sets ert_confirmed/ert_distance_m/
+    Thermal/Optical/Stability below. Sets ert_confirmed/ert_distance_m/
     ert_resistivity_ohm_m/ert_depth_m/ert_matched_bands/ert_lean on the
     candidate only when the ERT reading is close enough to plausibly be
     about the same physical location."""
@@ -367,7 +405,7 @@ def _attach_per_candidate_detail(
     flag_key: str,
     tolerance_m: float = _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M,
 ) -> None:
-    """Shared exact-match logic for both _attach_thermal_detail() and
+    """Shared exact-match logic for _attach_thermal_detail() and
     _attach_optical_detail() below -- sets candidate[flag_key] = True
     only when a real per-candidate result exists for THIS exact
     candidate (tight tolerance) AND that result's own error field is
@@ -383,7 +421,10 @@ def _attach_per_candidate_detail(
     their own detail list and flag key, preserving each one's own
     previously-proven behavior unchanged. Not used by ERT -- ERT is
     site-anchored (colocation-radius match via _attach_ert() above),
-    not per-candidate.
+    not per-candidate. Not used directly by Stability either -- see
+    _attach_stability_detail() below, which needs the real
+    stability_score value, not just a boolean, so it uses its own
+    small nearest-match loop instead of this boolean-only helper.
     """
     best = None
     best_dist = None
@@ -428,6 +469,58 @@ def _attach_optical_detail(
     _attach_per_candidate_detail(candidate, anomaly, fifth_evidence_detail, "optical_checked", tolerance_m)
 
 
+def _attach_stability_detail(
+    candidate: dict,
+    anomaly: dict,
+    seventh_evidence_detail: list[dict],
+    tolerance_m: float = _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M,
+) -> None:
+    """Sets candidate["stability_score"], candidate["stability_windows_
+    detected"], candidate["stability_windows_fetched"], and (when at
+    least one offset window detected a match)
+    candidate["stability_z_range"] -- ADDED THIS SESSION.
+
+    Unlike _attach_thermal_detail()/_attach_optical_detail() (which set
+    a single boolean via the shared _attach_per_candidate_detail()
+    helper), Scientific Steward needs the REAL stability_score value
+    (and the real z-range, when available), not just a yes/no -- so
+    this uses its own small tight-tolerance nearest-match loop instead
+    of reusing that boolean-only helper.
+
+    A candidate with no matching entry in seventh_evidence_detail
+    (either because it never qualified for the automatic check, or the
+    per-investigation cap meant it was never tested) gets NO stability
+    keys set on it at all -- candidate.get("stability_score") will
+    correctly return None downstream in _build_steward_report(),
+    which is exactly "not tested," never "unstable" (see
+    steward_confidence_ceiling.py's own docstring)."""
+    best = None
+    best_dist = None
+    for entry in seventh_evidence_detail:
+        try:
+            e_point = GeoPoint(entry["lat"], entry["lon"])
+            a_point = GeoPoint(anomaly["lat"], anomaly["lon"])
+            dist = haversine_distance_m(a_point, e_point)
+        except (KeyError, TypeError):
+            continue
+        if best_dist is None or dist < best_dist:
+            best = entry
+            best_dist = dist
+
+    if best is None or best_dist is None or best_dist > tolerance_m:
+        return  # no matching entry -- leave every stability_* key unset
+
+    candidate["stability_score"] = best.get("stability_score")
+    if best.get("n_windows_detected") is not None:
+        candidate["stability_windows_detected"] = best["n_windows_detected"]
+    if best.get("n_windows_fetched") is not None:
+        candidate["stability_windows_fetched"] = best["n_windows_fetched"]
+    z_min = best.get("z_min")
+    z_max = best.get("z_max")
+    if z_min is not None and z_max is not None:
+        candidate["stability_z_range"] = (z_min, z_max)
+
+
 def _build_candidate(
     anomaly: dict,
     correlation_entry: Optional[dict],
@@ -444,7 +537,10 @@ def _build_candidate(
     changes needed here -- this function already treats
     correlation_entry["supporting_sources"] generically, however many
     real source types it lists). ERT (like GPR) never appears here --
-    neither ever participates in correlation().
+    neither ever participates in correlation(). Detection Stability
+    doesn't participate here either, for a different reason -- it
+    isn't a corroborating evidence source at all, see this module's own
+    docstring, SOURCES-SPLIT FIX note.
 
     candidate["checked_sources"] carries the whole-run union
     (supporting_sources + checked_sources param, deduplicated) -- read
@@ -455,6 +551,8 @@ def _build_candidate(
     _attach_optical_detail() above instead, exactly like Thermal. ERT
     does not feed into it either, for the same reason GPR doesn't --
     it's read only via its own dedicated ert_confirmed/... fields.
+    Detection Stability doesn't feed into it either -- it's read only
+    via its own dedicated stability_score/... fields, same reasoning.
     """
     candidate: dict[str, Any] = {
         "location": {"lat": anomaly.get("lat"), "lon": anomaly.get("lon")},
@@ -499,10 +597,14 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
     this module's own docstring) for exactly which inputs are real vs.
     deliberately conservative placeholders.
 
-    has_ert is real as of this session -- see this module's own
-    docstring, HONEST MAPPING NOTES, for exactly what "real" means here
-    (a real ERT reading colocated with this specific candidate, via
-    candidate["ert_confirmed"])."""
+    stability_score/stability_windows_detected/stability_windows_fetched/
+    stability_z_range are real as of this session -- see this module's
+    own docstring, HONEST MAPPING NOTES, for exactly what "real" means
+    here (a candidate that qualified for and completed the automatic
+    detection-stability check, via candidate["stability_score"] etc set
+    by _attach_stability_detail()). All four default to None for a
+    candidate that was never tested -- see steward_confidence_ceiling.py
+    for why that must never be treated as "unstable"."""
     checked_sources = candidate.get("checked_sources") or []
     has_dem = "DEM" in checked_sources
     has_ndvi = "NDVI" in checked_sources
@@ -510,6 +612,11 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
     has_thermal = bool(candidate.get("thermal_checked"))
     has_optical = bool(candidate.get("optical_checked"))
     has_ert = bool(candidate.get("ert_confirmed"))
+
+    stability_score = candidate.get("stability_score")
+    stability_windows_detected = candidate.get("stability_windows_detected")
+    stability_windows_fetched = candidate.get("stability_windows_fetched")
+    stability_z_range = candidate.get("stability_z_range")
 
     synthesis = debate.get("synthesis") or {}
     raw_confidence = float(synthesis.get("leading_confidence") or 0.0)
@@ -549,6 +656,10 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
         has_field_validation=has_gpr,
         environmental_confounders_controlled=False,
         has_contradiction=has_contradiction,
+        stability_score=stability_score,
+        stability_windows_detected=stability_windows_detected,
+        stability_windows_fetched=stability_windows_fetched,
+        stability_z_range=stability_z_range,
         interpretation=steward_note,
         hypothesis=hypothesis,
         alternative_hypotheses=alternative_hypotheses,
@@ -566,6 +677,7 @@ def run_debate_json(investigation_json: str) -> str:
         evidence = investigation.get("evidence") or []
         fourth_evidence_detail = investigation.get("fourth_evidence_detail") or []
         fifth_evidence_detail = investigation.get("fifth_evidence_detail") or []
+        seventh_evidence_detail = investigation.get("seventh_evidence_detail") or []
         context = _build_context(investigation)
 
         gpr_item = _gpr_evidence_item(evidence)
@@ -590,6 +702,7 @@ def run_debate_json(investigation_json: str) -> str:
                 any_ert_confirmed = True
             _attach_thermal_detail(candidate, anomaly, fourth_evidence_detail)
             _attach_optical_detail(candidate, anomaly, fifth_evidence_detail)
+            _attach_stability_detail(candidate, anomaly, seventh_evidence_detail)
             debate = run_debate(candidate, context)
 
             try:
