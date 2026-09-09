@@ -209,6 +209,36 @@ Detection Stability need no Copernicus credentials at all (GPR/ERT are
 manual-entry-only; Stability re-uses the OpenTopography api_key/demtype
 already passed for the primary DEM fetch), so this naming note does not
 apply to any of the three.
+
+SAMPLE-COUNT VISIBILITY FIX (this session -- REAL on-device confidence-
+labeling issue, not previously flagged): NdviCoreHaloResult,
+ThermalCoreHaloResult, and OpticalCoreHaloResult (below) previously
+carried core_mean/halo_mean/halo_stddev/z_score but never
+core_sample_count/halo_sample_count/n_intervals_with_data, even though
+ndvi_source_mobile.fetch_ndvi_core_halo_check() (and its Thermal/Optical
+equivalents) already compute and return all three -- they were being
+silently discarded at the exact line each _run_X_checks() function
+built its result dataclass, one line after being read out of `check`.
+This mattered for a real reason, not just completeness: each of the
+three core/halo checks can legitimately return a large-but-finite
+sentinel z-score (+/-50.0, see each source module's own docstring) when
+standard error computes to (near) zero with a CONFIRMED real, non-null,
+small variance and a real nonzero mean difference -- correctly treated
+by those modules as the MOST statistically confident case, not
+insufficient data. But that sentinel path only requires
+core_n/halo_n >= 2 to be reached at all; a bare pooled sample of 2
+pixels can trivially show near-zero variance by chance, which would be
+indistinguishable, in the correlation note text, from a well-sampled
+result across many intervals/pixels -- both would just read "z=-50.00"
+with no way to tell which. Fixed by adding the three fields to all
+three dataclasses, populating them in each _run_X_checks() success
+branch (data already available at that call site, just not read), and
+appending sample counts to each note built in
+_build_correlated_candidates() below, so a sentinel z=50 backed by a
+thin sample is now visibly distinguishable from one backed by a robust
+one, directly in the investigation output -- no change to any existing
+statistical logic, detection thresholds, or CORROBORATED/SINGLE_SOURCE
+status computation.
 """
 from __future__ import annotations
 
@@ -260,7 +290,16 @@ class NdviCoreHaloResult:
     AnomalyCandidate (core_mean/halo_mean/z_score, not
     area_cells/peak_zscore/polarity) -- evidence_record.py routes it
     into second_evidence_detail rather than the anomalies[] list
-    because of that."""
+    because of that.
+
+    core_sample_count/halo_sample_count/n_intervals_with_data (ADDED
+    THIS SESSION -- see module docstring, SAMPLE-COUNT VISIBILITY FIX):
+    the real pixel/interval counts ndvi_source_mobile.
+    fetch_ndvi_core_halo_check() already returns alongside core_mean/
+    halo_mean/z_score, now actually carried through instead of being
+    silently dropped at construction. None for a failed check (no
+    counts to report) or for any result built before this session's
+    fix touched this dataclass."""
     lat: float
     lon: float
     core_mean: float | None
@@ -269,6 +308,9 @@ class NdviCoreHaloResult:
     z_score: float | None
     vegetation_stress_detected: bool
     error: str | None = None
+    core_sample_count: int | None = None
+    halo_sample_count: int | None = None
+    n_intervals_with_data: int | None = None
 
 
 @dataclass
@@ -279,7 +321,12 @@ class ThermalCoreHaloResult:
     routed into fourth_evidence_detail (never merged into anomalies[])
     since its schema (core_mean_kelvin/halo_mean_kelvin/z_score/
     core_warmer_than_halo) has nothing in common with AnomalyCandidate,
-    same reasoning as NdviCoreHaloResult's own note above."""
+    same reasoning as NdviCoreHaloResult's own note above.
+
+    core_sample_count/halo_sample_count/n_intervals_with_data (ADDED
+    THIS SESSION): same fix and same reasoning as
+    NdviCoreHaloResult's own fields above -- see module docstring,
+    SAMPLE-COUNT VISIBILITY FIX."""
     lat: float
     lon: float
     core_mean_kelvin: float | None
@@ -289,6 +336,9 @@ class ThermalCoreHaloResult:
     thermal_anomaly_detected: bool
     core_warmer_than_halo: bool | None
     error: str | None = None
+    core_sample_count: int | None = None
+    halo_sample_count: int | None = None
+    n_intervals_with_data: int | None = None
 
 
 @dataclass
@@ -300,7 +350,12 @@ class OpticalCoreHaloResult:
     into fifth_evidence_detail (never merged into anomalies[]) since its
     schema (core_mean/halo_mean/z_score/core_brighter_than_halo) has
     nothing in common with AnomalyCandidate, same reasoning as the other
-    two per-candidate check results above."""
+    two per-candidate check results above.
+
+    core_sample_count/halo_sample_count/n_intervals_with_data (ADDED
+    THIS SESSION): same fix and same reasoning as
+    NdviCoreHaloResult's own fields above -- see module docstring,
+    SAMPLE-COUNT VISIBILITY FIX."""
     lat: float
     lon: float
     core_mean: float | None
@@ -310,6 +365,9 @@ class OpticalCoreHaloResult:
     optical_anomaly_detected: bool
     core_brighter_than_halo: bool | None
     error: str | None = None
+    core_sample_count: int | None = None
+    halo_sample_count: int | None = None
+    n_intervals_with_data: int | None = None
 
 
 # --- DETECTION STABILITY (added this session) ---
@@ -666,6 +724,12 @@ def _run_ndvi_checks(
                 core_mean=check["core_mean"], halo_mean=check["halo_mean"],
                 halo_stddev=check["halo_stddev"], z_score=check["z_score"],
                 vegetation_stress_detected=check["vegetation_stress_detected"],
+                # SAMPLE-COUNT VISIBILITY FIX (this session, see module
+                # docstring): these were already present in `check` --
+                # only now actually being read into the result.
+                core_sample_count=check.get("core_sample_count"),
+                halo_sample_count=check.get("halo_sample_count"),
+                n_intervals_with_data=check.get("n_intervals_with_data"),
             ))
 
         if progress_callback is not None:
@@ -722,6 +786,11 @@ def _run_thermal_checks(
                 halo_stddev=check["halo_stddev"], z_score=check["z_score"],
                 thermal_anomaly_detected=check["thermal_anomaly_detected"],
                 core_warmer_than_halo=check["core_warmer_than_halo"],
+                # SAMPLE-COUNT VISIBILITY FIX (this session, see module
+                # docstring): mirrors _run_ndvi_checks' own fix above.
+                core_sample_count=check.get("core_sample_count"),
+                halo_sample_count=check.get("halo_sample_count"),
+                n_intervals_with_data=check.get("n_intervals_with_data"),
             ))
 
         if progress_callback is not None:
@@ -778,12 +847,29 @@ def _run_optical_checks(
                 halo_stddev=check["halo_stddev"], z_score=check["z_score"],
                 optical_anomaly_detected=check["optical_anomaly_detected"],
                 core_brighter_than_halo=check["core_brighter_than_halo"],
+                # SAMPLE-COUNT VISIBILITY FIX (this session, see module
+                # docstring): mirrors _run_ndvi_checks' own fix above.
+                core_sample_count=check.get("core_sample_count"),
+                halo_sample_count=check.get("halo_sample_count"),
+                n_intervals_with_data=check.get("n_intervals_with_data"),
             ))
 
         if progress_callback is not None:
             progress_callback(i + 1, total)
 
     return results
+
+
+def _format_sample_counts(core_n: int | None, halo_n: int | None) -> str:
+    """Renders the "n=core/halo" suffix appended to each source's note
+    text in _build_correlated_candidates() below (ADDED THIS SESSION --
+    see module docstring, SAMPLE-COUNT VISIBILITY FIX). Returns an empty
+    string if either count is missing (e.g. a result built before this
+    session's fix, or a genuinely absent value) rather than printing a
+    misleading "n=None/None"."""
+    if core_n is None or halo_n is None:
+        return ""
+    return f", n={core_n}/{halo_n}"
 
 
 def _build_correlated_candidates(
@@ -812,6 +898,16 @@ def _build_correlated_candidates(
 
     Sorted the same way the NDVI-only and NDVI+Thermal versions were:
     CORROBORATED first, then by number of supporting sources descending.
+
+    NOTE TEXT NOW INCLUDES SAMPLE COUNTS (ADDED THIS SESSION -- see
+    module docstring, SAMPLE-COUNT VISIBILITY FIX): each source's mean/
+    z-score note is now followed by ", n=<core_sample_count>/
+    <halo_sample_count>" via _format_sample_counts() above, so a
+    sentinel z=+/-50.0 (see each source module's own docstring for when
+    that's returned) backed by a thin sample is visibly distinguishable
+    from one backed by a robust one, directly in the investigation
+    output -- purely additive to the note text; the underlying
+    CORROBORATED/SINGLE_SOURCE status logic below is unchanged.
     """
     out: list[CorrelatedCandidate] = []
     for i, dem_candidate in enumerate(dem_candidates):
@@ -827,14 +923,16 @@ def _build_correlated_candidates(
                 f"Real Copernicus Sentinel-2 NDVI shows significant "
                 f"vegetation stress at this DEM candidate "
                 f"(core mean={nr.core_mean:.4f} vs halo mean="
-                f"{nr.halo_mean:.4f}, z={nr.z_score:.2f})."
+                f"{nr.halo_mean:.4f}, z={nr.z_score:.2f}"
+                f"{_format_sample_counts(nr.core_sample_count, nr.halo_sample_count)})."
             )
         else:
             notes.append(
                 f"Real Copernicus Sentinel-2 NDVI at this DEM candidate "
                 f"shows no significant vegetation stress "
                 f"(core mean={nr.core_mean:.4f} vs halo mean="
-                f"{nr.halo_mean:.4f}, z={nr.z_score:.2f})."
+                f"{nr.halo_mean:.4f}, z={nr.z_score:.2f}"
+                f"{_format_sample_counts(nr.core_sample_count, nr.halo_sample_count)})."
             )
 
         tr = thermal_results[i]
@@ -847,14 +945,16 @@ def _build_correlated_candidates(
                 f"Real Landsat 8/9 brightness temperature shows this DEM "
                 f"candidate is significantly {direction} its surroundings "
                 f"(core mean={tr.core_mean_kelvin:.1f}K vs halo mean="
-                f"{tr.halo_mean_kelvin:.1f}K, z={tr.z_score:.2f})."
+                f"{tr.halo_mean_kelvin:.1f}K, z={tr.z_score:.2f}"
+                f"{_format_sample_counts(tr.core_sample_count, tr.halo_sample_count)})."
             )
         else:
             notes.append(
                 f"Real Landsat 8/9 brightness temperature at this DEM "
                 f"candidate shows no significant thermal anomaly "
                 f"(core mean={tr.core_mean_kelvin:.1f}K vs halo mean="
-                f"{tr.halo_mean_kelvin:.1f}K, z={tr.z_score:.2f})."
+                f"{tr.halo_mean_kelvin:.1f}K, z={tr.z_score:.2f}"
+                f"{_format_sample_counts(tr.core_sample_count, tr.halo_sample_count)})."
             )
 
         opr = optical_results[i]
@@ -867,14 +967,16 @@ def _build_correlated_candidates(
                 f"Real Sentinel-2 visible-band brightness shows this DEM "
                 f"candidate is significantly {direction} its surroundings "
                 f"(core mean={opr.core_mean:.4f} vs halo mean="
-                f"{opr.halo_mean:.4f}, z={opr.z_score:.2f})."
+                f"{opr.halo_mean:.4f}, z={opr.z_score:.2f}"
+                f"{_format_sample_counts(opr.core_sample_count, opr.halo_sample_count)})."
             )
         else:
             notes.append(
                 f"Real Sentinel-2 visible-band brightness at this DEM "
                 f"candidate shows no significant optical anomaly "
                 f"(core mean={opr.core_mean:.4f} vs halo mean="
-                f"{opr.halo_mean:.4f}, z={opr.z_score:.2f})."
+                f"{opr.halo_mean:.4f}, z={opr.z_score:.2f}"
+                f"{_format_sample_counts(opr.core_sample_count, opr.halo_sample_count)})."
             )
 
         n_independent = len(sources) - 1  # sources beyond DEM itself
