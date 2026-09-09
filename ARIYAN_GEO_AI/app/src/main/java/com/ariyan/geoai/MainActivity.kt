@@ -93,17 +93,17 @@ import java.io.File
  * Geomorphology / Anthropogenic-Archaeological / Data-Artifact-Skeptic
  * perspectives).
  *
- * Optional ERT field reading (opt-in via switchErt, ADDED THIS SESSION):
- * a single real manual reading -- a resistivity value (ohm-m) a human has
- * already read off an inverted ERT profile, at a specific known depth
- * -- classified against documented reference resistivity ranges via
- * ert_source_mobile.py / ert_resistivity_model.py, and attached as a
- * further, independent, site-anchored evidence entry (evidence_record.py's
- * sixth_evidence slot, rendered here from the record's
- * "sixth_evidence_detail" field). Architecturally identical to GPR --
- * a single site-anchored field-verification check, not a per-candidate
- * scan -- so it has the SAME restriction: ONLY supported by
- * investigation_multi_mobile.run_investigation_multi_json(), so
+ * Optional ERT field reading (opt-in via switchErt, ADDED a prior
+ * session): a single real manual reading -- a resistivity value (ohm-m)
+ * a human has already read off an inverted ERT profile, at a specific
+ * known depth -- classified against documented reference resistivity
+ * ranges via ert_source_mobile.py / ert_resistivity_model.py, and
+ * attached as a further, independent, site-anchored evidence entry
+ * (evidence_record.py's sixth_evidence slot, rendered here from the
+ * record's "sixth_evidence_detail" field). Architecturally identical to
+ * GPR -- a single site-anchored field-verification check, not a
+ * per-candidate scan -- so it has the SAME restriction: ONLY supported
+ * by investigation_multi_mobile.run_investigation_multi_json(), so
  * switchErt requires switchNdviCorrelation to also be on, validated the
  * same explicit way as GPR in onRunClicked() below. Unlike GPR, there
  * is no soil-preset picker for ERT -- the resistivity value is
@@ -145,14 +145,12 @@ import java.io.File
  * OpenTopography DEM + real Copernicus Sentinel-2 NDVI; synthesis
  * correctly landed on CONTESTED for a genuinely ambiguous candidate).
  * insufficient-data positions render explicitly labeled "[insufficient
- * data]" rather than being silently omitted. GPR manual-pick entry has
- * been CONFIRMED WORKING ON-DEVICE as a third evidence source. ERT
- * manual-reading entry (this session) has been sandbox-tested on the
- * Python side only -- NOT YET CONFIRMED ON-DEVICE, unlike GPR above;
- * update this note once it is. There is no automatic GPR or ERT
- * device-export parsing in this build (manual entry only for both --
- * see gpr_source_mobile.py's and ert_source_mobile.py's own honest-state
- * docstrings).
+ * data]" rather than being silently omitted. GPR and ERT manual-entry
+ * are both CONFIRMED WORKING ON-DEVICE as independent evidence sources,
+ * including their full effect on the AI Debate Engine's perspectives.
+ * There is no automatic GPR or ERT device-export parsing in this build
+ * (manual entry only for both -- see gpr_source_mobile.py's and
+ * ert_source_mobile.py's own honest-state docstrings).
  *
  * OFFLINE-DATA NAV BUTTON: buttonOfflineData launches OfflineDataActivity
  * via a plain Intent -- pure navigation, unchanged this session.
@@ -616,11 +614,11 @@ class MainActivity : AppCompatActivity() {
 
     /** Renders evidence_record.py's optional "sixth_evidence_detail" array
      * -- currently only ever populated by a real ERT manual reading (see
-     * ert_source_mobile.ERTEvidence.as_evidence_record()). Added this
-     * session, mirrors appendGprSection() exactly in structure: absent
-     * entirely when switchErt was off, or when the ERT classification
-     * itself failed for this run (that failure instead shows up as an
-     * honest entry in "limitations", not here -- see
+     * ert_source_mobile.ERTEvidence.as_evidence_record()). Mirrors
+     * appendGprSection() exactly in structure: absent entirely when
+     * switchErt was off, or when the ERT classification itself failed
+     * for this run (that failure instead shows up as an honest entry in
+     * "limitations", not here -- see
      * investigation_multi_mobile._build_ert_evidence()). Every matched
      * reference band is listed (there can be more than one, by design --
      * see ert_resistivity_model.py's own docstring on deliberate,
@@ -754,7 +752,23 @@ class MainActivity : AppCompatActivity() {
      * confidence currently cannot exceed MODERATE for any candidate
      * (Stage 1 does not yet claim to have verified/controlled for
      * environmental confounders the way Stage 3's Team A/B/Judge debate
-     * is meant to) -- also expected, not a bug. */
+     * is meant to) -- also expected, not a bug.
+     *
+     * CONFIDENCE REASONING TRAIL, ADDED THIS SESSION: previously this
+     * function read only `confidence`'s "band" and "clamped_confidence"
+     * fields -- it never rendered `confidence`'s own "reasoning" array
+     * (steward_confidence_ceiling.ConfidenceCeilingResult.reasoning),
+     * which is where the Steward actually explains WHY it landed on that
+     * band (e.g. contradiction/stability overrides, the real evidence-
+     * independence-weighted source count vs. raw count, the confounders
+     * gate, clamping). That reasoning trail existed in the JSON the whole
+     * time; it just never reached the screen. Now rendered as its own
+     * bullet list, immediately under the Band/confidence line and above
+     * the `warnings` list -- mirrors the existing debate-positions
+     * reasoning rendering above (same "        · " bullet style) so it
+     * reads consistently with the rest of this section. Purely additive:
+     * no existing Steward field's rendering (band, warnings,
+     * recommended_next_action) changed. */
     private fun appendStewardSubsection(sb: StringBuilder, debate: JSONObject) {
         if (debate.has("steward_error")) {
             sb.append("    [Scientific Steward evaluation failed for this candidate: ")
@@ -771,6 +785,13 @@ class MainActivity : AppCompatActivity() {
             sb.append(" (").append(String.format("%.2f", confidence.optDouble("clamped_confidence", 0.0))).append(")")
         }
         sb.append("\n")
+
+        val confidenceReasoning = confidence?.optJSONArray("reasoning")
+        if (confidenceReasoning != null) {
+            for (k in 0 until confidenceReasoning.length()) {
+                sb.append("        · ").append(confidenceReasoning.optString(k)).append("\n")
+            }
+        }
 
         val warnings = trace.optJSONArray("warnings")
         if (warnings != null) {
