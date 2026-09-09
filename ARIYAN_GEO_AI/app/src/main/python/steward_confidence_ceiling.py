@@ -11,7 +11,7 @@ confidence value pass through unexamined.
 
 "The AI's enthusiasm must never override scientific evidence."
 
-DETECTION STABILITY EXTENSION (added this session): real on-device
+DETECTION STABILITY EXTENSION (added a prior session): real on-device
 testing (18+ live investigations, see project notes) found that
 detect_anomalies() -- run once per investigation, against whatever DEM
 raster this run's specific AOI window happened to fetch -- can
@@ -38,6 +38,32 @@ investigation_multi_mobile.py for exactly which candidates qualify)
 means "not tested," not "unstable" -- it applies NO cap and changes
 NOTHING about this function's existing behavior. Only a candidate that
 WAS tested and came back fragile is affected.
+
+EVIDENCE-INDEPENDENCE WEIGHTING EXTENSION (ADDED THIS SESSION): the
+source-count gate below previously used matrix.independent_used_sources
+-- a flat, equally-weighted count of distinct used evidence categories.
+This could not distinguish a candidate corroborated by NDVI+Thermal+
+Optical (three sources, but all derived from the SAME Sentinel-2/
+Landsat overpasses -- same acquisition, same atmospheric conditions,
+same platform, genuinely correlated) from one corroborated by DEM+GPR+
+ERT (three sources, three genuinely independent measurement
+mechanisms). Both previously cleared the exact same ">= 2 sources"
+gate identically. The gate now uses
+matrix.effective_independent_sources (see steward_evidence_matrix.py's
+own docstring for exactly how the weighting/discounting works) in its
+place. Because every measurement-lineage group's contribution is
+capped BELOW 2.0 (see that module's _GROUP_WEIGHT_CAP), reaching this
+tier now genuinely requires sources from at least two independent
+measurement mechanisms -- not just multiple correlated readings from
+one. The DOWNSTREAM logic once inside that tier (environmental-
+confounders gate, field-validation check, quality-based HIGH/MODERATE
+split) is completely UNCHANGED -- only the gate's threshold source
+changed, from raw count to weighted count. The raw count
+(matrix.independent_used_sources) is still read and still reported in
+the reasoning trace alongside the weighted value, so nothing about the
+original evidence-category count disappears from the explanation --
+it is now presented honestly alongside its weighted counterpart rather
+than being the sole number quoted.
 """
 
 from __future__ import annotations
@@ -56,6 +82,15 @@ from steward_evidence_matrix import EvidenceMatrix, EvidenceQuality
 # real investigations accumulate.
 STABILITY_LOW_CAP_THRESHOLD = 0.4   # below this: cap at LOW, unconditionally
 STABILITY_MODERATE_CAP_THRESHOLD = 0.7  # below this (and >= LOW threshold): cap at MODERATE
+
+# Effective (evidence-independence-weighted) source count required to
+# clear the "genuinely multiple independent sources" tier below. See
+# steward_evidence_matrix.py's INDEPENDENCE_GROUPS/_GROUP_WEIGHT_CAP for
+# why no single measurement-lineage group can ever reach this value
+# alone -- clearing it requires sources from at least two distinct
+# groups (e.g. DEM + any one other group, or two non-elevation groups
+# together).
+EFFECTIVE_SOURCES_MULTI_GROUP_THRESHOLD = 2.0
 
 
 class ConfidenceBand(Enum):
@@ -125,10 +160,16 @@ def compute_confidence_band(
     immediately after has_contradiction, BEFORE has_field_validation or
     source count/quality are consulted -- a low score caps the ceiling
     unconditionally, the same way a contradiction does.
+
+    The multi-source tier below is now gated on
+    matrix.effective_independent_sources (evidence-independence-weighted),
+    not the raw matrix.independent_used_sources count -- see module
+    docstring, EVIDENCE-INDEPENDENCE WEIGHTING EXTENSION, for why.
     """
     reasoning: list[str] = []
 
-    independent_sources = matrix.independent_used_sources
+    raw_sources = matrix.independent_used_sources
+    effective_sources = matrix.effective_independent_sources
     avg_quality = 0.0
     # Restricted to content evidence (excludes GPS, which is positional
     # metadata, not corroborating evidence -- see steward_evidence_matrix.py).
@@ -136,7 +177,7 @@ def compute_confidence_band(
     if used_entries:
         avg_quality = sum(_quality_score(e.quality) for e in used_entries) / len(used_entries)
 
-    if independent_sources == 0:
+    if effective_sources == 0.0:
         reasoning.append("No evidence categories were actually used for this candidate.")
         return ConfidenceBand.NO_DATA, reasoning
 
@@ -172,17 +213,35 @@ def compute_confidence_band(
         )
         return ConfidenceBand.MODERATE, reasoning
 
-    if independent_sources == 1:
+    if effective_sources < EFFECTIVE_SOURCES_MULTI_GROUP_THRESHOLD:
         reasoning.append(
-            "Only a single independent evidence source was used; "
-            "confidence cannot exceed MODERATE regardless of visual conviction."
+            f"Evidence-independence-weighted source count is "
+            f"{effective_sources:.2f} (from {raw_sources} raw evidence "
+            f"categor{'y' if raw_sources == 1 else 'ies'} used) -- below "
+            f"the threshold for genuinely independent multi-source "
+            f"corroboration. This can happen with a single source, or "
+            f"with multiple sources that all share the same measurement "
+            f"lineage (e.g. NDVI/Thermal/Optical, all derived from the "
+            f"same satellite overpasses) rather than genuinely distinct "
+            f"measurement mechanisms. Confidence cannot exceed MODERATE "
+            f"regardless of visual conviction."
         )
         band = ConfidenceBand.MODERATE if avg_quality >= 0.6 else ConfidenceBand.LOW
-        reasoning.append(f"Average quality of that source ({avg_quality:.2f}) yields {band.value}.")
+        reasoning.append(f"Average quality of the evidence used ({avg_quality:.2f}) yields {band.value}.")
         return band, reasoning
 
-    # independent_sources >= 2
-    reasoning.append(f"{independent_sources} independent evidence sources were used.")
+    # effective_sources >= EFFECTIVE_SOURCES_MULTI_GROUP_THRESHOLD -- this
+    # genuinely spans at least two independent measurement mechanisms
+    # (see steward_evidence_matrix.py's INDEPENDENCE_GROUPS/
+    # _GROUP_WEIGHT_CAP docstrings for why a single group alone can
+    # never reach this threshold).
+    reasoning.append(
+        f"{raw_sources} raw evidence source(s) were used, weighted for "
+        f"measurement-lineage independence to an effective count of "
+        f"{effective_sources:.2f} -- this genuinely spans multiple "
+        f"independent measurement mechanisms, not just multiple "
+        f"correlated readings from the same underlying source."
+    )
 
     if not environmental_confounders_controlled:
         reasoning.append(
@@ -263,4 +322,3 @@ def govern_confidence(
         was_clamped=was_clamped,
         reasoning=reasoning,
     )
-
