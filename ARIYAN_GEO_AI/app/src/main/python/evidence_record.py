@@ -83,6 +83,31 @@ specifically -- this logic needed no further change to accommodate
 Optical, ERT, or Stability: none of these three ever participates in
 correlation() or appears in supporting_sources, so this phrase
 correctly never mentions any of them.
+
+CONFIDENCE-STATEMENT WORDING FIX (this session -- REAL on-device
+readability bug, reported by the user): the CORROBORATED branch of the
+confidence statement previously appended a trailing sentence --
+"{N} additional single-source candidate(s) remain LOW confidence." --
+UNCONDITIONALLY, even when N was 0. For a run with exactly one
+candidate that was itself fully CORROBORATED (n_corroborated == 1,
+len(correlation_results) == 1), N computes to 0, producing genuinely
+confusing text: "...confidence should be treated as MODERATE to HIGH
+pending field verification. 0 additional single-source candidate(s)
+remain LOW confidence." Nothing here was factually wrong (0 candidates
+really do remain LOW -- the sentence was vacuously true), but placing
+the words "LOW confidence" directly after "MODERATE to HIGH" for what
+reads as the same candidate is a real clarity failure, not just
+verbosity -- a user skimming this text has no way to tell at a glance
+that the second sentence refers to a *different*, empty population
+rather than walking back the first sentence's own verdict. Fixed by
+only appending that sentence when there is a nonzero count of
+additional single-source candidates to actually report; a fully-
+corroborated single-candidate run (or any run where every detected
+candidate ends up CORROBORATED) now ends cleanly after the "MODERATE
+to HIGH" sentence, with nothing following it to misread. No change to
+the underlying n_corroborated/CORROBORATED-status computation itself,
+and no change to the SINGLE_SOURCE-only (n_corroborated == 0) branch
+below, which was never affected by this issue.
 """
 from __future__ import annotations
 
@@ -388,10 +413,25 @@ def build_investigation_record(
                 f"{n_corroborated} candidate(s) CORROBORATED by independent evidence "
                 f"sources (co-located anomalies in {' + '.join(corroborating_sources)}). "
                 f"This is genuine independent corroboration; confidence should be "
-                f"treated as MODERATE to HIGH pending field verification. "
-                f"{len(correlation_results) - n_corroborated} additional single-source "
-                f"candidate(s) remain LOW confidence."
+                f"treated as MODERATE to HIGH pending field verification."
             )
+            # CONFIDENCE-STATEMENT WORDING FIX (this session -- see module
+            # docstring): only append the "N additional single-source
+            # candidate(s) remain LOW confidence" sentence when there is
+            # actually a nonzero count to report. Previously this ran
+            # unconditionally, producing "...MODERATE to HIGH... 0
+            # additional single-source candidate(s) remain LOW confidence"
+            # for a run where every detected candidate was already
+            # CORROBORATED -- factually vacuous (0 candidates really do
+            # remain LOW), but read like a self-contradiction placing "LOW
+            # confidence" immediately after "MODERATE to HIGH" for what
+            # looked like the same candidate.
+            n_single_source_remaining = len(correlation_results) - n_corroborated
+            if n_single_source_remaining > 0:
+                confidence += (
+                    f" {n_single_source_remaining} additional single-source "
+                    f"candidate(s) remain LOW confidence."
+                )
         else:
             confidence = (
                 f"{len(correlation_results)} candidate(s) detected across "
