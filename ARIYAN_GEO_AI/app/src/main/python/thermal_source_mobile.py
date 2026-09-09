@@ -7,14 +7,14 @@ API already used for NDVI (see ndvi_source_mobile.py) -- same OAuth
 account and endpoint, different collection (`landsat-ot-l1`) and band
 (B10, in Kelvin).
 
-CORRECTED THIS SESSION -- REAL ON-DEVICE HTTP 500 ROOT-CAUSED: the first
+CORRECTED A PRIOR SESSION -- REAL ON-DEVICE HTTP 500 ROOT-CAUSED: the first
 version of this file used `"type": "landsat-ot-l2"` and
 `units: "SURFACE_TEMPERATURE"`, verified against docs.sentinel-hub.com's
 GENERAL Landsat documentation. On-device, every single request failed
 with an HTTP 500 from Sentinel Hub's Statistics API. Root cause,
 confirmed against Copernicus Data Space Ecosystem's OWN Landsat
 documentation page (documentation.dataspace.copernicus.eu/APIs/
-SentinelHub/Data/Landsat8-9.html) this session: CDSE ONLY OFFERS
+SentinelHub/Data/Landsat8-9.html) that session: CDSE ONLY OFFERS
 LANDSAT 8-9 AT LEVEL 1 (`landsat-ot-l1`) -- Level 2 (which has the
 atmospherically-corrected surface-temperature science product) is not
 available on this platform at all, only on the separate, original
@@ -63,7 +63,7 @@ which direction was actually observed (core_warmer_than_halo) as a
 separate, honestly-labeled fact rather than folding a directional
 assumption into the detection itself.
 
-STATISTICAL METHOD (unchanged by this session's fix -- this part was
+STATISTICAL METHOD (unchanged by the Level 1/2 fix -- this part was
 never the problem): applies the SAME two-layer fix already proven
 correct in ndvi_source_mobile.py's fetch_ndvi_core_halo_check() (see
 that module's own HONEST NOTE comments for the full real-on-device
@@ -87,6 +87,35 @@ ndvi_source_mobile.py (a PUBLIC function -- same OAuth client/
 credentials are used for both NDVI and thermal). The hard-deadline HTTP
 wrapper is duplicated locally rather than reaching into
 ndvi_source_mobile.py's underscore-prefixed (module-private) helpers.
+
+QUERY-WINDOW WIDENED 60 -> 90 DAYS (this session -- REAL on-device
+confidence issue, not a guess): mirrors ndvi_source_mobile.py's own
+QUERY-WINDOW WIDENED fix, applied for the same real reason -- a real
+investigation run showed this module's core/halo check reaching
+n=2 valid pixels per side (the statistical floor
+fetch_thermal_core_halo_check requires before attempting a
+significance test at all), which reached the sentinel z=+/-50.0
+"maximally confident" branch on a sample too thin to actually justify
+that framing (see fetch_thermal_core_halo_check's own KNOWN LIMITATION
+note below, and investigation_multi_mobile.py's SAMPLE-COUNT
+VISIBILITY FIX, which is what made this visible in the output at all).
+Widened to 90 days for more chances at a cloud-free Landsat pass
+(Landsat 8+9's combined ~8-day revisit) without extending far enough to
+risk pooling a genuinely different season's brightness-temperature
+baseline into the same core/halo comparison -- see
+_default_time_range()'s own docstring below for the updated pass-count
+estimate.
+
+CORE/HALO SHARED-TIME-WINDOW FIX (this session): mirrors
+ndvi_source_mobile.py's own fix of the same name --
+fetch_thermal_core_halo_check previously called
+_stats_for_bbox_thermal() for the core and halo bboxes without passing
+time_from/time_to, so each call independently derived its own window
+via _default_time_range() (which reads datetime.now(timezone.utc)
+separately each time it's called). Fixed by computing (time_from,
+time_to) ONCE in fetch_thermal_core_halo_check and passing the same
+values explicitly to both _stats_for_bbox_thermal() calls, guaranteeing
+core and halo are queried over the identical time range.
 """
 
 from __future__ import annotations
@@ -104,11 +133,11 @@ STATISTICS_URL = "https://sh.dataspace.copernicus.eu/statistics/v1"
 
 # Requests Landsat 8/9 Level 1's thermal band in Kelvin (BRIGHTNESS_
 # TEMPERATURE units -- verified against Copernicus Data Space
-# Ecosystem's OWN Landsat 8-9 L1 documentation this session, NOT the
-# general sentinel-hub.com docs that caused the original mistake),
-# masked to valid pixels only via dataMask. Level 1 also has a second
-# thermal band (B11); only B10 is used here, matching the original
-# single-band design.
+# Ecosystem's OWN Landsat 8-9 L1 documentation, NOT the general
+# sentinel-hub.com docs that caused the original mistake), masked to
+# valid pixels only via dataMask. Level 1 also has a second thermal
+# band (B11); only B10 is used here, matching the original single-band
+# design.
 THERMAL_EVALSCRIPT = """//VERSION=3
 function setup() {
   return {
@@ -179,10 +208,17 @@ def _bbox_from_point(lat: float, lon: float, radius_m: float) -> list:
     return [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
 
 
-def _default_time_range(days_back: int = 60):
+def _default_time_range(days_back: int = 90):
     """Same default window as ndvi_source_mobile.py -- the last
-    `days_back` days ending now (UTC). Landsat's combined 8+16 day
-    revisit means a 60-day window typically covers 4-7 real passes."""
+    `days_back` days ending now (UTC).
+
+    WIDENED 60 -> 90 THIS SESSION -- see module docstring, QUERY-WINDOW
+    WIDENED note. Landsat 8+9's combined ~8-day revisit means a 90-day
+    window gives meaningfully more real-pass opportunities than the
+    previous 60-day default (roughly 11 theoretical passes vs. 7-8, before
+    accounting for cloud cover) -- more chances at a cloud-free acquisition
+    without extending far enough to risk mixing in a different season's
+    brightness-temperature baseline."""
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days_back)
@@ -199,7 +235,7 @@ def _stats_for_bbox_thermal(
 ) -> dict:
     """Calls the Sentinel Hub Statistical API for one bbox against the
     real Landsat 8/9 Level 1 collection (`landsat-ot-l1` -- corrected
-    this session, see module docstring) and returns pooled real
+    a prior session, see module docstring) and returns pooled real
     brightness-temperature statistics (Kelvin) across whatever
     cloud-free pixel observations exist in the time range.
 
@@ -332,7 +368,7 @@ def fetch_thermal_core_halo_check(
 ) -> dict:
     """Per-DEM-candidate real thermal-anomaly check, using Landsat 8/9
     Level 1's real Top-of-Atmosphere brightness-temperature band
-    (corrected this session -- see module docstring for why Level 1,
+    (corrected a prior session -- see module docstring for why Level 1,
     not Level 2, is what CDSE actually serves).
 
     core_radius_m/halo_radius_m default LARGER than NDVI's (15m/60m):
@@ -347,7 +383,11 @@ def fetch_thermal_core_halo_check(
     fetch_ndvi_core_halo_check() (standard error of the difference, a
     large-but-finite sentinel z-score for the near-zero-variance-but-
     real-difference case, and a genuine error only for the truly
-    uninformative 0/0 case) -- unaffected by this session's Level 1 fix.
+    uninformative 0/0 case) -- unaffected by the Level 1 fix.
+
+    Also computes ONE (time_from, time_to) window and passes it
+    explicitly to BOTH bbox calls (ADDED THIS SESSION -- see module
+    docstring, CORE/HALO SHARED-TIME-WINDOW FIX).
 
     UNLIKE NDVI, this does NOT assume a direction (see module docstring
     NO ASSUMED SIGN note): thermal_anomaly_detected is True whenever
@@ -371,14 +411,24 @@ def fetch_thermal_core_halo_check(
     sample/genuinely-uninformative failure. Callers should catch this
     per candidate and record it as an honest limitation, rather than
     failing the whole investigation -- same pattern as NDVI.
+
+    KNOWN LIMITATION, NOT YET ADDRESSED (flagged this session): like
+    NDVI's own fetch_ndvi_core_halo_check(), the core_n/halo_n >= 2
+    floor below is the bare minimum for the standard-error formula to
+    be defined at all, not itself a meaningful robustness floor -- see
+    ndvi_source_mobile.py's own matching note for the full reasoning.
     """
     core_bbox = _bbox_from_point(lat, lon, core_radius_m)
     halo_bbox = _bbox_from_point(lat, lon, halo_radius_m)
 
     token = access_token or get_access_token(client_id, client_secret, timeout=timeout)
 
-    core_stats = _stats_for_bbox_thermal(core_bbox, token, timeout=timeout)
-    halo_stats = _stats_for_bbox_thermal(halo_bbox, token, timeout=timeout)
+    # CORE/HALO SHARED-TIME-WINDOW FIX (this session): compute the window
+    # ONCE, pass it explicitly to both calls below.
+    time_from, time_to = _default_time_range()
+
+    core_stats = _stats_for_bbox_thermal(core_bbox, token, time_from=time_from, time_to=time_to, timeout=timeout)
+    halo_stats = _stats_for_bbox_thermal(halo_bbox, token, time_from=time_from, time_to=time_to, timeout=timeout)
 
     core_n = core_stats["sample_count"]
     halo_n = halo_stats["sample_count"]
