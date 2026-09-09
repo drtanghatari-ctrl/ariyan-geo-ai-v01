@@ -86,6 +86,33 @@ not a shared/imported helper, exactly matching thermal_source_mobile.py's
 own convention of each evidence-source module owning its complete
 network-handling code rather than reaching into another module's private
 helpers.
+
+QUERY-WINDOW WIDENED 60 -> 90 DAYS (this session -- REAL on-device
+confidence issue, not a guess): mirrors ndvi_source_mobile.py's and
+thermal_source_mobile.py's own QUERY-WINDOW WIDENED fix, applied for the
+same real reason -- a real investigation run showed this module's
+core/halo check reaching n=2 valid pixels per side (the statistical
+floor fetch_optical_core_halo_check requires before attempting a
+significance test at all), reaching the sentinel z=+/-50.0 "maximally
+confident" branch on a sample too thin to actually justify that framing
+(see fetch_optical_core_halo_check's own KNOWN LIMITATION note below).
+Widened to 90 days for more chances at a cloud-free/water-clear
+Sentinel-2 pass, matching NDVI's own reasoning exactly (same 10m bands,
+same ~5-day revisit cadence at mid-latitudes) -- without extending far
+enough to risk pooling a genuinely different season's visible-brightness
+baseline (e.g. different soil moisture, different vegetation cover
+fraction) into the same core/halo comparison.
+
+CORE/HALO SHARED-TIME-WINDOW FIX (this session): mirrors
+ndvi_source_mobile.py's and thermal_source_mobile.py's own fix of the
+same name -- fetch_optical_core_halo_check previously called
+_stats_for_bbox() for the core and halo bboxes without passing
+time_from/time_to, so each call independently derived its own window via
+_default_time_range() (which reads datetime.now(timezone.utc) separately
+each time it's called). Fixed by computing (time_from, time_to) ONCE in
+fetch_optical_core_halo_check and passing the same values explicitly to
+both _stats_for_bbox() calls, guaranteeing core and halo are queried
+over the identical time range.
 """
 
 from __future__ import annotations
@@ -197,7 +224,11 @@ def _bbox_from_point(lat: float, lon: float, radius_m: float) -> list:
     return [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
 
 
-def _default_time_range(days_back: int = 60) -> tuple:
+def _default_time_range(days_back: int = 90) -> tuple:
+    """WIDENED 60 -> 90 THIS SESSION -- see module docstring, QUERY-WINDOW
+    WIDENED note, for the full real on-device reasoning (mirrors
+    ndvi_source_mobile.py's identical fix and rationale, since this
+    module shares NDVI's 10m resolution and revisit cadence)."""
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days_back)
     fmt = "%Y-%m-%dT%H:%M:%SZ"
@@ -356,7 +387,9 @@ def fetch_optical_core_halo_check(
     Uses the SAME Copernicus OAuth account as NDVI and Thermal -- pass an
     already-fetched `access_token` (shared across all three checks for a
     run) to skip fetching a fresh one here, exactly like Thermal's
-    convention.
+    convention. Also computes ONE (time_from, time_to) window and passes
+    it explicitly to BOTH bbox calls (ADDED THIS SESSION -- see module
+    docstring, CORE/HALO SHARED-TIME-WINDOW FIX).
 
     Returns:
       {
@@ -373,6 +406,12 @@ def fetch_optical_core_halo_check(
     per candidate and record an honest SINGLE_SOURCE-style result with
     the real error message, exactly like NDVI and Thermal, rather than
     failing the whole investigation.
+
+    KNOWN LIMITATION, NOT YET ADDRESSED (flagged this session): like
+    NDVI's and Thermal's own core/halo checks, the core_n/halo_n >= 2
+    floor below is the bare minimum for the standard-error formula to be
+    defined at all, not itself a meaningful robustness floor -- see
+    ndvi_source_mobile.py's own matching note for the full reasoning.
     """
     core_bbox = _bbox_from_point(lat, lon, core_radius_m)
     halo_bbox = _bbox_from_point(lat, lon, halo_radius_m)
@@ -382,8 +421,12 @@ def fetch_optical_core_halo_check(
     except NDVIFetchError as exc:
         raise OpticalFetchError(str(exc)) from exc
 
-    core_stats = _stats_for_bbox(core_bbox, token, timeout=timeout)
-    halo_stats = _stats_for_bbox(halo_bbox, token, timeout=timeout)
+    # CORE/HALO SHARED-TIME-WINDOW FIX (this session): compute the window
+    # ONCE, pass it explicitly to both calls below.
+    time_from, time_to = _default_time_range()
+
+    core_stats = _stats_for_bbox(core_bbox, token, time_from=time_from, time_to=time_to, timeout=timeout)
+    halo_stats = _stats_for_bbox(halo_bbox, token, time_from=time_from, time_to=time_to, timeout=timeout)
 
     core_n = core_stats["sample_count"]
     halo_n = halo_stats["sample_count"]
