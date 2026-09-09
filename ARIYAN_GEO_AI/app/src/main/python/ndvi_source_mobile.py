@@ -47,6 +47,45 @@ a separate, unbounded OS-level call. _http_post below now runs the actual
 urlopen() call on a background thread and enforces a real wall-clock
 deadline via concurrent.futures, exactly like dem_source_mobile.py's fetch,
 regardless of which underlying phase is actually stuck.
+
+QUERY-WINDOW WIDENED 60 -> 90 DAYS (this session -- REAL on-device
+confidence issue, not a guess): a real investigation run showed both the
+core and halo bbox for a candidate returning exactly 2 valid pixels each
+after cloud/water masking over the default 60-day window -- the statistical
+floor this module's own core/halo check requires before it will even
+attempt a significance test (see fetch_ndvi_core_halo_check's own
+core_n < 2 / halo_n < 2 check below). At n=2, "near-zero variance" is not a
+meaningful statistical statement -- two quantized Sentinel-2 reflectance
+values can trivially agree by chance -- yet the code correctly (per its own
+documented logic) treats a confirmed near-zero variance plus a real mean
+difference as the MOST confident possible case, producing a sentinel
+z=+/-50.0 that reads identically to one backed by a genuinely large,
+well-sampled pixel count (see this module's own SAMPLE-COUNT VISIBILITY FIX
+note, referenced from investigation_multi_mobile.py, which is what made
+this n=2 case visible in the first place). Widened the default window to
+90 days to give more chances at a cloud-free/water-clear Sentinel-2 pass
+(roughly 5-day revisit at mid-latitudes) without crossing far enough in
+time to risk pooling meaningfully different seasonal vegetation states
+into one "core"/"halo" mean -- a real, deliberate tradeoff, not a free
+win: NDVI is seasonally variable, so an arbitrarily wide window would
+average across genuinely different ground states rather than just
+gathering more real spatial samples of the same one. 90 days was chosen as
+a moderate step (1.5x, not a jump to 180 or 365) for this reason. This is
+a single, self-contained default-value change -- no caller anywhere in
+this project passes time_from/time_to explicitly to any function in this
+module, so every call site inherits this new default uniformly.
+
+CORE/HALO SHARED-TIME-WINDOW FIX (this session): fetch_ndvi_core_halo_check
+previously called _stats_for_bbox() for the core and halo bboxes without
+passing time_from/time_to, meaning each call independently invoked
+_default_time_range() -- which reads datetime.now(timezone.utc)
+separately each time. In practice this meant the core and halo windows
+could differ by however many milliseconds elapsed between the two calls
+(not a real-world problem at that scale), but it was never actually
+guaranteed the two bboxes were queried over the IDENTICAL time range, which
+is what a valid two-sample comparison requires. Fixed by computing
+(time_from, time_to) ONCE in fetch_ndvi_core_halo_check and passing the
+same values explicitly to both _stats_for_bbox() calls.
 """
 
 from __future__ import annotations
@@ -174,9 +213,20 @@ def _bbox_from_point(lat: float, lon: float, radius_m: float) -> list:
     return [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
 
 
-def _default_time_range(days_back: int = 60) -> tuple:
+def _default_time_range(days_back: int = 90) -> tuple:
     """Defaults to the last `days_back` days ending now (UTC), so a live
-    real-time investigation doesn't require the user to pick dates."""
+    real-time investigation doesn't require the user to pick dates.
+
+    WIDENED 60 -> 90 THIS SESSION -- see module docstring, QUERY-WINDOW
+    WIDENED note, for the full real on-device reasoning (a confirmed n=2
+    pixel sample was reaching this module's own sentinel-z=50.0
+    "maximally confident" path, which is only actually warranted for a
+    robust sample). 90 days is a deliberate moderate widening -- enough
+    extra Sentinel-2 revisit opportunities (~5-day cadence at
+    mid-latitudes) to meaningfully raise the odds of a usable
+    cloud-free/water-clear pass, without extending far enough to risk
+    pooling a genuinely different seasonal vegetation state into the
+    same core/halo comparison."""
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days_back)
     fmt = "%Y-%m-%dT%H:%M:%SZ"
@@ -279,7 +329,7 @@ def _stats_for_bbox(
         n_intervals_with_data += 1
         total_n += valid_count
         weighted_mean_sum += mean * valid_count
-        # HONEST NOTE (bug fixed this session): a missing/null stDev from
+        # HONEST NOTE (bug fixed a prior session): a missing/null stDev from
         # Sentinel Hub for this interval (a real, plausible response when
         # very few pixels survive cloud/water masking) means the variance
         # for THIS interval is UNKNOWN -- it does not mean the variance is
@@ -287,7 +337,7 @@ def _stats_for_bbox(
         # coerced `stdev or 0.0`, contributing a fabricated zero-variance
         # sample into the pooled stddev below. That is what produced a
         # real, on-device pooled_stddev of exactly 0.0 whenever the only
-        # interval(s) with valid pixel data in the 60-day window happened
+        # interval(s) with valid pixel data in the window happened
         # to have a null stDev -- even though the pooled MEAN (unaffected
         # by this bug) was computing correctly and showing real, distinct
         # values per candidate. Fixed by only folding an interval's
@@ -362,9 +412,14 @@ def fetch_ndvi_core_halo_check(
     annulus subtraction, since the Statistics API operates on bboxes).
 
     Fetches (or reuses, if `access_token` is passed in) exactly ONE token
-    for both the core and halo bbox calls.
+    for both the core and halo bbox calls. Also computes ONE (time_from,
+    time_to) window and passes it explicitly to BOTH bbox calls (ADDED
+    THIS SESSION -- see module docstring, CORE/HALO SHARED-TIME-WINDOW
+    FIX -- previously each call independently derived its own window via
+    _default_time_range(), which was never actually guaranteed to be
+    identical between the two).
 
-    STATISTICAL METHOD (fixed this session -- see HONEST NOTE below):
+    STATISTICAL METHOD (fixed a prior session -- see HONEST NOTE below):
     Flags vegetation_stress_detected=True when the core mean NDVI is
     significantly below the halo mean NDVI, using a proper two-sample
     z-test for a difference in means: the standard error of
@@ -376,7 +431,7 @@ def fetch_ndvi_core_halo_check(
     that can occur over a buried feature (e.g. reduced root-zone
     moisture/soil depth altering canopy vigor).
 
-    HONEST NOTE (bug found and fixed this session): the previous version
+    HONEST NOTE (bug found and fixed a prior session): the previous version
     of this function computed z = (core_mean - halo_mean) / halo_stddev,
     i.e. it divided the difference in MEANS by the halo bbox's raw
     PIXEL-LEVEL spatial standard deviation. That answers a different
@@ -423,8 +478,13 @@ def fetch_ndvi_core_halo_check(
 
     token = access_token or get_access_token(client_id, client_secret, timeout=timeout)
 
-    core_stats = _stats_for_bbox(core_bbox, token, timeout=timeout)
-    halo_stats = _stats_for_bbox(halo_bbox, token, timeout=timeout)
+    # CORE/HALO SHARED-TIME-WINDOW FIX (this session): compute the window
+    # ONCE, pass it explicitly to both calls below, so core and halo are
+    # guaranteed to be queried over the identical time range.
+    time_from, time_to = _default_time_range()
+
+    core_stats = _stats_for_bbox(core_bbox, token, time_from=time_from, time_to=time_to, timeout=timeout)
+    halo_stats = _stats_for_bbox(halo_bbox, token, time_from=time_from, time_to=time_to, timeout=timeout)
 
     core_n = core_stats["sample_count"]
     halo_n = halo_stats["sample_count"]
@@ -456,7 +516,7 @@ def fetch_ndvi_core_halo_check(
         + (halo_stddev ** 2) / halo_n
     )
 
-    # HONEST NOTE (refined this session, after a second real on-device run
+    # HONEST NOTE (refined a prior session, after a second real on-device run
     # reproduced the SAME "standard error near zero" outcome at a
     # DIFFERENT location -- a strong signal this was a formula flaw, not
     # a location-specific "genuinely flat terrain" finding as first
@@ -477,6 +537,26 @@ def fetch_ndvi_core_halo_check(
     # math.inf) is used for the confident case, since Android's org.json
     # (MainActivity.kt) is not guaranteed to parse a literal "Infinity"
     # JSON token the same way Python's json module would.
+    #
+    # KNOWN LIMITATION, NOT YET ADDRESSED (flagged this session): this
+    # sentinel path only requires core_n/halo_n >= 2 above, which is the
+    # bare minimum for the standard-error formula to be defined at all --
+    # it is not itself a meaningful robustness floor. A pooled sample of
+    # exactly 2 (quantized) Sentinel-2 reflectance pixels can trivially
+    # show near-zero variance by chance, which would reach this same
+    # "maximally confident" branch indistinguishably from a genuinely
+    # large, well-sampled low-variance result. See
+    # investigation_multi_mobile.py's own SAMPLE-COUNT VISIBILITY FIX
+    # note for how core_sample_count/halo_sample_count were made visible
+    # in the investigation output specifically so this case can be
+    # judged by a human reviewer rather than hidden behind an opaque
+    # z=+/-50.0 -- widening the default query window (see this module's
+    # own QUERY-WINDOW WIDENED note above) is a first, partial mitigation
+    # for the underlying thin-sample problem, not a full fix; raising
+    # this function's own n>=2 floor to something more statistically
+    # meaningful is a real, deliberately-deferred follow-up, not
+    # something to change silently alongside an unrelated window-width
+    # change.
     if standard_error <= 1e-9:
         if abs(mean_difference) <= 1e-9:
             raise NDVIFetchError(
