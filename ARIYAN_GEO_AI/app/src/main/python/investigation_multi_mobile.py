@@ -159,19 +159,57 @@ with one difference: this is NOT run for every DEM candidate, only the
 borderline subset that qualified -- see evidence_record.py's own
 docstring for exactly how that's reflected.
 
+TEMPORAL PERSISTENCE, ADDED THIS SESSION: checks whether each DEM
+candidate's real NDVI/Thermal/Optical core-vs-halo signal (the SAME
+checks already described above) reproduces across MULTIPLE real,
+independent satellite acquisitions in a wider time window, rather than
+reflecting a single pooled snapshot -- see ndvi_source_mobile.py's,
+thermal_source_mobile.py's, and optical_source_mobile.py's own
+fetch_X_temporal_persistence_check() functions for the full real
+per-source mechanics (all three built and individually sandbox-verified
+a prior session).
+
+Unlike Detection Stability (bounded to a borderline subset), this runs
+UNCONDITIONALLY for every DEM candidate, mirroring Thermal's/Optical's
+own no-toggle, every-candidate philosophy -- see
+_run_temporal_persistence_checks() below. Unlike NDVI/Thermal/Optical's
+own snapshot checks (three separate evidence slots), all three sources'
+persistence results are combined into ONE per-candidate
+TemporalPersistenceResult (ndvi/thermal/optical sub-dict fields, each
+None on a hard per-source fetch failure for that candidate -- see that
+dataclass's own docstring) and recorded via evidence_record.py's EIGHTH
+evidence slot. Per evidence_record.py's own docstring (three locked
+design decisions, see that module): this is explicitly NOT counted as a
+new independent evidence source -- it is a robustness check ON the
+existing NDVI/Thermal/Optical signals, so it never touches
+correlation()/supporting_sources and gets no derived_products entry,
+feeding Scientific Steward's confidence ceiling directly instead
+(mechanism to be designed alongside steward_confidence_ceiling.py,
+separately from this wiring).
+
+REAL NETWORK-COST NOTE: this makes up to 6 additional HTTP calls per
+DEM candidate (2 calls -- core+halo -- per source, times 3 sources),
+roughly doubling this function's total real network cost per
+investigation. This is a known, accepted tradeoff (decision 1 in
+evidence_record.py's own docstring) rather than an oversight -- see
+_run_temporal_persistence_checks()'s own docstring for the full
+reasoning on why no artificial per-run cap was added, unlike Detection
+Stability's MAX_AUTO_STABILITY_CANDIDATES.
+
 TOKEN-CACHING + PROGRESS-REPORTING FIX (a prior session, EXTENDED across
-Thermal, Optical, and now Detection Stability): a real on-device
-airplane-mode test showed this module could appear to hang for several
-minutes with a multi-candidate grid, because the old NDVI loop fetched
-a brand-new OAuth token independently for every candidate (see
-ndvi_source_mobile.py's own docstring for the full explanation) with
-zero visible progress in the meantime. Fixed two ways: (1) ONE access
-token is now fetched for the whole run and reused for EVERY candidate
-across NDVI, Thermal, AND Optical (GPR, ERT, and Detection Stability
-need no token at all -- Stability is manual-key-only DEM fetches, not
-Copernicus); (2) this module writes a small investigation_status.json
-into offline_data_root as it works (phase = "dem" / "ndvi" / "thermal"
-/ "optical" / "stability" / "done", plus done/total counts for each
+Thermal, Optical, Detection Stability, and now Temporal Persistence): a
+real on-device airplane-mode test showed this module could appear to
+hang for several minutes with a multi-candidate grid, because the old
+NDVI loop fetched a brand-new OAuth token independently for every
+candidate (see ndvi_source_mobile.py's own docstring for the full
+explanation) with zero visible progress in the meantime. Fixed two
+ways: (1) ONE access token is now fetched for the whole run and reused
+for EVERY candidate across NDVI, Thermal, Optical, AND Temporal
+Persistence (GPR, ERT, and Detection Stability need no token at all --
+Stability is manual-key-only DEM fetches, not Copernicus); (2) this
+module writes a small investigation_status.json into offline_data_root
+as it works (phase = "dem" / "ndvi" / "thermal" / "optical" /
+"stability" / "persistence" / "done", plus done/total counts for each
 per-candidate loop), mirroring the exact JSON shape
 offline_data_manager.py already writes for offline downloads.
 MainActivity.kt polls this file on a separate coroutine so "Running..."
@@ -860,6 +898,244 @@ def _run_optical_checks(
     return results
 
 
+# --- TEMPORAL PERSISTENCE (added this session) ---
+
+DEFAULT_TEMPORAL_PERSISTENCE_DAYS_BACK = 180.0  # matches each source
+                                            # module's own persistence-
+                                            # check default (NOT the
+                                            # 90-day snapshot default)
+                                            # -- see ndvi_source_mobile.py's
+                                            # own WINDOW CHOICE note for
+                                            # why persistence needs its
+                                            # own, separately-reasoned,
+                                            # wider window.
+
+
+@dataclass
+class TemporalPersistenceResult:
+    """One combined per-DEM-candidate temporal-persistence result,
+    covering all three sources (NDVI/Thermal/Optical) together -- see
+    evidence_record.py's own EIGHTH EVIDENCE SLOT docstring section for
+    the three design decisions behind this shape (decision 2
+    specifically: ONE combined slot per candidate, not three separate
+    ones).
+
+    lat/lon match every other per-candidate evidence dataclass in this
+    file (NdviCoreHaloResult, StabilityResult, etc.), so
+    evidence_record.py's generic asdict() handling and
+    debate_mobile.py's generic per-candidate lat/lon matching both work
+    unchanged.
+
+    ndvi/thermal/optical are each the full real dict returned by that
+    source's own fetch_X_temporal_persistence_check() (keys:
+    n_intervals_fetched/n_intervals_testable/n_intervals_detected/
+    persistence_score/interval_results) on success, or None on a hard
+    per-source fetch failure for THIS candidate (auth/network/malformed-
+    response/zero-usable-data-on-either-side -- see each source
+    module's own fetch_X_temporal_persistence_check() docstring for
+    exactly which conditions raise). None here means "could not be
+    tested for this source at all," never "no persistence" -- the SAME
+    honesty distinction each source's own persistence_score=None
+    (inside a successful, non-None dict) already makes at the interval
+    level, now also made at the per-candidate/per-source level for a
+    genuine fetch failure. A per-source failure for one candidate does
+    NOT prevent the other two sources, or any other candidate, from
+    being checked (see _run_temporal_persistence_checks() below)."""
+    lat: float
+    lon: float
+    ndvi: dict | None
+    thermal: dict | None
+    optical: dict | None
+
+
+def _run_temporal_persistence_checks(
+    dem_candidates: list,
+    client_id: str,
+    client_secret: str,
+    token: str | None,
+    shared_error_message: str | None,
+    ndvi_stress_zscore_threshold: float,
+    thermal_zscore_threshold: float,
+    optical_zscore_threshold: float,
+    days_back: float,
+    ndvi_timeout: float,
+    thermal_timeout: float,
+    optical_timeout: float,
+    progress_callback=None,
+) -> tuple[list[TemporalPersistenceResult], int, int, int]:
+    """For each DEM candidate, run all three real temporal-persistence
+    checks (NDVI/Thermal/Optical) anchored at that candidate's
+    location, using the SAME pre-fetched shared token already used for
+    the snapshot checks. Runs UNCONDITIONALLY for every DEM candidate
+    (per decision 1 in evidence_record.py's own EIGHTH EVIDENCE SLOT
+    docstring), regardless of whether NDVI's own snapshot check
+    succeeded, failed, or fell back to the offline raster path this run
+    -- mirrors Thermal's/Optical's own snapshot-check independence from
+    NDVI exactly.
+
+    Returns (results, n_ndvi_fetch_errors, n_thermal_fetch_errors,
+    n_optical_fetch_errors) -- the three error counts let the caller
+    build TemporalPersistenceCheckEvidence's own method description and
+    any honest limitations text, mirroring the existing
+    n_ndvi_errors/n_thermal_errors/n_optical_errors pattern already
+    used for the snapshot checks above.
+
+    A per-source failure for one candidate sets that candidate's
+    ndvi/thermal/optical field to None (see TemporalPersistenceResult's
+    own docstring) and does NOT prevent the other two sources, or any
+    other candidate, from being checked -- same "one failure never
+    blocks the rest" philosophy as every other per-candidate check in
+    this module.
+
+    REAL NETWORK-COST NOTE: this makes 2 additional HTTP calls per
+    source per candidate (core+halo, same shape as each source's own
+    snapshot check) -- i.e. up to 6 more calls per candidate beyond the
+    6 the snapshot checks already make, roughly doubling this
+    function's total real network cost. This was a known, accepted
+    tradeoff (decision 1 in evidence_record.py's own docstring --
+    unconditional per-candidate, matching Thermal/Optical's own
+    no-toggle precedent) rather than an oversight -- no artificial cap
+    was added, unlike Detection Stability's MAX_AUTO_STABILITY_
+    CANDIDATES, since persistence (like Thermal/Optical's snapshot
+    checks) is intended to run for every real candidate, not just a
+    borderline subset.
+    """
+    results: list[TemporalPersistenceResult] = []
+    n_ndvi_errors = 0
+    n_thermal_errors = 0
+    n_optical_errors = 0
+    total = len(dem_candidates)
+
+    for i, dem_candidate in enumerate(dem_candidates):
+        ndvi_result: dict | None = None
+        thermal_result: dict | None = None
+        optical_result: dict | None = None
+
+        if shared_error_message is None:
+            try:
+                ndvi_result = ndvi_source_mobile.fetch_ndvi_temporal_persistence_check(
+                    dem_candidate.lat, dem_candidate.lon,
+                    client_id, client_secret,
+                    stress_zscore_threshold=ndvi_stress_zscore_threshold,
+                    days_back=days_back,
+                    timeout=ndvi_timeout,
+                    access_token=token,
+                )
+            except NDVIFetchError:
+                n_ndvi_errors += 1
+
+            try:
+                thermal_result = thermal_source_mobile.fetch_thermal_temporal_persistence_check(
+                    dem_candidate.lat, dem_candidate.lon,
+                    client_id, client_secret,
+                    anomaly_zscore_threshold=thermal_zscore_threshold,
+                    days_back=days_back,
+                    timeout=thermal_timeout,
+                    access_token=token,
+                )
+            except ThermalFetchError:
+                n_thermal_errors += 1
+
+            try:
+                optical_result = optical_source_mobile.fetch_optical_temporal_persistence_check(
+                    dem_candidate.lat, dem_candidate.lon,
+                    client_id, client_secret,
+                    anomaly_zscore_threshold=optical_zscore_threshold,
+                    days_back=days_back,
+                    timeout=optical_timeout,
+                    access_token=token,
+                )
+            except OpticalFetchError:
+                n_optical_errors += 1
+        else:
+            # No token / credentials not configured -- same uniform
+            # honest treatment as the snapshot checks above (see
+            # _get_shared_copernicus_token()'s own docstring): every
+            # source for this candidate is honestly untested, never
+            # silently skipped without being counted.
+            n_ndvi_errors += 1
+            n_thermal_errors += 1
+            n_optical_errors += 1
+
+        results.append(TemporalPersistenceResult(
+            lat=dem_candidate.lat, lon=dem_candidate.lon,
+            ndvi=ndvi_result, thermal=thermal_result, optical=optical_result,
+        ))
+
+        if progress_callback is not None:
+            progress_callback(i + 1, total)
+
+    return results, n_ndvi_errors, n_thermal_errors, n_optical_errors
+
+
+class TemporalPersistenceCheckEvidence:
+    """Wrapper satisfying build_investigation_record's `eighth_evidence`
+    interface (.as_evidence_record(), .source, .synthetic), describing
+    the METHOD used this run (days_back window, per-source thresholds,
+    candidate/error counts) rather than any one candidate's result --
+    mirrors StabilityCheckEvidence/RealThermalCoreHaloEvidence in
+    shape. See evidence_record.py's own EIGHTH EVIDENCE SLOT docstring
+    for why this evidence_type is the single fixed literal
+    "TEMPORAL_PERSISTENCE" rather than varying per source, unlike
+    fourth/fifth's THERMAL/OPTICAL."""
+
+    source = "Copernicus Sentinel Hub Statistical API (real per-candidate NDVI/Thermal/Optical temporal persistence check across all three sources)"
+    synthetic = False
+
+    def __init__(
+        self,
+        n_candidates_checked: int,
+        days_back: float,
+        n_ndvi_fetch_errors: int,
+        n_thermal_fetch_errors: int,
+        n_optical_fetch_errors: int,
+    ):
+        self.n_candidates_checked = n_candidates_checked
+        self.days_back = days_back
+        self.n_ndvi_fetch_errors = n_ndvi_fetch_errors
+        self.n_thermal_fetch_errors = n_thermal_fetch_errors
+        self.n_optical_fetch_errors = n_optical_fetch_errors
+
+    def as_evidence_record(self) -> dict:
+        return {
+            "evidence_type": "TEMPORAL_PERSISTENCE",
+            "source": self.source,
+            "synthetic": self.synthetic,
+            "method": (
+                f"For each DEM candidate, real NDVI/Thermal/Optical "
+                f"core-vs-halo checks (the SAME per-source statistical "
+                f"method as each source's own snapshot check above) are "
+                f"repeated per-interval across a {self.days_back:g}-day "
+                f"window (Statistical API aggregationInterval=P30D "
+                f"buckets, date-matched between core and halo by exact "
+                f"interval boundary, not list position), rather than "
+                f"pooled into one snapshot mean. persistence_score is "
+                f"the fraction of independently testable real "
+                f"acquisitions that detected the anomaly -- a candidate "
+                f"whose signal reproduces across many real, separate "
+                f"passes is stronger evidence than one caught in a "
+                f"single pooled measurement. A source with too few real "
+                f"cloud-free/water-clear intervals in the window is "
+                f"honestly reported as untested (persistence_score= "
+                f"None), never as 'no persistence.' A hard fetch "
+                f"failure (auth/network/zero usable data on either "
+                f"side) for one source on one candidate is recorded as "
+                f"that source being None for that candidate; the other "
+                f"two sources and every other candidate are unaffected. "
+                f"This does NOT count as a new independent evidence "
+                f"source (see evidence_record.py's own docstring) -- it "
+                f"is a robustness check ON the existing NDVI/Thermal/"
+                f"Optical signals, feeding Scientific Steward's "
+                f"confidence ceiling directly, not correlation()."
+            ),
+            "n_candidates_checked": self.n_candidates_checked,
+            "days_back": self.days_back,
+            "n_ndvi_fetch_errors": self.n_ndvi_fetch_errors,
+            "n_thermal_fetch_errors": self.n_thermal_fetch_errors,
+            "n_optical_fetch_errors": self.n_optical_fetch_errors,
+        }
+
+
 def _format_sample_counts(core_n: int | None, halo_n: int | None) -> str:
     """Renders the "n=core/halo" suffix appended to each source's note
     text in _build_correlated_candidates() below (ADDED THIS SESSION --
@@ -1225,6 +1501,7 @@ def run_investigation_multi_json(
     ert_device_note: str = "",
     stability_margin: float = STABILITY_MARGIN_DEFAULT,
     max_auto_stability_candidates: int = MAX_AUTO_STABILITY_CANDIDATES_DEFAULT,
+    temporal_persistence_days_back: float = DEFAULT_TEMPORAL_PERSISTENCE_DAYS_BACK,
 ) -> str:
     """Run a DEM + NDVI + Thermal + Optical investigation and return the
     InvestigationRecord as a JSON string. This is the function
@@ -1309,19 +1586,41 @@ def run_investigation_multi_json(
     candidate whose |z| doesn't qualify simply has no stability data at
     all (unknown, not assumed stable).
 
+    TEMPORAL PERSISTENCE (ADDED THIS SESSION, automatic, no toggle):
+    after the NDVI/Thermal/Optical snapshot checks above, every DEM
+    candidate is also checked for whether each of those three sources'
+    anomaly signal reproduces across multiple real, independent
+    satellite acquisitions over a temporal_persistence_days_back-day
+    window (default 180 -- see _run_temporal_persistence_checks()/
+    TemporalPersistenceResult above), using the SAME shared Copernicus
+    token as the snapshot checks. Runs unconditionally for every DEM
+    candidate, unlike Detection Stability's bounded borderline subset --
+    see this module's own docstring, TEMPORAL PERSISTENCE section, for
+    the real network-cost tradeoff this implies. Results are combined
+    per-candidate (one TemporalPersistenceResult with ndvi/thermal/
+    optical sub-dicts) and feed evidence_record.py's eighth evidence
+    slot, then (via debate_mobile.py) Scientific Steward's confidence
+    ceiling as a robustness input -- NOT as a new independent evidence
+    source (see evidence_record.py's own docstring for the three locked
+    design decisions behind this). Never fails the investigation -- a
+    per-source fetch failure for one candidate is recorded honestly as
+    that source being None for that candidate (untested, never assumed
+    unstable), and the other two sources and every other candidate are
+    unaffected.
+
     Writes investigation_status.json into offline_data_root as it works
     (phase "dem" / "ndvi" / "thermal" / "optical" / "stability" /
-    "done"), polled by MainActivity.kt for live progress display.
-    Best-effort -- never raises on its own.
+    "persistence" / "done"), polled by MainActivity.kt for live
+    progress display. Best-effort -- never raises on its own.
 
     Raises ValueError if use_gpr=True without both gpr_soil_preset_key
     and gpr_two_way_time_ns, or if use_ert=True without both
     ert_resistivity_ohm_m and ert_depth_m. Raises
     OpenTopographyFetchError if DEM is unavailable both live and
     offline (see above) -- this is the only hard failure; every
-    NDVI-side, Thermal-side, Optical-side, GPR-side, ERT-side, and
-    Stability-side failure degrades gracefully with an honest
-    limitations[] entry instead.
+    NDVI-side, Thermal-side, Optical-side, GPR-side, ERT-side,
+    Stability-side, and Temporal-Persistence-side failure degrades
+    gracefully with an honest limitations[] entry instead.
     """
     _write_investigation_status(offline_data_root, "dem", 0, 1)
 
@@ -1441,6 +1740,35 @@ def run_investigation_multi_json(
         progress_callback=_report_optical_progress,
     )
     n_optical_errors = sum(1 for r in optical_results if r.error is not None)
+
+    # --- TEMPORAL PERSISTENCE: real per-candidate check across all
+    # three sources, UNCONDITIONAL per decision 1 (see evidence_record.py's
+    # own EIGHTH EVIDENCE SLOT docstring) -- runs independently of
+    # whether NDVI's own snapshot check succeeded, failed, or fell back
+    # to the offline raster path this run, mirroring Thermal's/
+    # Optical's own snapshot-check independence from NDVI exactly. ---
+    _write_investigation_status(offline_data_root, "persistence", 0, max(1, n_candidates))
+
+    def _report_persistence_progress(done: int, total: int) -> None:
+        _write_investigation_status(offline_data_root, "persistence", done, total)
+
+    (
+        persistence_results,
+        n_ndvi_persistence_errors,
+        n_thermal_persistence_errors,
+        n_optical_persistence_errors,
+    ) = _run_temporal_persistence_checks(
+        dem_candidates, ndvi_client_id, ndvi_client_secret,
+        token, token_error_message,
+        ndvi_stress_zscore_threshold=1.5,
+        thermal_zscore_threshold=thermal_zscore_threshold,
+        optical_zscore_threshold=optical_zscore_threshold,
+        days_back=temporal_persistence_days_back,
+        ndvi_timeout=ndvi_timeout_s,
+        thermal_timeout=thermal_timeout_s,
+        optical_timeout=optical_timeout_s,
+        progress_callback=_report_persistence_progress,
+    )
 
     fourth_evidence: object = None
     fifth_evidence: object = None
@@ -1592,6 +1920,16 @@ def run_investigation_multi_json(
         ),
         seventh_anomalies=stability_results,
         seventh_evidence_type="DETECTION_STABILITY",
+        eighth_evidence=(
+            TemporalPersistenceCheckEvidence(
+                n_candidates_checked=n_candidates,
+                days_back=temporal_persistence_days_back,
+                n_ndvi_fetch_errors=n_ndvi_persistence_errors,
+                n_thermal_fetch_errors=n_thermal_persistence_errors,
+                n_optical_fetch_errors=n_optical_persistence_errors,
+            ) if persistence_results else None
+        ),
+        eighth_anomalies=persistence_results,
     )
 
     if used_offline_dem:
@@ -1651,6 +1989,30 @@ def run_investigation_multi_json(
         "shadow, recent land use, seasonal vegetation cover) -- no "
         "causal interpretation should be inferred from this check alone."
     )
+    # Temporal Persistence's own general explanatory limitations note
+    # is already added by build_investigation_record() itself (see
+    # evidence_record.py's own EIGHTH EVIDENCE SLOT block -- appended
+    # only when persistence_results is non-empty) -- deliberately not
+    # duplicated here, mirroring how Detection Stability's own
+    # explanatory note lives solely in evidence_record.py too. Only add
+    # a note here for the specific edge case where every source failed
+    # for every candidate this run (nothing useful was gathered), since
+    # that's a distinct, actionable signal the general explanatory note
+    # doesn't call out on its own.
+    if (
+        n_candidates > 0
+        and n_ndvi_persistence_errors == n_candidates
+        and n_thermal_persistence_errors == n_candidates
+        and n_optical_persistence_errors == n_candidates
+    ):
+        record.limitations.append(
+            "Real temporal persistence checks were unavailable for every "
+            "candidate and every source this run (no network, or "
+            "Copernicus credentials not yet configured) -- no persistence "
+            "evidence was gathered this run; the DEM/NDVI/Thermal/Optical "
+            "snapshot results above are unaffected."
+        )
+
     for note in ndvi_limitations:
         record.limitations.append(note)
     for note in thermal_limitations:
