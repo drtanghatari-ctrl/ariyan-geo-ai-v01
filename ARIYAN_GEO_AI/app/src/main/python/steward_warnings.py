@@ -18,14 +18,24 @@ warning, since absence of a test is not evidence of instability.
 TEMPORAL_PERSISTENCE_WARNING added this session (see
 steward_confidence_ceiling.py's own TEMPORAL PERSISTENCE EXTENSION
 docstring for the full background and for why this uses a narrower,
-softer gate than WINDOW_SENSITIVITY_WARNING above). Fires only when a
-persistence_score was actually computed for this candidate (i.e. at
-least one of its corroborating NDVI/Thermal/Optical sources had a
-genuinely testable temporal-persistence result -- see
-debate_mobile.py's _compute_persistence_score_for_steward()) AND that
-score fell below the SAME threshold that also drives the SUBSTANTIAL
-cap in steward_confidence_ceiling.py, so this warning fires exactly
-when -- and only when -- the ceiling was actually affected by it.
+softer gate than WINDOW_SENSITIVITY_WARNING above). CORRECTED THIS
+SESSION after real on-device testing surfaced a bug in the original
+version -- see steward_confidence_ceiling.py's own REAL BUG FOUND AND
+FIXED VIA ON-DEVICE TESTING docstring paragraph for the full story: the
+original condition checked persistence_score in isolation, so it could
+fire "confidence has been capped" even in Stage 1, where
+environmental_confounders_controlled is hardcoded False and the
+has_field_validation branch (where persistence_score is actually
+consulted) can therefore never be reached at all -- a claim of an
+effect that never happened. Fixed to instead read
+ceiling_result.persistence_capped directly, the SAME already-computed,
+honest signal steward_confidence_ceiling.py's govern_confidence() now
+derives from what its own compute_confidence_band() call actually did
+-- mirroring how CONFIDENCE_WARNING below already reads
+ceiling_result.numeric_ceiling rather than re-deriving its own
+condition. persistence_score itself is still taken as a parameter, used
+only to render the message's percentage text, never to decide whether
+the warning fires.
 """
 
 from __future__ import annotations
@@ -171,20 +181,22 @@ def generate_warnings(
             )
         )
 
-    # TEMPORAL_PERSISTENCE_WARNING (ADDED THIS SESSION): only when a
-    # persistence_score was actually computed (at least one
-    # corroborating NDVI/Thermal/Optical source had a genuinely
-    # testable persistence result for this candidate -- see
-    # debate_mobile.py's _compute_persistence_score_for_steward()) AND
-    # it fell below the SAME threshold that also drives the
-    # SUBSTANTIAL-band cap in steward_confidence_ceiling.py, so this
-    # warning fires exactly when the ceiling was actually affected by
-    # it -- see that module's own TEMPORAL PERSISTENCE EXTENSION
-    # docstring for why this uses a narrower, softer gate than
-    # WINDOW_SENSITIVITY_WARNING above (this is a robustness note about
-    # a CORROBORATING signal, not a statement that the candidate's own
-    # detection is unreliable).
-    if persistence_score is not None and persistence_score < PERSISTENCE_SUBSTANTIAL_CAP_THRESHOLD:
+    # TEMPORAL_PERSISTENCE_WARNING (ADDED THIS SESSION, CORRECTED THIS
+    # SESSION -- see module docstring for the real on-device bug this
+    # fixes): fires ONLY when ceiling_result.persistence_capped is True
+    # -- i.e. only when persistence_score ACTUALLY capped this specific
+    # candidate's ceiling at HIGH instead of SUBSTANTIAL, per
+    # steward_confidence_ceiling.py's own honest derivation in
+    # govern_confidence(). Deliberately does NOT re-test
+    # persistence_score against the threshold here -- that was the bug:
+    # a candidate can have a genuinely low persistence_score while the
+    # ceiling was held at MODERATE (or lower) for a completely
+    # unrelated reason (confounders, insufficient effective sources, a
+    # contradiction, a stability cap) -- persistence_score alone being
+    # low does NOT mean it was ever consulted, let alone that it capped
+    # anything. persistence_score is still taken as a parameter purely
+    # to render the message's percentage text.
+    if ceiling_result.persistence_capped:
         warnings.append(
             StewardWarning(
                 WarningKind.TEMPORAL_PERSISTENCE,
