@@ -8,12 +8,24 @@ directly in the Android UI (not buried in logs), so each warning is a
 short, plain-language, non-dramatic sentence plus a machine-readable
 kind for the UI to badge/sort by.
 
-WINDOW_SENSITIVITY_WARNING added this session (see
+WINDOW_SENSITIVITY_WARNING added a prior session (see
 steward_confidence_ceiling.py's own docstring for the full detection-
 stability background). Fires only when a candidate's stability_score
 is both present (the automatic check actually ran for it) and below
 the MODERATE-cap threshold -- a candidate that was never tested gets no
 warning, since absence of a test is not evidence of instability.
+
+TEMPORAL_PERSISTENCE_WARNING added this session (see
+steward_confidence_ceiling.py's own TEMPORAL PERSISTENCE EXTENSION
+docstring for the full background and for why this uses a narrower,
+softer gate than WINDOW_SENSITIVITY_WARNING above). Fires only when a
+persistence_score was actually computed for this candidate (i.e. at
+least one of its corroborating NDVI/Thermal/Optical sources had a
+genuinely testable temporal-persistence result -- see
+debate_mobile.py's _compute_persistence_score_for_steward()) AND that
+score fell below the SAME threshold that also drives the SUBSTANTIAL
+cap in steward_confidence_ceiling.py, so this warning fires exactly
+when -- and only when -- the ceiling was actually affected by it.
 """
 
 from __future__ import annotations
@@ -23,6 +35,7 @@ from enum import Enum
 
 from steward_confidence_ceiling import (
     ConfidenceCeilingResult,
+    PERSISTENCE_SUBSTANTIAL_CAP_THRESHOLD,
     STABILITY_LOW_CAP_THRESHOLD,
     STABILITY_MODERATE_CAP_THRESHOLD,
 )
@@ -38,6 +51,7 @@ class WarningKind(Enum):
     CONTRADICTION = "CONTRADICTION_WARNING"
     DATA_GAP = "DATA_GAP"
     WINDOW_SENSITIVITY = "WINDOW_SENSITIVITY_WARNING"
+    TEMPORAL_PERSISTENCE = "TEMPORAL_PERSISTENCE_WARNING"
 
 
 @dataclass(frozen=True)
@@ -61,6 +75,7 @@ def generate_warnings(
     stability_score: float | None = None,
     stability_windows_detected: int | None = None,
     stability_windows_fetched: int | None = None,
+    persistence_score: float | None = None,
 ) -> list[StewardWarning]:
     """
     Builds the applicable subset of the Steward warning types from
@@ -156,6 +171,35 @@ def generate_warnings(
             )
         )
 
+    # TEMPORAL_PERSISTENCE_WARNING (ADDED THIS SESSION): only when a
+    # persistence_score was actually computed (at least one
+    # corroborating NDVI/Thermal/Optical source had a genuinely
+    # testable persistence result for this candidate -- see
+    # debate_mobile.py's _compute_persistence_score_for_steward()) AND
+    # it fell below the SAME threshold that also drives the
+    # SUBSTANTIAL-band cap in steward_confidence_ceiling.py, so this
+    # warning fires exactly when the ceiling was actually affected by
+    # it -- see that module's own TEMPORAL PERSISTENCE EXTENSION
+    # docstring for why this uses a narrower, softer gate than
+    # WINDOW_SENSITIVITY_WARNING above (this is a robustness note about
+    # a CORROBORATING signal, not a statement that the candidate's own
+    # detection is unreliable).
+    if persistence_score is not None and persistence_score < PERSISTENCE_SUBSTANTIAL_CAP_THRESHOLD:
+        warnings.append(
+            StewardWarning(
+                WarningKind.TEMPORAL_PERSISTENCE,
+                f"The corroborating remote-sensing signal for this "
+                f"candidate was only independently detected in "
+                f"{persistence_score:.0%} of temporally-tested real "
+                f"acquisitions -- this may reflect a genuine transient "
+                f"or seasonal signal rather than an unreliable "
+                f"detection (real vegetation/thermal cycles are honest, "
+                f"expected variation), but confidence has been capped "
+                f"below SUBSTANTIAL until more temporal evidence "
+                f"accumulates.",
+            )
+        )
+
     # DATA_GAP: any missing category at all is surfaced as at least an informational gap
     missing = matrix.missing_categories()
     if missing:
@@ -168,4 +212,3 @@ def generate_warnings(
         )
 
     return warnings
-
