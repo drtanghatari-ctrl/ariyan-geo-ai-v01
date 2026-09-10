@@ -25,7 +25,7 @@ OUT OF SCOPE for Stage 1 (later stages per the spec):
   - Candidate scoring / validation-priority ranking (Stage 4)
   - Adaptive "what evidence would reduce uncertainty most" reasoning (Stage 5)
 
-DETECTION STABILITY EXTENSION (added this session): evaluate_candidate()
+DETECTION STABILITY EXTENSION (added a prior session): evaluate_candidate()
 now accepts optional stability_score/stability_windows_detected/
 stability_windows_fetched/stability_z_range parameters, threaded
 straight through to steward_confidence_ceiling.govern_confidence() and
@@ -34,6 +34,17 @@ docstrings for the full detection-stability background. All default to
 None ("not tested for this candidate"), which changes NOTHING about
 this function's existing behavior for any candidate the automatic
 check didn't run against.
+
+TEMPORAL PERSISTENCE EXTENSION (ADDED THIS SESSION): evaluate_candidate()
+now also accepts an optional persistence_score parameter, threaded
+straight through to the SAME two functions -- see
+steward_confidence_ceiling.py's own TEMPORAL PERSISTENCE EXTENSION
+docstring for the full background and for why this uses a narrower,
+softer mechanism (a cap on reaching SUBSTANTIAL only) than
+stability_score's unconditional LOW/MODERATE cap. Defaults to None
+("not applicable for this candidate" -- see that same docstring for
+exactly when that is), which changes NOTHING about this function's
+existing behavior for a candidate with no usable persistence signal.
 
 This module is intentionally self-contained (new files only, zero
 changes to any existing file outside the Steward chain) so it can be
@@ -119,6 +130,7 @@ def evaluate_candidate(
     stability_windows_detected: int | None = None,
     stability_windows_fetched: int | None = None,
     stability_z_range: tuple[float, float] | None = None,
+    persistence_score: float | None = None,
     interpretation: str = "",
     hypothesis: str = "",
     alternative_hypotheses: list[str] | None = None,
@@ -149,6 +161,13 @@ def evaluate_candidate(
     steward_confidence_ceiling.py's docstring) -- all default to None,
     meaning "not tested for this candidate," which applies no cap and
     generates no warning.
+
+    `persistence_score` (ADDED THIS SESSION) describes the optional
+    temporal-persistence robustness check on this candidate's
+    corroborating NDVI/Thermal/Optical signal(s) -- see
+    steward_confidence_ceiling.py's own TEMPORAL PERSISTENCE EXTENSION
+    docstring. Defaults to None, meaning "not applicable for this
+    candidate," which applies no cap and generates no warning.
     """
     alternative_hypotheses = alternative_hypotheses or []
     contradictions = contradictions or []
@@ -176,6 +195,7 @@ def evaluate_candidate(
         has_contradiction=has_contradiction,
         stability_score=stability_score,
         stability_z_range=stability_z_range,
+        persistence_score=persistence_score,
     )
 
     warnings = generate_warnings(
@@ -190,6 +210,7 @@ def evaluate_candidate(
         stability_score=stability_score,
         stability_windows_detected=stability_windows_detected,
         stability_windows_fetched=stability_windows_fetched,
+        persistence_score=persistence_score,
     )
 
     trace = ReasoningTrace(
@@ -263,4 +284,3 @@ def _infer_pipeline_stage(matrix: EvidenceMatrix, confidence_result, has_field_v
     if confidence_result.band == ConfidenceBand.MODERATE:
         return PipelineStage.HYPOTHESIS
     return PipelineStage.CANDIDATE
-
