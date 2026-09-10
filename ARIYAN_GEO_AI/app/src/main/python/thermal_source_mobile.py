@@ -88,7 +88,7 @@ credentials are used for both NDVI and thermal). The hard-deadline HTTP
 wrapper is duplicated locally rather than reaching into
 ndvi_source_mobile.py's underscore-prefixed (module-private) helpers.
 
-QUERY-WINDOW WIDENED 60 -> 90 DAYS (this session -- REAL on-device
+QUERY-WINDOW WIDENED 60 -> 90 DAYS (a prior session -- REAL on-device
 confidence issue, not a guess): mirrors ndvi_source_mobile.py's own
 QUERY-WINDOW WIDENED fix, applied for the same real reason -- a real
 investigation run showed this module's core/halo check reaching
@@ -106,7 +106,7 @@ baseline into the same core/halo comparison -- see
 _default_time_range()'s own docstring below for the updated pass-count
 estimate.
 
-CORE/HALO SHARED-TIME-WINDOW FIX (this session): mirrors
+CORE/HALO SHARED-TIME-WINDOW FIX (a prior session): mirrors
 ndvi_source_mobile.py's own fix of the same name --
 fetch_thermal_core_halo_check previously called
 _stats_for_bbox_thermal() for the core and halo bboxes without passing
@@ -116,6 +116,48 @@ separately each time it's called). Fixed by computing (time_from,
 time_to) ONCE in fetch_thermal_core_halo_check and passing the same
 values explicitly to both _stats_for_bbox_thermal() calls, guaranteeing
 core and halo are queried over the identical time range.
+
+TEMPORAL PERSISTENCE CHECK, ADDED THIS SESSION -- MIRRORS NDVI'S OWN
+(queue item 2, continuing from ndvi_source_mobile.py's already-built
+piece; see that module's own TEMPORAL PERSISTENCE CHECK docstring
+section for the full shared design reasoning -- no new API calls
+needed beyond the snapshot check's existing 2-calls-per-candidate
+shape, since the Statistical API already returns one entry per
+aggregationInterval bucket; date-matched by exact interval "from"/"to"
+boundary strings rather than list position, since core and halo are
+separate API calls that can have different usable dates; "untested,
+never assumed unstable" error philosophy -- a thin-but-nonzero number
+of testable intervals is honest information, not a fetch failure).
+
+WHAT'S GENUINELY DIFFERENT HERE VERSUS NDVI'S VERSION (read before
+assuming this is a pure copy-paste): NDVI's persistence check reuses
+NDVI's own one-directional stress rule (core-below-halo only) per
+interval. Thermal has NO assumed sign (see NO ASSUMED SIGN above) --
+this applies the SAME |z| >= threshold rule as the snapshot check, per
+interval, and additionally reports core_warmer_than_halo per interval
+(not just an aggregate direction), since a real buried feature's
+thermal signature could plausibly flip sign across seasons (e.g. warmer
+in one month, cooler in another, both real) and collapsing that into a
+single aggregate direction would silently discard real information a
+reader might want.
+
+WINDOW CHOICE: uses its own explicit days_back=180 default (like
+NDVI's persistence check), NOT the snapshot check's 90-day default --
+same reasoning as ndvi_source_mobile.py's WINDOW CHOICE note: 90 days
+would typically yield too few real P30D buckets for a persistence
+judgment to mean anything, and Landsat 8+9's combined ~8-day revisit
+(coarser than Sentinel-2's ~5-day) makes a wider window even more
+important here to gather enough independent real passes. This is a
+separate, explicit parameter on the new function below, not a change
+to _default_time_range()'s own 90-day default -- the snapshot check's
+own window and reasoning are completely untouched by this addition.
+
+NOT YET WIRED INTO THE APP: mirrors ndvi_source_mobile.py's own status
+note -- this function exists and follows the same design proven for
+NDVI, but is NOT YET called from investigation_multi_mobile.py, has no
+evidence_record.py slot yet, and Optical's own mirror is still pending.
+Calling this function today would work correctly in isolation but
+produce a result nothing in the app yet reads or displays.
 """
 
 from __future__ import annotations
@@ -212,13 +254,20 @@ def _default_time_range(days_back: int = 90):
     """Same default window as ndvi_source_mobile.py -- the last
     `days_back` days ending now (UTC).
 
-    WIDENED 60 -> 90 THIS SESSION -- see module docstring, QUERY-WINDOW
+    WIDENED 60 -> 90 A PRIOR SESSION -- see module docstring, QUERY-WINDOW
     WIDENED note. Landsat 8+9's combined ~8-day revisit means a 90-day
     window gives meaningfully more real-pass opportunities than the
     previous 60-day default (roughly 11 theoretical passes vs. 7-8, before
     accounting for cloud cover) -- more chances at a cloud-free acquisition
     without extending far enough to risk mixing in a different season's
-    brightness-temperature baseline."""
+    brightness-temperature baseline.
+
+    NOT used by the new temporal-persistence check below -- that
+    function takes its own explicit, separately-reasoned days_back
+    default (180) directly as a parameter, mirroring
+    ndvi_source_mobile.py's own WINDOW CHOICE separation; see this
+    module's own docstring, TEMPORAL PERSISTENCE CHECK, WINDOW CHOICE
+    note, for why."""
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=days_back)
@@ -355,6 +404,126 @@ def _stats_for_bbox_thermal(
     }
 
 
+def _stats_by_interval_for_bbox_thermal(
+    bbox: list,
+    access_token: str,
+    time_from: str,
+    time_to: str,
+    timeout: int = 8,
+) -> list[dict]:
+    """ADDED THIS SESSION -- sibling to _stats_for_bbox_thermal() above,
+    same request shape and same real Sentinel Hub Statistical API call
+    against `landsat-ot-l1`, but returns the PER-INTERVAL breakdown
+    instead of pooling every interval into one merged mean/stddev.
+    Mirrors ndvi_source_mobile.py's _stats_by_interval_for_bbox()
+    exactly -- see that function's own docstring, and this module's
+    own TEMPORAL PERSISTENCE CHECK docstring section, for the full
+    reasoning (no new API call shape beyond what
+    _stats_for_bbox_thermal() already makes; interval "from"/"to"
+    strings copied verbatim from Sentinel Hub's own response so core
+    and halo can be date-matched by exact string equality rather than
+    by list position or order).
+
+    time_from/time_to are REQUIRED here (not optional/defaulted),
+    exactly like NDVI's sibling function -- the caller
+    (fetch_thermal_temporal_persistence_check below) always computes
+    and shares one window across both the core and halo calls.
+
+    Returns a list of dicts, ONE PER INTERVAL THAT HAD USABLE DATA (an
+    interval with zero valid pixels after cloud-masking is simply
+    omitted, not included as a zero/null entry) -- each:
+      {"from": str, "to": str, "mean": float (Kelvin),
+       "stddev": float | None, "sample_count": int}
+
+    Raises ThermalFetchError only for a true hard failure (network/
+    auth/malformed response) or if literally zero intervals exist in
+    the response at all -- a response containing intervals where NONE
+    of them have usable pixel data still returns an EMPTY LIST here
+    (not an error), mirroring ndvi_source_mobile.py's own sibling
+    function exactly: "this bbox has zero usable dates in this window"
+    is honest information for the caller (which has both core AND halo
+    results to reason about together) to interpret, not a failure this
+    low-level function should decide on its own.
+    """
+    request_body = {
+        "input": {
+            "bounds": {
+                "bbox": bbox,
+                "properties": {
+                    "crs": "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+                },
+            },
+            "data": [{
+                "type": "landsat-ot-l1",
+                "dataFilter": {
+                    "timeRange": {"from": time_from, "to": time_to},
+                    "maxCloudCoverage": 40,
+                },
+            }],
+        },
+        "aggregation": {
+            "timeRange": {"from": time_from, "to": time_to},
+            "aggregationInterval": {"of": "P30D"},
+            "evalscript": THERMAL_EVALSCRIPT,
+            "resx": 30,
+            "resy": 30,
+        },
+    }
+
+    req = urllib.request.Request(
+        STATISTICS_URL,
+        data=json.dumps(request_body).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    raw = _urlopen_with_hard_deadline(req, timeout)
+
+    try:
+        response = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ThermalFetchError(f"Malformed statistics response: {exc}") from exc
+
+    intervals = response.get("data", [])
+    if not intervals:
+        raise ThermalFetchError(
+            "Statistics API returned no time intervals for this AOI/time range."
+        )
+
+    results: list[dict] = []
+    for interval in intervals:
+        interval_bounds = interval.get("interval", {})
+        interval_from = interval_bounds.get("from")
+        interval_to = interval_bounds.get("to")
+
+        outputs = interval.get("outputs", {})
+        data_output = outputs.get("data", {})
+        bands = data_output.get("bands", {})
+        band0 = bands.get("B0", {})
+        stats = band0.get("stats", {})
+
+        sample_count = stats.get("sampleCount", 0) or 0
+        nodata_count = stats.get("noDataCount", 0) or 0
+        valid_count = sample_count - nodata_count
+        mean = stats.get("mean")
+        stdev = stats.get("stDev")
+
+        if valid_count <= 0 or mean is None or interval_from is None or interval_to is None:
+            continue
+
+        results.append({
+            "from": interval_from,
+            "to": interval_to,
+            "mean": mean,
+            "stddev": stdev,
+            "sample_count": valid_count,
+        })
+
+    return results
+
+
 def fetch_thermal_core_halo_check(
     lat: float,
     lon: float,
@@ -386,8 +555,8 @@ def fetch_thermal_core_halo_check(
     uninformative 0/0 case) -- unaffected by the Level 1 fix.
 
     Also computes ONE (time_from, time_to) window and passes it
-    explicitly to BOTH bbox calls (ADDED THIS SESSION -- see module
-    docstring, CORE/HALO SHARED-TIME-WINDOW FIX).
+    explicitly to BOTH bbox calls (see module docstring, CORE/HALO
+    SHARED-TIME-WINDOW FIX).
 
     UNLIKE NDVI, this does NOT assume a direction (see module docstring
     NO ASSUMED SIGN note): thermal_anomaly_detected is True whenever
@@ -412,7 +581,7 @@ def fetch_thermal_core_halo_check(
     per candidate and record it as an honest limitation, rather than
     failing the whole investigation -- same pattern as NDVI.
 
-    KNOWN LIMITATION, NOT YET ADDRESSED (flagged this session): like
+    KNOWN LIMITATION, NOT YET ADDRESSED (flagged a prior session): like
     NDVI's own fetch_ndvi_core_halo_check(), the core_n/halo_n >= 2
     floor below is the bare minimum for the standard-error formula to
     be defined at all, not itself a meaningful robustness floor -- see
@@ -423,7 +592,7 @@ def fetch_thermal_core_halo_check(
 
     token = access_token or get_access_token(client_id, client_secret, timeout=timeout)
 
-    # CORE/HALO SHARED-TIME-WINDOW FIX (this session): compute the window
+    # CORE/HALO SHARED-TIME-WINDOW FIX (a prior session): compute the window
     # ONCE, pass it explicitly to both calls below.
     time_from, time_to = _default_time_range()
 
@@ -483,4 +652,198 @@ def fetch_thermal_core_halo_check(
         "core_warmer_than_halo": core_warmer_than_halo,
         "core_sample_count": core_n,
         "halo_sample_count": halo_n,
+    }
+
+
+def fetch_thermal_temporal_persistence_check(
+    lat: float,
+    lon: float,
+    client_id: str,
+    client_secret: str,
+    core_radius_m: float = 45.0,
+    halo_radius_m: float = 180.0,
+    anomaly_zscore_threshold: float = 1.5,
+    days_back: int = 180,
+    timeout: int = 8,
+    access_token: str | None = None,
+) -> dict:
+    """ADDED THIS SESSION -- checks whether fetch_thermal_core_halo_check's
+    thermal-anomaly signal reproduces across MULTIPLE real, independent
+    Landsat 8/9 acquisitions, not just one pooled snapshot. Mirrors
+    ndvi_source_mobile.py's fetch_ndvi_temporal_persistence_check()
+    structurally, with two real, deliberate differences documented
+    below (see module docstring, TEMPORAL PERSISTENCE CHECK, for the
+    full design reasoning shared with NDVI's version).
+
+    DIFFERENCE 1 -- NO ASSUMED SIGN, PER INTERVAL: NDVI's persistence
+    check reuses NDVI's own one-directional stress rule per interval.
+    Thermal has no assumed direction (see module docstring NO ASSUMED
+    SIGN note) -- each interval is tested with the SAME |z| >= threshold
+    rule as the snapshot check, and each interval_results entry also
+    reports core_warmer_than_halo (not just NDVI's single "detected"
+    boolean), since a real buried feature's thermal signature could
+    plausibly flip sign across seasons and collapsing that into one
+    aggregate direction would silently discard real information.
+
+    DIFFERENCE 2 -- DEFAULT RADII/WINDOW: core_radius_m/halo_radius_m
+    default to this module's own 45m/180m (matching
+    fetch_thermal_core_halo_check's defaults, for the same coarser-
+    resolution reason), and days_back defaults to 180 (like NDVI's own
+    persistence check, NOT the snapshot check's 90-day default) --
+    wide enough to typically span multiple real P30D buckets given
+    Landsat 8+9's coarser ~8-day combined revisit; see module docstring,
+    WINDOW CHOICE, for the full reasoning.
+
+    Uses the SAME "untested, never assumed unstable" error philosophy
+    as NDVI's persistence check: a thin-but-nonzero number of testable
+    intervals is a normal, honest persistence_score, never an
+    exception -- only a true hard failure (token/auth/network error, a
+    malformed response, or literally zero usable intervals on EITHER
+    side across the entire window) raises ThermalFetchError.
+
+    Returns a dict:
+      {
+        "n_intervals_fetched": int,   # real intervals with usable data
+                                       # on BOTH core and halo (i.e.
+                                       # actually testable)
+        "n_intervals_testable": int,  # of those, how many had
+                                       # core_n>=2, halo_n>=2, AND a
+                                       # non-null stddev on both sides
+                                       # (the same floor
+                                       # fetch_thermal_core_halo_check
+                                       # uses, applied per-interval
+                                       # instead of to one pooled
+                                       # measurement)
+        "n_intervals_detected": int,  # of the testable ones, how many
+                                       # independently cleared |z| >=
+                                       # threshold in EITHER direction
+        "persistence_score": float | None,  # n_detected / n_testable,
+                                       # or None if n_testable == 0
+                                       # (genuinely could not be tested
+                                       # this window -- NOT "no
+                                       # persistence", an honest
+                                       # "untested" state)
+        "interval_results": [
+            {"from": str, "to": str, "z_score": float | None,
+             "detected": bool | None,
+             "core_warmer_than_halo": bool | None},
+            ...
+        ],
+      }
+    Each interval_results entry has z_score=None/detected=None/
+    core_warmer_than_halo=None when that specific interval had data on
+    both sides but didn't clear the core_n>=2/halo_n>=2/non-null-stddev
+    floor (genuinely untestable, not "no anomaly") -- mirroring the
+    same "untested, never assumed negative" honesty this function
+    applies at the aggregate level.
+
+    Raises ThermalFetchError only for a true hard failure: token/auth
+    error, network error on either the core or halo request, a
+    malformed response, or literally zero usable intervals on EITHER
+    side across the entire window (meaning nothing at all could be
+    compared -- a real, if unfortunate, condition e.g. under near-
+    constant regional cloud cover, or Landsat's own longer revisit
+    genuinely not passing over this AOI enough times in the window). A
+    thin-but-nonzero number of testable intervals is NEVER an error.
+    """
+    core_bbox = _bbox_from_point(lat, lon, core_radius_m)
+    halo_bbox = _bbox_from_point(lat, lon, halo_radius_m)
+
+    token = access_token or get_access_token(client_id, client_secret, timeout=timeout)
+
+    # Both requests share the identical window and P30D grid -- see
+    # module docstring, TEMPORAL PERSISTENCE CHECK (which cross-references
+    # ndvi_source_mobile.py's DATE-MATCHING, NOT POSITIONAL MATCHING note),
+    # for why this guarantees identical interval BOUNDARIES between the
+    # two calls even when which intervals actually have data differs.
+    time_from, time_to = _default_time_range(days_back=days_back)
+
+    core_intervals = _stats_by_interval_for_bbox_thermal(core_bbox, token, time_from, time_to, timeout=timeout)
+    halo_intervals = _stats_by_interval_for_bbox_thermal(halo_bbox, token, time_from, time_to, timeout=timeout)
+
+    if not core_intervals and not halo_intervals:
+        raise ThermalFetchError(
+            "No usable (non-cloud, non-nodata) Landsat thermal pixels "
+            "were found in EITHER the core or halo area across the "
+            "entire queried window -- nothing at all could be compared "
+            "for temporal persistence at this location."
+        )
+
+    # Date-match by exact interval boundary strings -- core and halo are
+    # separate API calls that can have different usable dates.
+    halo_by_bounds = {(h["from"], h["to"]): h for h in halo_intervals}
+
+    interval_results: list[dict] = []
+    n_fetched = 0
+    n_testable = 0
+    n_detected = 0
+
+    for core_entry in core_intervals:
+        bounds = (core_entry["from"], core_entry["to"])
+        halo_entry = halo_by_bounds.get(bounds)
+        if halo_entry is None:
+            # This exact interval had usable core data but no matching
+            # usable halo data (or vice versa) -- genuinely not
+            # comparable for this one date. Not counted as fetched/
+            # testable/detected; not reported as an interval_results
+            # entry either, mirroring NDVI's own persistence check.
+            continue
+
+        n_fetched += 1
+        core_n = core_entry["sample_count"]
+        halo_n = halo_entry["sample_count"]
+        core_stddev = core_entry["stddev"]
+        halo_stddev = halo_entry["stddev"]
+
+        if core_n < 2 or halo_n < 2 or core_stddev is None or halo_stddev is None:
+            interval_results.append({
+                "from": bounds[0], "to": bounds[1],
+                "z_score": None, "detected": None,
+                "core_warmer_than_halo": None,
+            })
+            continue
+
+        mean_difference = core_entry["mean"] - halo_entry["mean"]
+        standard_error = math.sqrt(
+            (core_stddev ** 2) / core_n
+            + (halo_stddev ** 2) / halo_n
+        )
+
+        if standard_error <= 1e-9:
+            if abs(mean_difference) <= 1e-9:
+                # Genuinely uninformative for THIS interval (both areas
+                # flat and identical) -- honestly untestable, not a
+                # detection either way.
+                interval_results.append({
+                    "from": bounds[0], "to": bounds[1],
+                    "z_score": None, "detected": None,
+                    "core_warmer_than_halo": None,
+                })
+                continue
+            z_score = 50.0 if mean_difference > 0 else -50.0
+        else:
+            z_score = mean_difference / standard_error
+
+        # NO ASSUMED SIGN, applied per-interval (see module docstring,
+        # DIFFERENCE 1): unlike NDVI's one-directional rule, |z| clearing
+        # the threshold in EITHER direction counts as detected.
+        detected = abs(z_score) >= anomaly_zscore_threshold
+        core_warmer_than_halo = mean_difference > 0
+        n_testable += 1
+        if detected:
+            n_detected += 1
+        interval_results.append({
+            "from": bounds[0], "to": bounds[1],
+            "z_score": z_score, "detected": detected,
+            "core_warmer_than_halo": core_warmer_than_halo,
+        })
+
+    persistence_score = (n_detected / n_testable) if n_testable > 0 else None
+
+    return {
+        "n_intervals_fetched": n_fetched,
+        "n_intervals_testable": n_testable,
+        "n_intervals_detected": n_detected,
+        "persistence_score": persistence_score,
+        "interval_results": interval_results,
     }
