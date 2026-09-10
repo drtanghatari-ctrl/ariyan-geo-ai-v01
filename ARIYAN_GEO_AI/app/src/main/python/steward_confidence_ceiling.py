@@ -122,6 +122,35 @@ this candidate) means "not applicable," not "weak" -- it applies NO
 cap and changes NOTHING about this function's existing SUBSTANTIAL
 branch. Only a candidate with a genuinely computed, genuinely low
 persistence_score is affected.
+
+REAL BUG FOUND AND FIXED VIA ON-DEVICE TESTING (same session as the
+extension above): steward_warnings.py's original TEMPORAL_PERSISTENCE_
+WARNING fired whenever persistence_score alone was low, evaluated
+completely independently of whether this function ever actually
+reached the has_field_validation branch where persistence_score is
+consulted. Since environmental_confounders_controlled is hardcoded
+False for the whole of Stage 1 (see EVIDENCE-INDEPENDENCE WEIGHTING
+EXTENSION above -- the exact same "invisible until Stage 2" situation),
+compute_confidence_band() can currently NEVER reach the
+has_field_validation branch at all, for ANY candidate, regardless of
+GPR/ERT colocation -- confirmed by two real on-device runs this
+session, both landing on MODERATE via the confounders gate. Yet the
+independent warning check would still have fired "confidence has been
+capped below SUBSTANTIAL" on a future 4-source-corroborated candidate
+with a low persistence_score, which is FALSE in Stage 1: the ceiling
+was never actually touched by persistence at all -- it was held at
+MODERATE by the confounders gate for entirely unrelated reasons, the
+same way CONFIDENCE_WARNING or DATA_GAP already correctly report only
+what actually happened, never what would hypothetically happen under
+different conditions.
+
+Fixed by adding `persistence_capped` (below) to ConfidenceCeilingResult
+and computing it honestly in govern_confidence() -- see that function's
+own docstring for exactly how -- so steward_warnings.py can read the
+ACTUAL observed effect off the result object (the same pattern
+CONFIDENCE_WARNING already uses via ceiling_result.numeric_ceiling)
+rather than re-deriving a hypothetical one from persistence_score in
+isolation.
 """
 
 from __future__ import annotations
@@ -191,6 +220,14 @@ class ConfidenceCeilingResult:
     clamped_confidence: float
     was_clamped: bool
     reasoning: list[str]
+    # ADDED THIS SESSION (bug fix -- see module docstring, REAL BUG
+    # FOUND AND FIXED VIA ON-DEVICE TESTING): True only when
+    # persistence_score ACTUALLY capped this specific result at HIGH
+    # instead of SUBSTANTIAL -- see govern_confidence() for exactly how
+    # this is derived. Defaults to False so every pre-existing caller
+    # (and every band other than the persistence-capped HIGH) is
+    # completely unaffected.
+    persistence_capped: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -200,6 +237,7 @@ class ConfidenceCeilingResult:
             "clamped_confidence": self.clamped_confidence,
             "was_clamped": self.was_clamped,
             "reasoning": self.reasoning,
+            "persistence_capped": self.persistence_capped,
         }
 
 
@@ -392,6 +430,21 @@ def govern_confidence(
     likewise optional (default None = "not applicable" -- see module
     docstring, TEMPORAL PERSISTENCE EXTENSION); also passed straight
     through.
+
+    ALSO computes ConfidenceCeilingResult.persistence_capped here (bug
+    fix, see module docstring) -- honestly, from what actually happened,
+    rather than re-testing persistence_score in isolation the way the
+    original (buggy) warning check did. Reliable because: whenever
+    has_field_validation is True, compute_confidence_band()'s
+    has_field_validation branch is the ONLY code path that can ever
+    return ConfidenceBand.HIGH -- it always returns either SUBSTANTIAL
+    or (only via the persistence cap inside that same branch) HIGH,
+    and always returns before ever reaching the separate quality-based
+    HIGH check further down the function. So "has_field_validation is
+    True AND band is HIGH" uniquely identifies "this HIGH came from the
+    persistence cap" -- there is no other way to reach that combination.
+    A HIGH reached via the quality>=0.8 branch instead always has
+    has_field_validation False, so it can never be mistaken for this.
     """
     raw_confidence = max(0.0, min(1.0, raw_confidence))
 
@@ -403,6 +456,12 @@ def govern_confidence(
         stability_score=stability_score,
         stability_z_range=stability_z_range,
         persistence_score=persistence_score,
+    )
+    persistence_capped = (
+        has_field_validation
+        and band == ConfidenceBand.HIGH
+        and persistence_score is not None
+        and persistence_score < PERSISTENCE_SUBSTANTIAL_CAP_THRESHOLD
     )
     ceiling = band.numeric_ceiling
     clamped = min(raw_confidence, ceiling)
@@ -426,4 +485,5 @@ def govern_confidence(
         clamped_confidence=clamped,
         was_clamped=was_clamped,
         reasoning=reasoning,
+        persistence_capped=persistence_capped,
     )
