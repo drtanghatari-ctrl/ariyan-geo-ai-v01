@@ -45,7 +45,7 @@ pattern (single record appended to `evidence`, reported in its own
 fourth/fifth pattern, even though it is numbered "sixth" simply because
 it is the sixth evidence slot added to this record chronologically.
 
-SEVENTH EVIDENCE SLOT ADDED THIS SESSION (Detection Stability): real
+SEVENTH EVIDENCE SLOT (Detection Stability, a prior session): real
 on-device testing (18+ live investigations, see project notes) found
 that detect_anomalies() can genuinely disagree with itself when re-run
 against a differently-centered AOI window -- candidates close to the
@@ -68,6 +68,71 @@ DEM candidates exist. `seventh_evidence` is only appended to `evidence`
 at all when at least one candidate was actually tested this run (an
 investigation where nothing qualified carries no stability evidence
 item, rather than a misleading "0 candidates tested" entry every time).
+CRITICALLY: Stability gets NO `derived_products` entry, unlike fourth/
+fifth -- it isn't a corroborating evidence source at all (a stable
+detection isn't NEW evidence for a hypothesis, it's a statement about
+how much the EXISTING DEM evidence can be trusted). See
+steward_confidence_ceiling.py's own docstring for why it feeds the
+confidence ceiling directly instead of correlation().
+
+EIGHTH EVIDENCE SLOT ADDED THIS SESSION (Temporal Persistence): checks
+whether NDVI/Thermal/Optical's core-vs-halo anomaly (see the second/
+fourth/fifth evidence items above) reproduces across MULTIPLE real,
+independent satellite acquisitions in a wider time window, rather than
+reflecting a single pooled snapshot -- see ndvi_source_mobile.py's,
+thermal_source_mobile.py's, and optical_source_mobile.py's own
+fetch_X_temporal_persistence_check() functions for the real per-source
+mechanics (all three now built and sandbox-verified).
+
+THREE DESIGN DECISIONS BEHIND THIS SLOT'S SHAPE, all made and confirmed
+before this code was written (see the project's own queue-item-2 design
+notes for the full reasoning):
+
+  1. Runs automatically for ALL DEM candidates -- the SAME unconditional-
+     per-candidate philosophy as Thermal/Optical, NOT Stability's
+     bounded borderline-only subset. `eighth_anomalies` is therefore
+     expected to be non-empty whenever this run has at least one DEM
+     candidate, once investigation_multi_mobile.py's wiring calls all
+     three per-source checks for every candidate.
+
+  2. ONE COMBINED slot covering all three sources together, NOT three
+     separate evidence slots. Each item in `eighth_anomalies` is a
+     single per-candidate result (conceptually a TemporalPersistenceResult
+     -- see investigation_multi_mobile.py for its exact dataclass, not
+     defined here) with `ndvi`/`thermal`/`optical` sub-dict fields (each
+     None on a hard per-source failure, e.g. a source that was never
+     attempted or hit a true fetch error), rather than three flat
+     parallel lists the way second/fourth/fifth's per-source data would
+     otherwise imply. Consequently `eighth_evidence_type` is NOT a
+     caller-supplied parameter the way fourth/fifth/seventh's
+     evidence_type is -- it's a single FIXED literal string,
+     "TEMPORAL_PERSISTENCE", tagged onto each detail item below, since
+     the actual per-source split already lives INSIDE each item's own
+     ndvi/thermal/optical sub-fields rather than in a variable top-level
+     type name.
+
+  3. NOT COUNTED as a new independent evidence source -- mirrors
+     Stability's own precedent from the section above EXACTLY, for the
+     same underlying reason: persistence is a robustness check ON
+     NDVI/Thermal/Optical's EXISTING signals, not a new measurement
+     mechanism. Feeding it into correlation()/supporting_sources would
+     double-count against the evidence-independence weighting already
+     closed in steward_evidence_matrix.py (queue item 1). So, like
+     Stability: NO `derived_products` entry is added for this slot, it
+     is never folded into `correlation_results`/`supporting_sources`,
+     and it feeds Scientific Steward as a confidence-ceiling input
+     instead (a warning type, in the spirit of Stability's own
+     WINDOW_SENSITIVITY_WARNING -- exact mechanism not yet finalized,
+     to be designed alongside steward_confidence_ceiling.py separately
+     from this evidence-record change).
+
+`eighth_evidence` (optional, like seventh_evidence) is an aggregate
+wrapper object describing the method/window/thresholds used this run
+(e.g. days_back, per-source thresholds) -- appended to `evidence` only
+when `eighth_anomalies` is non-empty, mirroring Stability's own
+"no misleading zero-candidates entry on every run" precedent, even
+though decision 1 above means this will in practice almost always be
+non-empty once at least one DEM candidate exists.
 
 CONFIDENCE-STATEMENT FIX (a prior session): previously, the "co-located
 anomalies in X + Y" phrase listed every evidence_type present in
@@ -80,11 +145,11 @@ Optical) would make it actively wrong (claiming a source co-located
 candidates it never touched). Fixed to derive the list from the sources
 that actually appear in `supporting_sources` for CORROBORATED candidates
 specifically -- this logic needed no further change to accommodate
-Optical, ERT, or Stability: none of these three ever participates in
-correlation() or appears in supporting_sources, so this phrase
-correctly never mentions any of them.
+Optical, ERT, Stability, or Temporal Persistence: none of these four
+ever participates in correlation() or appears in supporting_sources, so
+this phrase correctly never mentions any of them.
 
-CONFIDENCE-STATEMENT WORDING FIX (this session -- REAL on-device
+CONFIDENCE-STATEMENT WORDING FIX (a prior session -- REAL on-device
 readability bug, reported by the user): the CORROBORATED branch of the
 confidence statement previously appended a trailing sentence --
 "{N} additional single-source candidate(s) remain LOW confidence." --
@@ -137,6 +202,7 @@ class InvestigationRecord:
     fifth_evidence_detail: list[dict] = field(default_factory=list)
     sixth_evidence_detail: list[dict] = field(default_factory=list)
     seventh_evidence_detail: list[dict] = field(default_factory=list)
+    eighth_evidence_detail: list[dict] = field(default_factory=list)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(asdict(self), indent=indent, default=str)
@@ -166,6 +232,8 @@ def build_investigation_record(
     seventh_evidence: Any = None,
     seventh_anomalies: list | None = None,
     seventh_evidence_type: str | None = None,
+    eighth_evidence: Any = None,
+    eighth_anomalies: list | None = None,
 ) -> InvestigationRecord:
     """Build the InvestigationRecord JSON payload.
 
@@ -208,9 +276,9 @@ def build_investigation_record(
     third_evidence (GPR) pattern, NOT the fourth/fifth (Thermal/Optical)
     pattern.
 
-    seventh_evidence/seventh_anomalies (optional, ADDED THIS SESSION) are
-    Detection Stability's real per-candidate re-fetch/re-detect check
-    results (StabilityResult from investigation_multi_mobile.py, schema:
+    seventh_evidence/seventh_anomalies (optional) are Detection
+    Stability's real per-candidate re-fetch/re-detect check results
+    (StabilityResult from investigation_multi_mobile.py, schema:
     lat/lon/target_zscore/stability_score/n_windows_fetched/
     n_windows_detected/z_min/z_max/offset_errors -- nothing in common
     with AnomalyCandidate). Follows the fourth/fifth pattern (aggregate
@@ -223,7 +291,26 @@ def build_investigation_record(
     to `evidence` when `seventh_anomalies` is non-empty -- an
     investigation where no candidate qualified for the automatic check
     carries no stability evidence item at all, rather than a misleading
-    zero-candidates entry appearing on every single run.
+    zero-candidates entry appearing on every single run. Stability gets
+    NO `derived_products` entry -- it isn't a corroborating evidence
+    source, it's a statement about how much the EXISTING DEM evidence
+    can be trusted (see steward_confidence_ceiling.py's own docstring).
+
+    eighth_evidence/eighth_anomalies (optional, ADDED THIS SESSION) are
+    Temporal Persistence's real per-candidate results -- see this
+    module's own EIGHTH EVIDENCE SLOT docstring section above for the
+    three design decisions behind this slot's shape. Structurally like
+    seventh (aggregate wrapper + per-item detail list, no
+    derived_products entry, never folded into correlation()), but with
+    two real differences from seventh: (a) runs unconditionally for ALL
+    DEM candidates rather than a bounded borderline subset, so
+    `eighth_anomalies` is expected to be non-empty whenever this run has
+    at least one DEM candidate; (b) each item combines all three sources
+    (NDVI/Thermal/Optical) via ndvi/thermal/optical sub-dict fields
+    rather than being source-specific, so `eighth_evidence_type` is not
+    a caller-supplied parameter here -- it's the single fixed literal
+    "TEMPORAL_PERSISTENCE", tagged onto every eighth_evidence_detail
+    item below.
     """
     evidence = [dem.as_evidence_record()]
     derived_products = [{
@@ -240,6 +327,7 @@ def build_investigation_record(
     fifth_evidence_detail: list[dict] = []
     sixth_evidence_detail: list[dict] = []
     seventh_evidence_detail: list[dict] = []
+    eighth_evidence_detail: list[dict] = []
 
     limitations = [
         "Anomalies reflect statistical deviation from local terrain/spectral "
@@ -389,6 +477,45 @@ def build_investigation_record(
             for a in seventh_anomalies
         ]
 
+    # Temporal Persistence (eighth) -- see this module's own EIGHTH
+    # EVIDENCE SLOT docstring section for the three design decisions
+    # behind this shape. Like Stability, only appended when there is at
+    # least one real item to report (decision 1 means this will in
+    # practice almost always be non-empty once any DEM candidate
+    # exists, but the check is kept for the same "no misleading
+    # zero-candidates entry" reason as Stability, and to stay correct
+    # for a future run where persistence checking is disabled/skipped
+    # entirely for some external reason). Per decision 3: NO
+    # derived_products entry (not a new measurement source), and
+    # eighth_evidence_detail is NEVER read by correlation() or folded
+    # into supporting_sources -- it feeds Scientific Steward as a
+    # confidence-ceiling input only (mechanism designed separately,
+    # alongside steward_confidence_ceiling.py).
+    if eighth_anomalies:
+        if eighth_evidence is not None:
+            evidence.append(eighth_evidence.as_evidence_record())
+        limitations.append(
+            "Temporal persistence evidence in this run checked whether "
+            "each DEM candidate's NDVI/Thermal/Optical anomaly signal (see "
+            "the corresponding evidence item(s) above) reproduces across "
+            "multiple independent real satellite acquisitions in a wider "
+            "time window, rather than reflecting a single snapshot -- see "
+            "the evidence item's own record above and each candidate's own "
+            "ndvi/thermal/optical persistence_score for the real "
+            "per-candidate results. A candidate whose signal could not be "
+            "tested this run (e.g. persistent regional cloud cover, or a "
+            "source that was never attempted for that candidate) has an "
+            "honest untested/None score for that source, not an "
+            "assumed-unstable one. Real seasonal vegetation/thermal cycles "
+            "mean an inconsistent signal across months is not automatically "
+            "evidence AGAINST a buried feature -- this measures "
+            "reproducibility, not causation."
+        )
+        eighth_evidence_detail = [
+            {**asdict(a), "evidence_type": "TEMPORAL_PERSISTENCE"}
+            for a in eighth_anomalies
+        ]
+
     correlation_dicts = []
     if correlation_results:
         for r in correlation_results:
@@ -415,7 +542,7 @@ def build_investigation_record(
                 f"This is genuine independent corroboration; confidence should be "
                 f"treated as MODERATE to HIGH pending field verification."
             )
-            # CONFIDENCE-STATEMENT WORDING FIX (this session -- see module
+            # CONFIDENCE-STATEMENT WORDING FIX (a prior session -- see module
             # docstring): only append the "N additional single-source
             # candidate(s) remain LOW confidence" sentence when there is
             # actually a nonzero count to report. Previously this ran
@@ -479,5 +606,7 @@ def build_investigation_record(
         record_kwargs["sixth_evidence_detail"] = sixth_evidence_detail
     if seventh_evidence_detail:
         record_kwargs["seventh_evidence_detail"] = seventh_evidence_detail
+    if eighth_evidence_detail:
+        record_kwargs["eighth_evidence_detail"] = eighth_evidence_detail
 
     return InvestigationRecord(**record_kwargs)
