@@ -39,7 +39,7 @@ means "not tested," not "unstable" -- it applies NO cap and changes
 NOTHING about this function's existing behavior. Only a candidate that
 WAS tested and came back fragile is affected.
 
-EVIDENCE-INDEPENDENCE WEIGHTING EXTENSION (ADDED THIS SESSION): the
+EVIDENCE-INDEPENDENCE WEIGHTING EXTENSION (a prior session): the
 source-count gate below previously used matrix.independent_used_sources
 -- a flat, equally-weighted count of distinct used evidence categories.
 This could not distinguish a candidate corroborated by NDVI+Thermal+
@@ -64,6 +64,64 @@ the reasoning trace alongside the weighted value, so nothing about the
 original evidence-category count disappears from the explanation --
 it is now presented honestly alongside its weighted counterpart rather
 than being the sole number quoted.
+
+TEMPORAL PERSISTENCE EXTENSION (ADDED THIS SESSION): a `persistence_score`
+(optional, see below) describes whether the remote-sensing signal(s)
+that actually corroborated this candidate (NDVI/Thermal/Optical) hold
+up across MULTIPLE real, independent satellite acquisitions over a
+wider time window, rather than reflecting a single pooled snapshot --
+see investigation_multi_mobile.py's TemporalPersistenceResult and
+evidence_record.py's own EIGHTH EVIDENCE SLOT docstring for the full
+background (queue item 2, decision 3 specifically: persistence is NOT
+a new independent evidence source, it is a robustness check on the
+EXISTING corroborating signals).
+
+DELIBERATELY A SOFTER MECHANISM THAN DETECTION STABILITY, NOT A COPY OF
+IT -- this was the one open design question left from decision 3
+("unconditional cap vs. softer signal, to be designed when building
+steward_confidence_ceiling.py's side of this"), resolved here as
+follows. Detection Stability questions whether the DEM candidate's own
+elevation anomaly EXISTS as a reproducible physical feature at all --
+if the foundation itself isn't reproducible, nothing built on top of
+it matters, which is why it caps unconditionally at the very top of
+compute_confidence_band(), before field validation or source count are
+even consulted. Temporal Persistence is a different kind of question:
+it asks whether one of SEVERAL corroborating signals for a candidate
+whose underlying DEM detection is otherwise sound stays consistent
+over time. Critically, per this project's own documented honesty
+principle (see investigation_multi_mobile.py's/evidence_record.py's
+own TEMPORAL PERSISTENCE docstrings): real seasonal vegetation/thermal
+cycles mean an inconsistent signal across months is NOT automatically
+evidence AGAINST a buried feature -- it can be a genuine transient or
+seasonal effect rather than an unreliable detection. Treating a low
+persistence_score with the same unconditional LOW/MODERATE-crashing
+severity as a genuine detection instability or a real contradiction
+would therefore overstate what the evidence supports. Instead,
+persistence_score is consulted ONLY at the point where the function
+would otherwise return the TOP band, SUBSTANTIAL (i.e. inside the
+has_field_validation branch, AFTER the contradiction/stability/source-
+count/confounder gates have already all passed) -- a weak persistence
+signal there caps that specific return at HIGH instead of SUBSTANTIAL,
+with an honest reasoning line explaining why, rather than reaching back
+to override any of the earlier, unconditional gates. This is a
+narrower, more targeted mechanism than Stability's, matching the
+narrower and more ambiguous nature of what persistence actually tells
+us.
+
+`persistence_score` is a single, ALREADY-REDUCED scalar (see
+debate_mobile.py's own _compute_persistence_score_for_steward() for
+exactly how investigation_multi_mobile.py's/evidence_record.py's raw
+per-candidate ndvi/thermal/optical sub-dicts are reduced down to this
+one value before it ever reaches this module) -- this module has no
+knowledge of, and does not need, the underlying per-source breakdown.
+persistence_score=None (the default, and the value for any candidate
+where persistence checking never produced a usable signal -- no
+corroborating source was NDVI/THERMAL/OPTICAL, or every corroborating
+source's own persistence check was itself untestable/hard-failed for
+this candidate) means "not applicable," not "weak" -- it applies NO
+cap and changes NOTHING about this function's existing SUBSTANTIAL
+branch. Only a candidate with a genuinely computed, genuinely low
+persistence_score is affected.
 """
 
 from __future__ import annotations
@@ -91,6 +149,19 @@ STABILITY_MODERATE_CAP_THRESHOLD = 0.7  # below this (and >= LOW threshold): cap
 # groups (e.g. DEM + any one other group, or two non-elevation groups
 # together).
 EFFECTIVE_SOURCES_MULTI_GROUP_THRESHOLD = 2.0
+
+# Minimum fraction of temporally-testable acquisitions a candidate's
+# corroborating remote-sensing signal must have been independently
+# detected in to reach SUBSTANTIAL confidence. Deliberately a LOW bar
+# (roughly one in three) -- see module docstring, TEMPORAL PERSISTENCE
+# EXTENSION: this is meant to catch a genuinely rare/weak signal, not
+# to demand near-perfect reproduction across every real acquisition,
+# since real seasonal variation is expected and honest. A first real
+# calibration, not a settled scientific constant, matching the same
+# "expect this to be revisited" framing as the stability thresholds
+# above -- there is not yet enough real multi-acquisition on-device
+# data to calibrate this more precisely.
+PERSISTENCE_SUBSTANTIAL_CAP_THRESHOLD = 1.0 / 3.0
 
 
 class ConfidenceBand(Enum):
@@ -148,6 +219,7 @@ def compute_confidence_band(
     has_contradiction: bool,
     stability_score: float | None = None,
     stability_z_range: tuple[float, float] | None = None,
+    persistence_score: float | None = None,
 ) -> tuple[ConfidenceBand, list[str]]:
     """
     Derives a ConfidenceBand from real, caller-supplied facts about a
@@ -165,6 +237,13 @@ def compute_confidence_band(
     matrix.effective_independent_sources (evidence-independence-weighted),
     not the raw matrix.independent_used_sources count -- see module
     docstring, EVIDENCE-INDEPENDENCE WEIGHTING EXTENSION, for why.
+
+    persistence_score (0-1, or None if not applicable -- see module
+    docstring, TEMPORAL PERSISTENCE EXTENSION) is consulted ONLY inside
+    the has_field_validation/SUBSTANTIAL branch, deliberately AFTER
+    every other gate above it has already passed -- a low score there
+    caps that specific return at HIGH instead of SUBSTANTIAL. Unlike
+    stability_score, it never affects any other branch or band.
     """
     reasoning: list[str] = []
 
@@ -253,6 +332,27 @@ def compute_confidence_band(
     reasoning.append("Environmental confounders were considered/controlled.")
 
     if has_field_validation:
+        # TEMPORAL PERSISTENCE EXTENSION (ADDED THIS SESSION -- see
+        # module docstring for the full reasoning on why this is
+        # consulted ONLY here, deliberately after every earlier gate
+        # has already passed, and why it caps at HIGH rather than
+        # crashing to LOW/MODERATE the way stability_score above does).
+        if persistence_score is not None and persistence_score < PERSISTENCE_SUBSTANTIAL_CAP_THRESHOLD:
+            reasoning.append(
+                f"Field validation (GPR/ERT pick colocated with this "
+                f"candidate) is present, which would otherwise support "
+                f"SUBSTANTIAL confidence, but the corroborating remote-"
+                f"sensing signal for this candidate was only "
+                f"independently detected in {persistence_score:.0%} of "
+                f"temporally-tested real acquisitions -- this may "
+                f"reflect a genuine transient or seasonal signal rather "
+                f"than an unreliable detection (real vegetation/thermal "
+                f"cycles are honest, expected variation, not "
+                f"automatically evidence against a buried feature), but "
+                f"confidence is capped at HIGH rather than SUBSTANTIAL "
+                f"until more temporal evidence accumulates."
+            )
+            return ConfidenceBand.HIGH, reasoning
         reasoning.append(
             "Field validation (GPR/ERT pick colocated with this candidate) is present; "
             "ceiling raised substantially."
@@ -275,6 +375,7 @@ def govern_confidence(
     has_contradiction: bool = False,
     stability_score: float | None = None,
     stability_z_range: tuple[float, float] | None = None,
+    persistence_score: float | None = None,
 ) -> ConfidenceCeilingResult:
     """
     Main entry point. Takes a raw confidence value (e.g. from the
@@ -287,7 +388,10 @@ def govern_confidence(
 
     stability_score/stability_z_range are optional (default None =
     "not tested for this candidate" -- see module docstring); passed
-    straight through to compute_confidence_band().
+    straight through to compute_confidence_band(). persistence_score is
+    likewise optional (default None = "not applicable" -- see module
+    docstring, TEMPORAL PERSISTENCE EXTENSION); also passed straight
+    through.
     """
     raw_confidence = max(0.0, min(1.0, raw_confidence))
 
@@ -298,6 +402,7 @@ def govern_confidence(
         has_contradiction,
         stability_score=stability_score,
         stability_z_range=stability_z_range,
+        persistence_score=persistence_score,
     )
     ceiling = band.numeric_ceiling
     clamped = min(raw_confidence, ceiling)
