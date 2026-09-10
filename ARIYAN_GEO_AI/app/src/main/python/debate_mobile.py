@@ -135,6 +135,43 @@ candidate, since Scientific Steward needs the actual score value, not
 just a yes/no -- see _build_steward_report() below for exactly how it's
 read and passed through to steward_engine.evaluate_candidate().
 
+TEMPORAL PERSISTENCE EXTENSION, ADDED THIS SESSION -- closes out queue
+item 2: unlike GPR/ERT (single site-anchored readings) and unlike
+Detection Stability (borderline-only subset), Temporal Persistence
+(evidence_record.py's eighth evidence slot -- see
+investigation_multi_mobile.py's _run_temporal_persistence_checks()) is
+run UNCONDITIONALLY for every DEM candidate, mirroring Thermal's/
+Optical's own per-candidate anchoring exactly -- so matching uses the
+SAME tight-tolerance exact-match approach as
+_attach_thermal_detail()/_attach_optical_detail()/_attach_stability_detail()
+via _attach_temporal_persistence_detail() below. Unlike those four
+(which each attach a single source's result), each
+eighth_evidence_detail entry is itself a COMBINATION of all three
+sources -- ndvi/thermal/optical sub-dicts, each None on a hard
+per-source fetch failure for that candidate (see
+evidence_record.py's own EIGHTH EVIDENCE SLOT docstring, decision 2,
+for why this is one combined slot rather than three separate ones) --
+so _attach_temporal_persistence_detail() attaches the WHOLE matched
+entry onto candidate["temporal_persistence"] rather than a single
+boolean or scalar.
+
+Scientific Steward, however, needs ONE reduced scalar, not the raw
+per-source breakdown -- see _compute_persistence_score_for_steward()
+below for exactly how candidate["temporal_persistence"]'s ndvi/thermal/
+optical sub-dicts are reduced down to the single persistence_score
+value passed to steward_engine.evaluate_candidate(). Per
+evidence_record.py's own locked design decision 3, this is explicitly
+NOT counted as a new independent EvidenceCategory and never folded into
+either of the "sources"/"checked_sources" concepts described in
+SOURCES-SPLIT FIX below (same reasoning as Detection Stability, for the
+same underlying reason: it is a robustness check on existing signals,
+not new corroborating evidence) -- it is read only via its own
+dedicated candidate["temporal_persistence"] field, feeding Scientific
+Steward's confidence ceiling as a SOFTER, narrower input than Detection
+Stability's unconditional cap -- see steward_confidence_ceiling.py's
+own TEMPORAL PERSISTENCE EXTENSION docstring for the full reasoning on
+why this deliberately does not mirror Stability's mechanism.
+
 SOURCES-SPLIT FIX (a prior session -- REAL on-device bug, unaffected by
 Optical's, ERT's, or Stability's addition): candidate["sources"] is the
 PRECISE list of sources that actually corroborated this candidate
@@ -158,7 +195,10 @@ source at all (a stable detection isn't NEW evidence for a hypothesis,
 it's a statement about how much the existing DEM evidence can be
 trusted) -- see steward_confidence_ceiling.py's own docstring for why
 it's read as a confidence-ceiling modifier instead, never counted as an
-EvidenceCategory or folded into either sources list here.
+EvidenceCategory or folded into either sources list here. Temporal
+Persistence (ADDED THIS SESSION) doesn't participate in it either, for
+the SAME reason as Detection Stability -- see the TEMPORAL PERSISTENCE
+EXTENSION note above.
 
 NDVI PRECISION FIX (this session -- REAL on-device bug, previously
 flagged as deferred): a real investigation run showed candidate
@@ -271,6 +311,22 @@ guessing, per this project's zero-fabrication rule:
     four values all default to None, meaning "not tested," not
     "unstable." See steward_confidence_ceiling.py's own docstring for
     exactly how these feed into the confidence ceiling.
+  - persistence_score (ADDED THIS SESSION): real, but a REDUCED value,
+    not a raw field read straight off the candidate -- computed by
+    _compute_persistence_score_for_steward() below from candidate
+    ["temporal_persistence"]'s ndvi/thermal/optical sub-dicts (set by
+    _attach_temporal_persistence_detail()), restricted to ONLY the
+    sources that actually appear in this candidate's own precise
+    candidate["sources"] list (checking the persistence of a source
+    that never corroborated this candidate would be meaningless), and
+    reduced to the MINIMUM (worst) persistence_score among those --
+    Steward should act on the weakest corroborating signal, not an
+    average. None (meaning "not applicable," never "unstable" -- see
+    steward_confidence_ceiling.py's own docstring) when this candidate
+    has no temporal_persistence entry, none of its corroborating
+    sources are NDVI/THERMAL/OPTICAL, or every corroborating source's
+    own persistence check was itself untestable/hard-failed for this
+    candidate.
   - raw_debate_confidence: real, taken directly from
     synthesis["leading_confidence"] (0.0 when NO_DATA / absent, which
     correctly yields the Steward's NO_DATA band).
@@ -600,6 +656,109 @@ def _attach_stability_detail(
         candidate["stability_z_range"] = (z_min, z_max)
 
 
+def _attach_temporal_persistence_detail(
+    candidate: dict,
+    anomaly: dict,
+    eighth_evidence_detail: list[dict],
+    tolerance_m: float = _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M,
+) -> None:
+    """Sets candidate["temporal_persistence"] to the matched
+    TemporalPersistenceResult-shaped dict (ndvi/thermal/optical
+    sub-fields, each None on a hard per-source fetch failure for that
+    candidate) -- ADDED THIS SESSION, see module docstring, TEMPORAL
+    PERSISTENCE EXTENSION.
+
+    eighth_evidence_detail entries are anchored at each DEM candidate's
+    own exact (lat, lon) (per evidence_record.py's decision 1 -- runs
+    unconditionally for every DEM candidate, not a borderline subset),
+    so this uses the SAME tight-tolerance exact-match approach as
+    _attach_thermal_detail()/_attach_optical_detail()/
+    _attach_stability_detail() -- but attaches the WHOLE matched entry
+    (all three sub-dicts together), not a single boolean or scalar,
+    since Scientific Steward needs the real per-source breakdown to
+    compute its own reduced value (see
+    _compute_persistence_score_for_steward() below) -- same reasoning
+    as why _attach_stability_detail() above attaches the real
+    stability_score rather than a boolean.
+
+    A candidate with no matching entry (shouldn't normally happen given
+    the unconditional-per-candidate design, but handled honestly
+    regardless -- e.g. persistence checking entirely unavailable this
+    run) simply has no "temporal_persistence" key set -- see
+    _compute_persistence_score_for_steward() below for how that
+    absence is read downstream as "not applicable," never "unstable."
+    """
+    best = None
+    best_dist = None
+    for entry in eighth_evidence_detail:
+        try:
+            e_point = GeoPoint(entry["lat"], entry["lon"])
+            a_point = GeoPoint(anomaly["lat"], anomaly["lon"])
+            dist = haversine_distance_m(a_point, e_point)
+        except (KeyError, TypeError):
+            continue
+        if best_dist is None or dist < best_dist:
+            best = entry
+            best_dist = dist
+
+    if best is None or best_dist is None or best_dist > tolerance_m:
+        return  # no matching entry -- leave temporal_persistence unset
+
+    candidate["temporal_persistence"] = best
+
+
+def _compute_persistence_score_for_steward(candidate: dict) -> Optional[float]:
+    """Reduces candidate["temporal_persistence"]'s ndvi/thermal/optical
+    sub-dicts down to the SINGLE scalar Scientific Steward actually
+    consumes -- ADDED THIS SESSION, see steward_confidence_ceiling.py's
+    own TEMPORAL PERSISTENCE EXTENSION docstring for how this value is
+    used once it gets there.
+
+    ONLY considers sources that actually CORROBORATED this candidate
+    (candidate["sources"] -- the precise list, see this module's own
+    SOURCES-SPLIT FIX note) intersected with NDVI/THERMAL/OPTICAL --
+    checking the persistence of a source that never corroborated this
+    candidate in the first place would be meaningless (there is no
+    corroborating signal to ask "did it persist?" about). GPR/ERT are
+    never in this intersection since neither ever appears in
+    candidate["sources"] (see this module's own docstring).
+
+    Among the corroborating sources' own persistence_score values (only
+    those that are genuinely non-None -- i.e. that source's persistence
+    check was actually testable for this candidate, not a hard fetch
+    failure or a too-thin sample), returns the MINIMUM (worst) one --
+    Steward should be conservative: if any one of the sources actually
+    credited toward CORROBORATED status shows weak temporal
+    reproducibility, that is the honest signal to act on, not averaged
+    away by a stronger-persisting sibling source.
+
+    Returns None (meaning "not applicable," never "unstable" -- see
+    steward_confidence_ceiling.py's own docstring) when: this candidate
+    has no temporal_persistence entry at all, none of its corroborating
+    sources are NDVI/THERMAL/OPTICAL (e.g. a GPR/ERT-only corroboration),
+    or every corroborating source's own persistence check was itself
+    untestable (persistence_score None) or hard-failed (sub-dict None)
+    for this candidate.
+    """
+    persistence = candidate.get("temporal_persistence")
+    if not persistence:
+        return None
+    corroborating_sources = set(candidate.get("sources") or [])
+    scores: list[float] = []
+    for source_key, source_name in (("ndvi", "NDVI"), ("thermal", "THERMAL"), ("optical", "OPTICAL")):
+        if source_name not in corroborating_sources:
+            continue
+        sub = persistence.get(source_key)
+        if not sub:
+            continue
+        score = sub.get("persistence_score")
+        if score is not None:
+            scores.append(score)
+    if not scores:
+        return None
+    return min(scores)
+
+
 def _build_candidate(
     anomaly: dict,
     correlation_entry: Optional[dict],
@@ -712,6 +871,11 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
     stability_windows_fetched = candidate.get("stability_windows_fetched")
     stability_z_range = candidate.get("stability_z_range")
 
+    # TEMPORAL PERSISTENCE EXTENSION (ADDED THIS SESSION): see this
+    # module's own docstring, HONEST MAPPING NOTES, for exactly how
+    # this reduced value is computed and what None means here.
+    persistence_score = _compute_persistence_score_for_steward(candidate)
+
     synthesis = debate.get("synthesis") or {}
     raw_confidence = float(synthesis.get("leading_confidence") or 0.0)
     agreement_level = synthesis.get("agreement_level", "NO_DATA")
@@ -754,6 +918,7 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
         stability_windows_detected=stability_windows_detected,
         stability_windows_fetched=stability_windows_fetched,
         stability_z_range=stability_z_range,
+        persistence_score=persistence_score,
         interpretation=steward_note,
         hypothesis=hypothesis,
         alternative_hypotheses=alternative_hypotheses,
@@ -773,6 +938,7 @@ def run_debate_json(investigation_json: str) -> str:
         fourth_evidence_detail = investigation.get("fourth_evidence_detail") or []
         fifth_evidence_detail = investigation.get("fifth_evidence_detail") or []
         seventh_evidence_detail = investigation.get("seventh_evidence_detail") or []
+        eighth_evidence_detail = investigation.get("eighth_evidence_detail") or []
         context = _build_context(investigation)
 
         gpr_item = _gpr_evidence_item(evidence)
@@ -799,6 +965,7 @@ def run_debate_json(investigation_json: str) -> str:
             _attach_thermal_detail(candidate, anomaly, fourth_evidence_detail)
             _attach_optical_detail(candidate, anomaly, fifth_evidence_detail)
             _attach_stability_detail(candidate, anomaly, seventh_evidence_detail)
+            _attach_temporal_persistence_detail(candidate, anomaly, eighth_evidence_detail)
 
             # NDVI PRECISION FIX (this session -- see module docstring):
             # candidate["checked_sources"] was built above from
