@@ -32,6 +32,12 @@ class EvidenceCategory(Enum):
     It is therefore deliberately excluded from
     EvidenceMatrix.independent_used_sources (see below), so it can
     never silently inflate the confidence ceiling.
+
+    SAR (ADDED THIS SESSION): real Sentinel-1 backscatter core/halo
+    check (sar_source_mobile.py) -- a genuine, independent physical
+    measurement mechanism (active radar), not folded into OPTICAL/
+    THERMAL/NDVI's existing passive-imagery group -- see
+    INDEPENDENCE_GROUPS below.
     """
 
     GPS = "GPS"
@@ -42,6 +48,7 @@ class EvidenceCategory(Enum):
     THERMAL = "THERMAL"
     LIDAR = "LIDAR"
     ERT = "ERT"
+    SAR = "SAR"
 
 
 # Categories that count toward "independent evidence supporting/contradicting
@@ -60,12 +67,13 @@ CONTENT_EVIDENCE_CATEGORIES = frozenset(
         EvidenceCategory.THERMAL,
         EvidenceCategory.LIDAR,
         EvidenceCategory.ERT,
+        EvidenceCategory.SAR,
     }
 )
 
 
 # ---------------------------------------------------------------------------
-# Evidence-independence weighting (ADDED THIS SESSION)
+# Evidence-independence weighting
 # ---------------------------------------------------------------------------
 #
 # WHY THIS EXISTS: independent_used_sources (below) is a flat, equally-
@@ -87,11 +95,25 @@ CONTENT_EVIDENCE_CATEGORIES = frozenset(
 # unbuilt, never available in this project). GPS is excluded entirely
 # (see CONTENT_EVIDENCE_CATEGORIES above) -- it never participates in
 # independence weighting either.
+#
+# SAR (ADDED THIS SESSION) gets its OWN group, "radar", rather than
+# being folded into "optical_family" alongside NDVI/THERMAL/OPTICAL --
+# unlike those three (all passive imagery from the same Sentinel-2/
+# Landsat overpasses via the same Copernicus Statistical API), SAR is
+# an ACTIVE radar measurement with a genuinely different physical
+# mechanism (backscatter driven by dielectric/roughness properties, not
+# reflected/emitted light), a different satellite platform (Sentinel-1,
+# not Sentinel-2/Landsat), and a different real-world failure mode
+# (unaffected by cloud cover, unlike the other three). Folding it into
+# optical_family would understate its real independence; giving it its
+# own group lets a candidate corroborated by, say, NDVI+SAR count as
+# genuinely multi-mechanism evidence, exactly as DEM+GPR already does.
 INDEPENDENCE_GROUPS: dict[str, frozenset[EvidenceCategory]] = {
     "elevation": frozenset({EvidenceCategory.DEM}),
     "optical_family": frozenset(
         {EvidenceCategory.NDVI, EvidenceCategory.THERMAL, EvidenceCategory.OPTICAL}
     ),
+    "radar": frozenset({EvidenceCategory.SAR}),
     "field_verification": frozenset({EvidenceCategory.GPR, EvidenceCategory.ERT}),
     "lidar": frozenset({EvidenceCategory.LIDAR}),
 }
@@ -112,7 +134,10 @@ INDEPENDENCE_GROUPS: dict[str, frozenset[EvidenceCategory]] = {
 # stacks -- can ever, by itself, reach the "multiple independent
 # sources" tier. Reaching that tier now requires sources from at least
 # two DIFFERENT groups, which is the actual definition of independence
-# this fix is trying to encode.
+# this fix is trying to encode. SAR's own group has only one member
+# (SAR itself), so it can never reach the cap on its own either -- it
+# simply always contributes its single-category weight (1.0) when used,
+# same as "elevation" (DEM alone).
 _GROUP_WEIGHT_BY_USED_COUNT: dict[int, float] = {
     0: 0.0,
     1: 1.0,
@@ -186,10 +211,9 @@ class EvidenceMatrix:
         Number of distinct AVAILABLE-AND-USED CONTENT evidence categories
         (i.e. excluding GPS -- see EvidenceCategory docstring). This is
         the RAW, unweighted count -- unchanged by the evidence-
-        independence weighting added this session (see
-        effective_independent_sources below for the weighted
-        alternative). Kept as-is since other code may already depend on
-        this exact raw value.
+        independence weighting (see effective_independent_sources below
+        for the weighted alternative). Kept as-is since other code may
+        already depend on this exact raw value.
         """
         return sum(
             1
@@ -201,14 +225,16 @@ class EvidenceMatrix:
     def effective_independent_sources(self) -> float:
         """
         Evidence-independence-weighted alternative to
-        independent_used_sources (ADDED THIS SESSION). Sources that
-        share a common measurement lineage (see INDEPENDENCE_GROUPS
-        above) are NOT each credited as a full additional independent
-        confirmation -- only the first source in a group counts fully,
-        with steeply diminishing credit for additional sources in that
-        SAME group (see _GROUP_WEIGHT_BY_USED_COUNT above). Sources in
-        DIFFERENT groups always add full weight to each other, since
-        they represent genuinely distinct measurement mechanisms.
+        independent_used_sources. Sources that share a common
+        measurement lineage (see INDEPENDENCE_GROUPS above) are NOT
+        each credited as a full additional independent confirmation --
+        only the first source in a group counts fully, with steeply
+        diminishing credit for additional sources in that SAME group
+        (see _GROUP_WEIGHT_BY_USED_COUNT above). Sources in DIFFERENT
+        groups always add full weight to each other, since they
+        represent genuinely distinct measurement mechanisms -- this
+        includes SAR (its own "radar" group) relative to NDVI/THERMAL/
+        OPTICAL (the "optical_family" group).
 
         Because every group's weight is capped BELOW 2.0 (see
         _GROUP_WEIGHT_CAP's own docstring above), a value >= 2.0 here
@@ -227,11 +253,11 @@ class EvidenceMatrix:
 
     def independence_breakdown(self) -> list[dict]:
         """
-        Per-group breakdown behind effective_independent_sources
-        (ADDED THIS SESSION) -- for reasoning-trace text, so a Steward
-        explanation can say WHICH sources were discounted and why,
-        rather than just showing a single opaque number. Only includes
-        groups with at least one used category.
+        Per-group breakdown behind effective_independent_sources -- for
+        reasoning-trace text, so a Steward explanation can say WHICH
+        sources were discounted and why, rather than just showing a
+        single opaque number. Only includes groups with at least one
+        used category.
         """
         used_by_category = {e.category for e in self.content_used_entries}
         breakdown = []
@@ -282,6 +308,7 @@ def build_evidence_matrix(
     has_thermal: bool = False,
     has_lidar: bool = False,
     has_ert: bool = False,
+    has_sar: bool = False,
     quality_hints: dict | None = None,
     used_hints: dict | None = None,
     limitation_hints: dict | None = None,
@@ -292,6 +319,12 @@ def build_evidence_matrix(
     `limitation_hints` are optional dicts keyed by EvidenceCategory.value
     (e.g. "DEM") to override the defaults below with real, caller-supplied
     facts about that investigation's data -- never fabricated here.
+
+    has_sar (ADDED THIS SESSION): whether a real per-candidate Sentinel-1
+    SAR check genuinely succeeded for this candidate (mirrors has_thermal/
+    has_optical's own "checked, not necessarily detected" convention --
+    see debate_mobile.py's _build_steward_report() for exactly how this
+    is derived from the real per-candidate result).
     """
     quality_hints = quality_hints or {}
     used_hints = used_hints or {}
@@ -307,6 +340,7 @@ def build_evidence_matrix(
         EvidenceCategory.THERMAL: has_thermal,
         EvidenceCategory.LIDAR: has_lidar,
         EvidenceCategory.ERT: has_ert,
+        EvidenceCategory.SAR: has_sar,
     }
 
     for category, available in presence.items():
