@@ -35,16 +35,32 @@ None ("not tested for this candidate"), which changes NOTHING about
 this function's existing behavior for any candidate the automatic
 check didn't run against.
 
-TEMPORAL PERSISTENCE EXTENSION (ADDED THIS SESSION): evaluate_candidate()
-now also accepts an optional persistence_score parameter, threaded
-straight through to the SAME two functions -- see
+TEMPORAL PERSISTENCE EXTENSION (a prior session): evaluate_candidate()
+also accepts an optional persistence_score parameter, threaded straight
+through to the SAME two functions -- see
 steward_confidence_ceiling.py's own TEMPORAL PERSISTENCE EXTENSION
 docstring for the full background and for why this uses a narrower,
 softer mechanism (a cap on reaching SUBSTANTIAL only) than
 stability_score's unconditional LOW/MODERATE cap. Defaults to None
-("not applicable for this candidate" -- see that same docstring for
-exactly when that is), which changes NOTHING about this function's
-existing behavior for a candidate with no usable persistence signal.
+("not applicable for this candidate"), which changes NOTHING about this
+function's existing behavior for a candidate with no usable persistence
+signal.
+
+SAR EXTENSION (ADDED THIS SESSION): evaluate_candidate() now also
+accepts has_sar: bool = False, threaded straight through to
+build_evidence_matrix() alongside has_dem/has_ndvi/has_thermal/
+has_optical/has_ert/has_gpr/has_lidar -- SAR needs NO separate parameter
+into govern_confidence() itself (unlike stability_score/persistence_score,
+which are direct numeric ceiling inputs): SAR's effect on confidence is
+entirely mediated through the evidence matrix's own
+effective_independent_sources property (see
+steward_evidence_matrix.py's INDEPENDENCE_GROUPS, where SAR has its own
+"radar" group, genuinely independent from NDVI/THERMAL/OPTICAL's
+"optical_family" group) -- govern_confidence() already reads that
+property generically, exactly as it already did for has_ert's addition.
+Defaults to False ("SAR was not checked or did not succeed for this
+candidate"), which changes NOTHING about this function's existing
+behavior for a candidate SAR wasn't run against.
 
 This module is intentionally self-contained (new files only, zero
 changes to any existing file outside the Steward chain) so it can be
@@ -119,6 +135,7 @@ def evaluate_candidate(
     has_thermal: bool = False,
     has_lidar: bool = False,
     has_ert: bool = False,
+    has_sar: bool = False,
     quality_hints: dict | None = None,
     used_hints: dict | None = None,
     limitation_hints: dict | None = None,
@@ -162,12 +179,21 @@ def evaluate_candidate(
     meaning "not tested for this candidate," which applies no cap and
     generates no warning.
 
-    `persistence_score` (ADDED THIS SESSION) describes the optional
-    temporal-persistence robustness check on this candidate's
-    corroborating NDVI/Thermal/Optical signal(s) -- see
-    steward_confidence_ceiling.py's own TEMPORAL PERSISTENCE EXTENSION
-    docstring. Defaults to None, meaning "not applicable for this
-    candidate," which applies no cap and generates no warning.
+    `persistence_score` describes the optional temporal-persistence
+    robustness check on this candidate's corroborating NDVI/Thermal/
+    Optical signal(s) -- see steward_confidence_ceiling.py's own
+    TEMPORAL PERSISTENCE EXTENSION docstring. Defaults to None, meaning
+    "not applicable for this candidate," which applies no cap and
+    generates no warning.
+
+    `has_sar` (ADDED THIS SESSION) describes whether a real per-
+    candidate Sentinel-1 SAR check genuinely succeeded for this
+    candidate -- passed straight through to build_evidence_matrix()
+    below. Its effect on the confidence ceiling is entirely mediated by
+    the evidence matrix's effective_independent_sources property (SAR
+    has its own independence group -- see steward_evidence_matrix.py),
+    so no separate SAR-specific parameter is needed on govern_confidence()
+    itself.
     """
     alternative_hypotheses = alternative_hypotheses or []
     contradictions = contradictions or []
@@ -182,6 +208,7 @@ def evaluate_candidate(
         has_thermal=has_thermal,
         has_lidar=has_lidar,
         has_ert=has_ert,
+        has_sar=has_sar,
         quality_hints=quality_hints,
         used_hints=used_hints,
         limitation_hints=limitation_hints,
