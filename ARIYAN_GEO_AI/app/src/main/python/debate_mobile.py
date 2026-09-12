@@ -713,6 +713,63 @@ def _attach_stability_detail(
         candidate["stability_z_range"] = (z_min, z_max)
 
 
+def _attach_dem_cross_check_detail(
+    candidate: dict,
+    anomaly: dict,
+    tenth_evidence_detail: list[dict],
+    tolerance_m: float = _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M,
+) -> None:
+    """ADDED THIS SESSION. Sets candidate["dem_cross_check_tested"] and
+    candidate["dem_cross_check_confirmed"] from investigation_multi_
+    mobile.py's real per-candidate DemCrossCheckResult list (evidence_
+    record.py's tenth evidence slot) -- see that module's own DEM
+    CROSS-CHECK section for the full design reasoning (COP30 vs.
+    NASADEM, why this is a robustness check on DEM rather than new
+    independent evidence).
+
+    Mirrors _attach_stability_detail() above, not the shared
+    _attach_per_candidate_detail() boolean-only helper -- like
+    Stability, this needs to distinguish "genuinely tested and did not
+    reproduce" (a real negative result that should cap confidence) from
+    "never tested" (e.g. the second dataset's fetch failed for this
+    run, or genuinely has no coverage here), which a single boolean
+    read off DemCrossCheckResult.cross_dem_confirmed alone cannot do --
+    DemCrossCheckResult.error being set means "untested", NOT "failed
+    to reproduce".
+
+    candidate["dem_cross_check_tested"] is True only when a matching
+    entry exists AND its own error field is None (the second-dataset
+    fetch/detection genuinely ran for this candidate, whether or not it
+    confirmed). candidate["dem_cross_check_confirmed"] mirrors
+    DemCrossCheckResult.cross_dem_confirmed directly, but is only
+    meaningful when dem_cross_check_tested is True -- a Steward-side
+    consumer must check dem_cross_check_tested first (see
+    _build_steward_report() below), exactly like stability_score's own
+    None-means-untested convention.
+
+    A candidate with no matching entry at all (shouldn't normally
+    happen given the unconditional-per-candidate design, but handled
+    honestly regardless) leaves both keys unset."""
+    best = None
+    best_dist = None
+    for entry in tenth_evidence_detail:
+        try:
+            e_point = GeoPoint(entry["lat"], entry["lon"])
+            a_point = GeoPoint(anomaly["lat"], anomaly["lon"])
+            dist = haversine_distance_m(a_point, e_point)
+        except (KeyError, TypeError):
+            continue
+        if best_dist is None or dist < best_dist:
+            best = entry
+            best_dist = dist
+
+    if best is None or best_dist is None or best_dist > tolerance_m:
+        return  # no matching entry -- leave dem_cross_check_* keys unset
+
+    candidate["dem_cross_check_tested"] = best.get("error") is None
+    candidate["dem_cross_check_confirmed"] = bool(best.get("cross_dem_confirmed"))
+
+
 def _attach_temporal_persistence_detail(
     candidate: dict,
     anomaly: dict,
@@ -928,6 +985,21 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
     has_sar = bool(candidate.get("sar_checked"))
     has_ert = bool(candidate.get("ert_confirmed"))
 
+    # DEM CROSS-CHECK (ADDED THIS SESSION): candidate["dem_cross_check_tested"]/
+    # candidate["dem_cross_check_confirmed"] are now attached (see
+    # _attach_dem_cross_check_detail() above) and available here, but are
+    # NOT YET passed into steward_evaluate_candidate() below -- doing so
+    # correctly requires adding a matching parameter to
+    # steward_engine.evaluate_candidate() AND the actual unconditional-cap
+    # logic in steward_confidence_ceiling.govern_confidence() (mirroring
+    # stability_score's own priority tier), which requires the REAL
+    # current content of both files, not a guess. Deliberately deferred to
+    # avoid silently breaking already-working Steward Stage 1 behavior --
+    # same discipline this project already applies everywhere else
+    # (verify against real files, never guess at a codebase's internals).
+    # dem_cross_check_tested = candidate.get("dem_cross_check_tested")
+    # dem_cross_check_confirmed = candidate.get("dem_cross_check_confirmed")
+
     stability_score = candidate.get("stability_score")
     stability_windows_detected = candidate.get("stability_windows_detected")
     stability_windows_fetched = candidate.get("stability_windows_fetched")
@@ -1003,6 +1075,7 @@ def run_debate_json(investigation_json: str) -> str:
         seventh_evidence_detail = investigation.get("seventh_evidence_detail") or []
         eighth_evidence_detail = investigation.get("eighth_evidence_detail") or []
         ninth_evidence_detail = investigation.get("ninth_evidence_detail") or []
+        tenth_evidence_detail = investigation.get("tenth_evidence_detail") or []
         context = _build_context(investigation)
 
         gpr_item = _gpr_evidence_item(evidence)
@@ -1029,6 +1102,7 @@ def run_debate_json(investigation_json: str) -> str:
             _attach_thermal_detail(candidate, anomaly, fourth_evidence_detail)
             _attach_optical_detail(candidate, anomaly, fifth_evidence_detail)
             _attach_sar_detail(candidate, anomaly, ninth_evidence_detail)
+            _attach_dem_cross_check_detail(candidate, anomaly, tenth_evidence_detail)
             _attach_stability_detail(candidate, anomaly, seventh_evidence_detail)
             _attach_temporal_persistence_detail(candidate, anomaly, eighth_evidence_detail)
 
