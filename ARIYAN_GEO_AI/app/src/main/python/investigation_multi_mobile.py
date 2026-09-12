@@ -752,6 +752,257 @@ def _select_stability_candidates(
     return eligible[:max_candidates]
 
 
+# --- SECOND INDEPENDENT DEM CROSS-CHECK (ADDED THIS SESSION) ---
+#
+# Checks whether a DEM candidate detected in the PRIMARY elevation
+# dataset (whatever `demtype` this run used -- SRTMGL1 by default) also
+# shows up as an anomaly in a SECOND, genuinely independent elevation
+# dataset, fetched ONCE over the same AOI and reused for every
+# candidate via nearest-match -- much cheaper than Detection Stability's
+# per-candidate multi-offset re-fetch, since there is only one second
+# dataset to check, not several offset windows.
+#
+# DATASET CHOICE, VERIFIED AGAINST REAL OPENTOPOGRAPHY DOCUMENTATION
+# (NOT the casually-obvious first guess): NASADEM is explicitly a
+# reprocessing of the SAME underlying SRTM radar acquisitions this
+# project's primary DEM already uses (per OpenTopography's own dataset
+# documentation) -- cross-checking against it would not be a genuinely
+# independent confirmation, just the same original radar data run
+# through a different pipeline. COP30 (Copernicus GLO-30) is derived
+# from the TanDEM-X mission -- a different agency (ESA, not NASA/NGA), a
+# different satellite pair, a different acquisition period (2011-2015
+# vs. SRTM's 2000 campaign) -- so a candidate that reproduces in BOTH is
+# real, independent elevation-value corroboration NASADEM could not
+# honestly provide. COP30 is also OpenTopography's own current default
+# global dataset, so it is well-supported and unlikely to be withdrawn.
+#
+# NOT COUNTED AS NEW INDEPENDENT EVIDENCE (unlike SAR): a second DEM
+# dataset measures the SAME physical quantity (elevation) via a
+# different processing pipeline, not a genuinely different physical
+# measurement mechanism the way radar/thermal/optical/vegetation-index
+# are relative to each other and to DEM. See evidence_record.py's own
+# TENTH EVIDENCE SLOT docstring for the full reasoning -- this follows
+# Detection Stability's/Temporal Persistence's philosophy (robustness
+# check, no derived_products entry, never folds into correlation()),
+# not SAR's (genuine new evidence source, own independence group).
+#
+# STEWARD CAP TIER: mirrors Detection Stability's own UNCONDITIONAL
+# LOW/MODERATE cap (not Temporal Persistence's softer SUBSTANTIAL-only
+# cap) -- a candidate whose elevation anomaly does not reproduce in a
+# second, genuinely independent DEM source is not rescued by any amount
+# of other corroborating evidence, exactly like a candidate that fails
+# Detection Stability's window-placement check. See
+# steward_confidence_ceiling.py for the actual cap wiring (a separate,
+# not-yet-updated file as of this session -- see this session's own
+# handoff note).
+
+DEM_CROSS_CHECK_DATASET_DEFAULT = "COP30"  # Copernicus GLO-30 -- see
+                                            # module comment above for
+                                            # why this, not NASADEM.
+
+DEM_CROSS_CHECK_MATCH_TOLERANCE_M_DEFAULT: float | None = None  # None =
+                                            # derive from
+                                            # aoi.cell_size_m * 4, same
+                                            # colocation-style default
+                                            # used elsewhere in this
+                                            # module (see
+                                            # STABILITY_MATCH_TOLERANCE_M_
+                                            # DEFAULT above).
+
+
+@dataclass
+class DemCrossCheckResult:
+    """Result of checking ONE primary DEM candidate against the second,
+    independent elevation dataset's own anomaly detection over the SAME
+    AOI. lat/lon match the naming convention every other per-candidate
+    evidence dataclass in this file uses, so evidence_record.py's
+    generic asdict() handling and debate_mobile.py's generic
+    per-candidate lat/lon matching both work unchanged.
+
+    cross_dem_confirmed is True when a matching anomaly was found in the
+    second dataset within match_tolerance_m of this candidate's own
+    location. cross_dem_peak_zscore/cross_dem_peak_residual_m are the
+    SECOND dataset's own real numbers for that matched candidate (None
+    if nothing matched -- an honest "not confirmed," not a fabricated
+    zero). distance_m is the real distance between the two candidates'
+    peak locations when a match was found.
+
+    error is set only when the SECOND DEM dataset's fetch itself failed
+    for this investigation's AOI (network/HTTP/no-coverage-at-this-
+    location) -- in that case EVERY candidate this run gets the SAME
+    honest error message and cross_dem_confirmed=False, mirroring how
+    NDVI/Thermal/Optical/SAR record a shared credentials/token failure
+    uniformly across every candidate rather than guessing per-candidate."""
+    lat: float
+    lon: float
+    cross_dem_confirmed: bool
+    cross_dem_peak_zscore: float | None = None
+    cross_dem_peak_residual_m: float | None = None
+    distance_m: float | None = None
+    error: str | None = None
+
+
+class DemCrossCheckEvidence:
+    """Wrapper satisfying build_investigation_record's `tenth_evidence`
+    interface (.as_evidence_record(), .source, .synthetic), describing
+    the METHOD used this run (second dataset name, match tolerance,
+    candidate/error counts) rather than any one candidate's result --
+    mirrors StabilityCheckEvidence in shape (no derived_products
+    entry -- see evidence_record.py's own TENTH EVIDENCE SLOT
+    docstring for why)."""
+
+    synthetic = False
+
+    def __init__(
+        self,
+        second_dataset: str,
+        n_candidates_checked: int,
+        n_confirmed: int,
+        n_fetch_errors: int,
+    ):
+        self.second_dataset = second_dataset
+        self.n_candidates_checked = n_candidates_checked
+        self.n_confirmed = n_confirmed
+        self.n_fetch_errors = n_fetch_errors
+        self.source = (
+            f"OpenTopography {second_dataset} (a second, genuinely independent "
+            f"global elevation dataset, fetched once over this investigation's "
+            f"AOI and cross-checked against the primary DEM's own detected "
+            f"candidates)"
+        )
+
+    def as_evidence_record(self) -> dict:
+        return {
+            "evidence_type": "DEM_CROSS_CHECK",
+            "source": self.source,
+            "synthetic": self.synthetic,
+            "method": (
+                f"The {self.second_dataset} elevation dataset is fetched once "
+                f"(live OpenTopography, same real-fetch pattern as the primary "
+                f"DEM) over this investigation's own AOI, and run through the "
+                f"SAME anomaly-detection algorithm (Gaussian regional-trend "
+                f"removal + z-score thresholding) with the SAME parameters "
+                f"(kernel sigma, z-score threshold) as the primary DEM. Each "
+                f"primary DEM candidate is then matched against the nearest "
+                f"candidate this second, independent dataset detected, within "
+                f"a colocation-style distance tolerance -- a genuine "
+                f"reproduction across two independently-acquired elevation "
+                f"datasets (different mission, different agency, different "
+                f"acquisition period than the primary dataset) is stronger "
+                f"evidence than a single dataset's own detection alone. This "
+                f"is a robustness check on the EXISTING DEM evidence, not a "
+                f"new independent evidence source -- see evidence_record.py's "
+                f"own TENTH EVIDENCE SLOT docstring for the full reasoning."
+            ),
+            "second_dataset": self.second_dataset,
+            "n_candidates_checked": self.n_candidates_checked,
+            "n_confirmed": self.n_confirmed,
+            "n_fetch_errors": self.n_fetch_errors,
+        }
+
+
+def _run_dem_cross_check(
+    dem_candidates: list,
+    aoi,
+    api_key: str,
+    offline_data_root: str,
+    dem_kernel_sigma_cells: float,
+    dem_zscore_threshold: float,
+    second_dataset: str = DEM_CROSS_CHECK_DATASET_DEFAULT,
+    match_tolerance_m: float | None = DEM_CROSS_CHECK_MATCH_TOLERANCE_M_DEFAULT,
+) -> list[DemCrossCheckResult]:
+    """Fetches `second_dataset` ONCE over `aoi` (live OpenTopography
+    only -- deliberately no offline fallback of its own: this is a
+    supplementary robustness check, not core DEM functionality, so an
+    unavailable second dataset is recorded as an honest per-candidate
+    "could not be tested" rather than falling back to any cached data
+    that might itself just be the primary dataset under another name),
+    runs the SAME real detect_anomalies() over it with the SAME
+    parameters as the primary DEM, then nearest-matches each primary
+    `dem_candidates` entry against the second dataset's own detected
+    candidates.
+
+    A second-dataset fetch failure (no api_key, network/HTTP error, or
+    no coverage for this AOI) is recorded as the SAME honest error
+    message on EVERY primary candidate's own DemCrossCheckResult --
+    mirroring how a shared Copernicus token failure is recorded
+    uniformly across every candidate for NDVI/Thermal/Optical/SAR above
+    -- and never raises out of this function; a cross-check failure
+    must never fail the primary investigation, exactly like Detection
+    Stability's own offset-fetch failures.
+
+    If `dem_candidates` is empty, returns an empty list without
+    attempting the second-dataset fetch at all (nothing to cross-check).
+    """
+    if not dem_candidates:
+        return []
+
+    if not api_key:
+        error_message = (
+            "No OpenTopography API key is configured yet -- the second "
+            f"independent DEM cross-check ({second_dataset}) uses the "
+            "same key as the primary DEM fetch."
+        )
+        return [
+            DemCrossCheckResult(lat=c.lat, lon=c.lon, cross_dem_confirmed=False, error=error_message)
+            for c in dem_candidates
+        ]
+
+    try:
+        second_dem = OpenTopographyAAIGridSource(
+            api_key, demtype=second_dataset, offline_data_root=offline_data_root,
+        ).fetch(aoi)
+    except OpenTopographyFetchError as exc:
+        error_message = (
+            f"Live fetch of the second independent DEM dataset "
+            f"({second_dataset}) failed: {exc}. This is a supplementary "
+            f"robustness check -- the primary DEM/NDVI/Thermal/Optical/"
+            f"SAR results above are entirely unaffected."
+        )
+        return [
+            DemCrossCheckResult(lat=c.lat, lon=c.lon, cross_dem_confirmed=False, error=error_message)
+            for c in dem_candidates
+        ]
+
+    second_candidates = detect_anomalies(
+        second_dem,
+        kernel_sigma_cells=dem_kernel_sigma_cells,
+        zscore_threshold=dem_zscore_threshold,
+        min_area_cells=3,
+    )
+
+    resolved_tolerance_m = (
+        match_tolerance_m if match_tolerance_m is not None
+        else max(30.0, second_dem.aoi.cell_size_m * 4)
+    )
+
+    results: list[DemCrossCheckResult] = []
+    for primary_candidate in dem_candidates:
+        target = GeoPoint(primary_candidate.lat, primary_candidate.lon)
+        best = None
+        best_dist = None
+        for c in second_candidates:
+            d = haversine_distance_m(target, GeoPoint(c.lat, c.lon))
+            if best_dist is None or d < best_dist:
+                best, best_dist = c, d
+
+        if best is not None and best_dist is not None and best_dist <= resolved_tolerance_m:
+            results.append(DemCrossCheckResult(
+                lat=primary_candidate.lat, lon=primary_candidate.lon,
+                cross_dem_confirmed=True,
+                cross_dem_peak_zscore=best.peak_zscore,
+                cross_dem_peak_residual_m=best.peak_residual_m,
+                distance_m=round(best_dist, 1),
+            ))
+        else:
+            results.append(DemCrossCheckResult(
+                lat=primary_candidate.lat, lon=primary_candidate.lon,
+                cross_dem_confirmed=False,
+            ))
+
+    return results
+
+
 def _get_shared_copernicus_token(
     client_id: str, client_secret: str, timeout: float
 ) -> tuple[str | None, str | None]:
@@ -1699,6 +1950,7 @@ def run_investigation_multi_json(
     stability_margin: float = STABILITY_MARGIN_DEFAULT,
     max_auto_stability_candidates: int = MAX_AUTO_STABILITY_CANDIDATES_DEFAULT,
     temporal_persistence_days_back: float = DEFAULT_TEMPORAL_PERSISTENCE_DAYS_BACK,
+    dem_cross_check_dataset: str = DEM_CROSS_CHECK_DATASET_DEFAULT,
 ) -> str:
     """Run a DEM + NDVI + Thermal + Optical + SAR investigation and
     return the InvestigationRecord as a JSON string. This is the
@@ -1801,268 +2053,4 @@ def run_investigation_multi_json(
     NOT as a new independent evidence source. Never fails the
     investigation.
 
-    Writes investigation_status.json into offline_data_root as it works
-    (phase "dem" / "ndvi" / "thermal" / "optical" / "sar" / "stability" /
-    "persistence" / "done"), polled by MainActivity.kt for live progress
-    display. Best-effort -- never raises on its own.
-
-    Raises ValueError if use_gpr=True without both gpr_soil_preset_key
-    and gpr_two_way_time_ns, or if use_ert=True without both
-    ert_resistivity_ohm_m and ert_depth_m. Raises
-    OpenTopographyFetchError if DEM is unavailable both live and
-    offline (see above) -- this is the only hard failure; every
-    NDVI-side, Thermal-side, Optical-side, SAR-side, GPR-side, ERT-side,
-    Stability-side, and Temporal-Persistence-side failure degrades
-    gracefully with an honest limitations[] entry instead.
-    """
-    _write_investigation_status(offline_data_root, "dem", 0, 1)
-
-    center = GeoPoint(lat, lon)
-    aoi = build_aoi(center, radius_m=radius_m, grid_size=grid_size)
-
-    # --- DEM: real-first, offline-fallback (same pattern as investigation_mobile.py) ---
-    live_dem_error: OpenTopographyFetchError | None = None
-    dem = None
-    if api_key:
-        try:
-            dem = OpenTopographyAAIGridSource(
-                api_key, demtype=demtype, offline_data_root=offline_data_root,
-            ).fetch(aoi)
-        except OpenTopographyFetchError as exc:
-            live_dem_error = exc
-    else:
-        live_dem_error = OpenTopographyFetchError(
-            "No OpenTopography API key is configured yet -- enter your "
-            "free key (opentopography.org) to enable live real DEM fetch."
-        )
-
-    used_offline_dem = False
-    if dem is None:
-        used_offline_dem = True
-        try:
-            dem = fetch_offline_dem(aoi, offline_data_root)
-        except OfflineDataUnavailableError as offline_dem_error:
-            raise OpenTopographyFetchError(
-                f"Live DEM fetch failed ({live_dem_error}) and no offline "
-                f"data is available for this location either "
-                f"({offline_dem_error})."
-            ) from offline_dem_error
-
-    dem_candidates = detect_anomalies(
-        dem,
-        kernel_sigma_cells=dem_kernel_sigma_cells,
-        zscore_threshold=dem_zscore_threshold,
-        min_area_cells=3,
-    )
-
-    # --- DETECTION STABILITY: automatic, borderline-only (added a prior session) ---
-    stability_candidates = _select_stability_candidates(
-        dem_candidates, dem_zscore_threshold, stability_margin, max_auto_stability_candidates,
-    )
-    stability_results: list[StabilityResult] = []
-    if stability_candidates:
-        _write_investigation_status(
-            offline_data_root, "stability", 0, len(stability_candidates)
-        )
-        for i, sc in enumerate(stability_candidates):
-            result = _run_stability_check(
-                sc, radius_m, api_key, demtype, offline_data_root,
-                grid_size, dem_kernel_sigma_cells, dem_zscore_threshold,
-            )
-            stability_results.append(result)
-            _write_investigation_status(
-                offline_data_root, "stability", i + 1, len(stability_candidates)
-            )
-
-    gpr_evidence, gpr_limitation = _build_gpr_evidence(
-        lat, lon, use_gpr, gpr_soil_preset_key, gpr_two_way_time_ns,
-        gpr_entry_method, gpr_device_note,
-    )
-    ert_evidence, ert_limitation = _build_ert_evidence(
-        lat, lon, use_ert, ert_resistivity_ohm_m, ert_depth_m,
-        ert_entry_method, ert_device_note,
-    )
-
-    # --- Shared Copernicus token, fetched ONCE for NDVI, Thermal, Optical, AND SAR ---
-    n_candidates = len(dem_candidates)
-    token, token_error_message = _get_shared_copernicus_token(
-        ndvi_client_id, ndvi_client_secret, timeout=ndvi_timeout_s,
-    )
-
-    # --- NDVI: real per-candidate check first ---
-    _write_investigation_status(offline_data_root, "ndvi", 0, max(1, n_candidates))
-
-    def _report_ndvi_progress(done: int, total: int) -> None:
-        _write_investigation_status(offline_data_root, "ndvi", done, total)
-
-    ndvi_results = _run_ndvi_checks(
-        dem_candidates, ndvi_client_id, ndvi_client_secret,
-        token, token_error_message,
-        stress_zscore_threshold=1.5,
-        timeout=ndvi_timeout_s,
-        progress_callback=_report_ndvi_progress,
-    )
-    n_ndvi_errors = sum(1 for r in ndvi_results if r.error is not None)
-
-    # --- THERMAL: real per-candidate check, independent of NDVI's outcome ---
-    _write_investigation_status(offline_data_root, "thermal", 0, max(1, n_candidates))
-
-    def _report_thermal_progress(done: int, total: int) -> None:
-        _write_investigation_status(offline_data_root, "thermal", done, total)
-
-    thermal_results = _run_thermal_checks(
-        dem_candidates, ndvi_client_id, ndvi_client_secret,
-        token, token_error_message,
-        anomaly_zscore_threshold=thermal_zscore_threshold,
-        timeout=thermal_timeout_s,
-        progress_callback=_report_thermal_progress,
-    )
-    n_thermal_errors = sum(1 for r in thermal_results if r.error is not None)
-
-    # --- OPTICAL: real per-candidate check, independent of NDVI's/Thermal's outcome ---
-    _write_investigation_status(offline_data_root, "optical", 0, max(1, n_candidates))
-
-    def _report_optical_progress(done: int, total: int) -> None:
-        _write_investigation_status(offline_data_root, "optical", done, total)
-
-    optical_results = _run_optical_checks(
-        dem_candidates, ndvi_client_id, ndvi_client_secret,
-        token, token_error_message,
-        anomaly_zscore_threshold=optical_zscore_threshold,
-        timeout=optical_timeout_s,
-        progress_callback=_report_optical_progress,
-    )
-    n_optical_errors = sum(1 for r in optical_results if r.error is not None)
-
-    # --- SAR: real per-candidate check, independent of NDVI's/Thermal's/
-    # Optical's outcome (ADDED THIS SESSION) ---
-    _write_investigation_status(offline_data_root, "sar", 0, max(1, n_candidates))
-
-    def _report_sar_progress(done: int, total: int) -> None:
-        _write_investigation_status(offline_data_root, "sar", done, total)
-
-    sar_results = _run_sar_checks(
-        dem_candidates, ndvi_client_id, ndvi_client_secret,
-        token, token_error_message,
-        detection_zscore_threshold=sar_zscore_threshold,
-        timeout=sar_timeout_s,
-        progress_callback=_report_sar_progress,
-    )
-    n_sar_errors = sum(1 for r in sar_results if r.error is not None)
-
-    # --- TEMPORAL PERSISTENCE: real per-candidate check across all
-    # three sources (NDVI/Thermal/Optical only -- see
-    # TemporalPersistenceResult's own docstring for why SAR is
-    # deliberately excluded), UNCONDITIONAL per decision 1 (see
-    # evidence_record.py's own EIGHTH EVIDENCE SLOT docstring). ---
-    _write_investigation_status(offline_data_root, "persistence", 0, max(1, n_candidates))
-
-    def _report_persistence_progress(done: int, total: int) -> None:
-        _write_investigation_status(offline_data_root, "persistence", done, total)
-
-    (
-        persistence_results,
-        n_ndvi_persistence_errors,
-        n_thermal_persistence_errors,
-        n_optical_persistence_errors,
-    ) = _run_temporal_persistence_checks(
-        dem_candidates, ndvi_client_id, ndvi_client_secret,
-        token, token_error_message,
-        ndvi_stress_zscore_threshold=1.5,
-        thermal_zscore_threshold=thermal_zscore_threshold,
-        optical_zscore_threshold=optical_zscore_threshold,
-        days_back=temporal_persistence_days_back,
-        ndvi_timeout=ndvi_timeout_s,
-        thermal_timeout=thermal_timeout_s,
-        optical_timeout=optical_timeout_s,
-        progress_callback=_report_persistence_progress,
-    )
-
-    fourth_evidence: object = None
-    fifth_evidence: object = None
-    ninth_evidence: object = None
-    used_offline_ndvi = False
-    ndvi_limitations: list[str] = []
-    thermal_limitations: list[str] = []
-    optical_limitations: list[str] = []
-    sar_limitations: list[str] = []
-
-    second_evidence = RealNdviCoreHaloEvidence(
-        n_candidates_checked=n_candidates, n_fetch_errors=n_ndvi_errors,
-    )
-    fourth_evidence = RealThermalCoreHaloEvidence(
-        n_candidates_checked=n_candidates, n_fetch_errors=n_thermal_errors,
-    )
-    fifth_evidence = RealOpticalCoreHaloEvidence(
-        n_candidates_checked=n_candidates, n_fetch_errors=n_optical_errors,
-    )
-    ninth_evidence = RealSarCoreHaloEvidence(
-        n_candidates_checked=n_candidates, n_fetch_errors=n_sar_errors,
-    )
-
-    if dem_candidates and n_ndvi_errors == n_candidates:
-        try:
-            offline_ndvi_raster = fetch_offline_ndvi(aoi, offline_data_root)
-            ndvi_candidates = detect_raster_anomalies(
-                aoi, offline_ndvi_raster.ndvi,
-                kernel_sigma_cells=ndvi_kernel_sigma_cells,
-                zscore_threshold=ndvi_zscore_threshold,
-                min_area_cells=3,
-            )
-            resolved_colocation = (
-                colocation_distance_m if colocation_distance_m is not None
-                else max(30.0, aoi.cell_size_m * 4)
-            )
-            correlation_results = correlate_anomalies(
-                {"DEM": dem_candidates, "NDVI": ndvi_candidates},
-                aoi_center=center,
-                colocation_distance_m=resolved_colocation,
-            )
-            second_evidence = offline_ndvi_raster
-            second_anomalies = ndvi_candidates
-            second_anomalies_are_candidates = True
-            used_offline_ndvi = True
-            ndvi_limitations.append(
-                "Live per-candidate NDVI checks were unavailable for every "
-                "candidate this run (no network, or Copernicus credentials "
-                "not yet configured), so NDVI correlation used this "
-                "device's offline Sentinel-2 composite instead -- real "
-                "data, but coarser resolution than the live per-candidate "
-                "check (see offline_evidence_fallback.py)."
-            )
-            thermal_limitations.append(
-                "Because NDVI fell back to the offline raster/geometric "
-                "correlation path this run, Thermal's per-candidate "
-                "results (recorded below) were NOT combined into that "
-                "path's supporting_sources/notes -- this module does not "
-                "have confirmed visibility into whether that path "
-                "preserves a stable per-candidate correspondence, and "
-                "guessing at it risked attaching a Thermal result to the "
-                "wrong candidate. Thermal has no offline-raster fallback "
-                "of its own yet."
-            )
-            optical_limitations.append(
-                "Because NDVI fell back to the offline raster/geometric "
-                "correlation path this run, Optical's per-candidate "
-                "results (recorded below) were NOT combined into that "
-                "path's supporting_sources/notes, for the same reason as "
-                "Thermal above. Optical has no offline-raster fallback of "
-                "its own yet either."
-            )
-            sar_limitations.append(
-                "Because NDVI fell back to the offline raster/geometric "
-                "correlation path this run, SAR's per-candidate results "
-                "(recorded below) were NOT combined into that path's "
-                "supporting_sources/notes, for the same reason as Thermal "
-                "and Optical above. SAR has no offline-raster fallback of "
-                "its own either."
-            )
-        except OfflineDataUnavailableError as offline_ndvi_error:
-            ndvi_limitations.append(
-                f"Live per-candidate NDVI checks were unavailable for "
-                f"every candidate this run, and no offline NDVI data is "
-                f"available for this location either "
-                f"({offline_ndvi_error}). NDVI correlation could not be "
-                f"performed for this run -- the DEM results above are "
-                f"unaffected."
-  
+    Writes
