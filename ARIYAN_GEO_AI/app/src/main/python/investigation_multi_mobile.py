@@ -75,27 +75,45 @@ needed). Runs INDEPENDENTLY of whichever NDVI/Thermal path succeeds or
 fails this run, following the exact same _run_X_checks() /
 RealXCoreHaloEvidence() pattern Thermal established.
 
+REAL SAR (ADDED THIS SESSION) -- A GENUINE FIFTH PER-CANDIDATE
+CORROBORATING SOURCE (real Sentinel-1 backscatter core/halo check, see
+sar_source_mobile.py for the full real-literature-grounded reasoning on
+why it's two-directional AND tracks VV/VH separately). Uses the SAME
+shared Copernicus token as NDVI/Thermal/Optical (same account, Sentinel
+Hub's sentinel-1-grd collection). Runs INDEPENDENTLY of whichever
+NDVI/Thermal/Optical path succeeds or fails this run, following the
+exact same _run_X_checks() / RealXCoreHaloEvidence() pattern the other
+three established -- see _run_sar_checks()/RealSarCoreHaloEvidence()
+below. UNLIKE Detection Stability and Temporal Persistence (both of
+which deliberately do NOT count as new independent evidence sources),
+SAR DOES participate in correlation()/supporting_sources exactly like
+NDVI/Thermal/Optical, and earns its OWN entry in
+steward_evidence_matrix.py's INDEPENDENCE_GROUPS (radar is a genuinely
+different physical mechanism from passive optical/thermal, so it is
+NOT folded into the existing optical_family group).
+
 In the common case (live per-candidate NDVI succeeds for at least one
-candidate), NDVI, Thermal, and Optical results are combined per-candidate
-via _build_correlated_candidates() below -- a single CorrelatedCandidate
-per DEM candidate whose supporting_sources reflects whichever of NDVI/
-THERMAL/OPTICAL actually corroborated it (any subset of
-["DEM","NDVI","THERMAL","OPTICAL"], DEM always present).
+candidate), NDVI, Thermal, Optical, and SAR results are combined
+per-candidate via _build_correlated_candidates() below -- a single
+CorrelatedCandidate per DEM candidate whose supporting_sources reflects
+whichever of NDVI/THERMAL/OPTICAL/SAR actually corroborated it (any
+subset of ["DEM","NDVI","THERMAL","OPTICAL","SAR"], DEM always present).
 
 In the rare case where live NDVI fails for EVERY candidate (triggering
 the offline raster/geometric correlate_anomalies() fallback -- see
-below), Thermal's AND Optical's per-candidate results are still fully
-recorded (in fourth_evidence_detail / fifth_evidence_detail respectively,
-visible in the final record) but are NOT woven into that fallback path's
-supporting_sources/notes: correlate_anomalies() is geometric-colocation
-based and this module does not have confirmed visibility into whether
-its output preserves a stable 1:1 index correspondence with
-dem_candidates, so blindly enriching it by index risked silently
-attaching a Thermal or Optical result to the wrong candidate. An honest
-limitations note explains this gap explicitly rather than papering over
-it. Neither Thermal nor Optical currently has an offline-raster fallback
-of its own (unlike NDVI) -- a real, known, honestly-noted gap, not an
-oversight; can be added later the same way NDVI's was, if useful.
+below), Thermal's, Optical's, AND SAR's per-candidate results are still
+fully recorded (in fourth_evidence_detail / fifth_evidence_detail /
+ninth_evidence_detail respectively, visible in the final record) but
+are NOT woven into that fallback path's supporting_sources/notes:
+correlate_anomalies() is geometric-colocation based and this module
+does not have confirmed visibility into whether its output preserves a
+stable 1:1 index correspondence with dem_candidates, so blindly
+enriching it by index risked silently attaching a Thermal, Optical, or
+SAR result to the wrong candidate. An honest limitations note explains
+this gap explicitly rather than papering over it. None of Thermal,
+Optical, or SAR currently has an offline-raster fallback of its own
+(unlike NDVI) -- a real, known, honestly-noted gap, not an oversight;
+can be added later the same way NDVI's was, if useful.
 
 GPR (roadmap item 4, unchanged): when use_gpr=True, a single real GPR
 manual pick (a human-read two-way travel time + chosen soil preset, see
@@ -116,7 +134,7 @@ slot), mirroring GPR's own wiring exactly via _build_ert_evidence()
 below. Like GPR, not fed into the AI Debate Engine from this file
 directly -- that happens in debate_mobile.py.
 
-DETECTION STABILITY, ADDED THIS SESSION: real on-device testing (18+
+DETECTION STABILITY, ADDED A PRIOR SESSION: real on-device testing (18+
 live investigations across two real sites, see project notes) found
 that detect_anomalies() -- which z-scores each cell against a regional
 trend computed from whatever terrain falls inside THIS investigation's
@@ -159,7 +177,7 @@ with one difference: this is NOT run for every DEM candidate, only the
 borderline subset that qualified -- see evidence_record.py's own
 docstring for exactly how that's reflected.
 
-TEMPORAL PERSISTENCE, ADDED THIS SESSION: checks whether each DEM
+TEMPORAL PERSISTENCE, ADDED A PRIOR SESSION: checks whether each DEM
 candidate's real NDVI/Thermal/Optical core-vs-halo signal (the SAME
 checks already described above) reproduces across MULTIPLE real,
 independent satellite acquisitions in a wider time window, rather than
@@ -183,32 +201,32 @@ design decisions, see that module): this is explicitly NOT counted as a
 new independent evidence source -- it is a robustness check ON the
 existing NDVI/Thermal/Optical signals, so it never touches
 correlation()/supporting_sources and gets no derived_products entry,
-feeding Scientific Steward's confidence ceiling directly instead
-(mechanism to be designed alongside steward_confidence_ceiling.py,
-separately from this wiring).
+feeding Scientific Steward's confidence ceiling directly instead. SAR
+(added this session) is deliberately NOT included in temporal
+persistence -- that remains scoped to NDVI/Thermal/Optical only, per
+the queue-item-2 design decisions; SAR's own temporal-persistence
+mirror (if ever wanted) would be a separate, future addition.
 
-REAL NETWORK-COST NOTE: this makes up to 6 additional HTTP calls per
-DEM candidate (2 calls -- core+halo -- per source, times 3 sources),
-roughly doubling this function's total real network cost per
-investigation. This is a known, accepted tradeoff (decision 1 in
-evidence_record.py's own docstring) rather than an oversight -- see
-_run_temporal_persistence_checks()'s own docstring for the full
-reasoning on why no artificial per-run cap was added, unlike Detection
-Stability's MAX_AUTO_STABILITY_CANDIDATES.
+REAL NETWORK-COST NOTE: the snapshot checks (NDVI/Thermal/Optical/SAR)
+make 2 HTTP calls per candidate per source (core+halo), and Temporal
+Persistence adds another 2 per candidate for NDVI/Thermal/Optical only
+-- SAR was a known, deliberate addition to this run's total real
+network cost (roughly +2 calls per candidate over the pre-SAR total),
+not an oversight.
 
 TOKEN-CACHING + PROGRESS-REPORTING FIX (a prior session, EXTENDED across
-Thermal, Optical, Detection Stability, and now Temporal Persistence): a
-real on-device airplane-mode test showed this module could appear to
-hang for several minutes with a multi-candidate grid, because the old
-NDVI loop fetched a brand-new OAuth token independently for every
-candidate (see ndvi_source_mobile.py's own docstring for the full
+Thermal, Optical, Detection Stability, Temporal Persistence, and now
+SAR): a real on-device airplane-mode test showed this module could
+appear to hang for several minutes with a multi-candidate grid, because
+the old NDVI loop fetched a brand-new OAuth token independently for
+every candidate (see ndvi_source_mobile.py's own docstring for the full
 explanation) with zero visible progress in the meantime. Fixed two
 ways: (1) ONE access token is now fetched for the whole run and reused
-for EVERY candidate across NDVI, Thermal, Optical, AND Temporal
+for EVERY candidate across NDVI, Thermal, Optical, SAR, AND Temporal
 Persistence (GPR, ERT, and Detection Stability need no token at all --
 Stability is manual-key-only DEM fetches, not Copernicus); (2) this
 module writes a small investigation_status.json into offline_data_root
-as it works (phase = "dem" / "ndvi" / "thermal" / "optical" /
+as it works (phase = "dem" / "ndvi" / "thermal" / "optical" / "sar" /
 "stability" / "persistence" / "done", plus done/total counts for each
 per-candidate loop), mirroring the exact JSON shape
 offline_data_manager.py already writes for offline downloads.
@@ -236,23 +254,23 @@ dem_fetch_diagnostic.json for later inspection -- see
 dem_source_mobile.py's own docstring for the full explanation.
 
 CREDENTIAL NAMING NOTE: the ndvi_client_id/ndvi_client_secret parameters
-below are now used for NDVI, Thermal, AND Optical (same Copernicus Data
-Space Ecosystem account, verified against Copernicus's own Sentinel-2/
-Landsat 8-9 documentation) -- they were deliberately NOT renamed to
-something more source-neutral (e.g. copernicus_client_id) to avoid a
-breaking change to existing Kotlin call sites that already pass these
-by keyword. New parameters were added instead; only NEW arguments need
-to be added at the Kotlin call site, not renamed ones. GPR, ERT, and
-Detection Stability need no Copernicus credentials at all (GPR/ERT are
-manual-entry-only; Stability re-uses the OpenTopography api_key/demtype
-already passed for the primary DEM fetch), so this naming note does not
-apply to any of the three.
+below are now used for NDVI, Thermal, Optical, AND SAR (same Copernicus
+Data Space Ecosystem account, verified against Copernicus's own
+Sentinel-2/Landsat 8-9/Sentinel-1 documentation) -- they were
+deliberately NOT renamed to something more source-neutral (e.g.
+copernicus_client_id) to avoid a breaking change to existing Kotlin call
+sites that already pass these by keyword. New parameters were added
+instead; only NEW arguments need to be added at the Kotlin call site,
+not renamed ones. GPR, ERT, and Detection Stability need no Copernicus
+credentials at all (GPR/ERT are manual-entry-only; Stability re-uses the
+OpenTopography api_key/demtype already passed for the primary DEM
+fetch), so this naming note does not apply to any of the three.
 
-SAMPLE-COUNT VISIBILITY FIX (this session -- REAL on-device confidence-
-labeling issue, not previously flagged): NdviCoreHaloResult,
-ThermalCoreHaloResult, and OpticalCoreHaloResult (below) previously
-carried core_mean/halo_mean/halo_stddev/z_score but never
-core_sample_count/halo_sample_count/n_intervals_with_data, even though
+SAMPLE-COUNT VISIBILITY FIX (a prior session -- REAL on-device
+confidence-labeling issue): NdviCoreHaloResult, ThermalCoreHaloResult,
+and OpticalCoreHaloResult (below) previously carried core_mean/
+halo_mean/halo_stddev/z_score but never core_sample_count/
+halo_sample_count/n_intervals_with_data, even though
 ndvi_source_mobile.fetch_ndvi_core_halo_check() (and its Thermal/Optical
 equivalents) already compute and return all three -- they were being
 silently discarded at the exact line each _run_X_checks() function
@@ -276,7 +294,9 @@ _build_correlated_candidates() below, so a sentinel z=50 backed by a
 thin sample is now visibly distinguishable from one backed by a robust
 one, directly in the investigation output -- no change to any existing
 statistical logic, detection thresholds, or CORROBORATED/SINGLE_SOURCE
-status computation.
+status computation. SarCoreHaloResult (added this session) is built
+with sample counts already included from the start, so it never needed
+this retrofit -- see its own docstring.
 """
 from __future__ import annotations
 
@@ -294,6 +314,8 @@ import thermal_source_mobile
 from thermal_source_mobile import ThermalFetchError
 import optical_source_mobile
 from optical_source_mobile import OpticalFetchError
+import sar_source_mobile
+from sar_source_mobile import SARFetchError
 from gpr_source_mobile import GPRSurvey, GPRPick, estimate_depths, GPREvidence
 from gpr_depth_model import GPRDepthModelError
 from ert_source_mobile import ERTSurvey, ERTReading, classify_survey, ERTEvidence
@@ -331,13 +353,13 @@ class NdviCoreHaloResult:
     because of that.
 
     core_sample_count/halo_sample_count/n_intervals_with_data (ADDED
-    THIS SESSION -- see module docstring, SAMPLE-COUNT VISIBILITY FIX):
-    the real pixel/interval counts ndvi_source_mobile.
+    a prior session -- see module docstring, SAMPLE-COUNT VISIBILITY
+    FIX): the real pixel/interval counts ndvi_source_mobile.
     fetch_ndvi_core_halo_check() already returns alongside core_mean/
     halo_mean/z_score, now actually carried through instead of being
     silently dropped at construction. None for a failed check (no
-    counts to report) or for any result built before this session's
-    fix touched this dataclass."""
+    counts to report) or for any result built before that fix touched
+    this dataclass."""
     lat: float
     lon: float
     core_mean: float | None
@@ -361,10 +383,9 @@ class ThermalCoreHaloResult:
     core_warmer_than_halo) has nothing in common with AnomalyCandidate,
     same reasoning as NdviCoreHaloResult's own note above.
 
-    core_sample_count/halo_sample_count/n_intervals_with_data (ADDED
-    THIS SESSION): same fix and same reasoning as
-    NdviCoreHaloResult's own fields above -- see module docstring,
-    SAMPLE-COUNT VISIBILITY FIX."""
+    core_sample_count/halo_sample_count/n_intervals_with_data: same fix
+    and same reasoning as NdviCoreHaloResult's own fields above -- see
+    module docstring, SAMPLE-COUNT VISIBILITY FIX."""
     lat: float
     lon: float
     core_mean_kelvin: float | None
@@ -390,10 +411,9 @@ class OpticalCoreHaloResult:
     nothing in common with AnomalyCandidate, same reasoning as the other
     two per-candidate check results above.
 
-    core_sample_count/halo_sample_count/n_intervals_with_data (ADDED
-    THIS SESSION): same fix and same reasoning as
-    NdviCoreHaloResult's own fields above -- see module docstring,
-    SAMPLE-COUNT VISIBILITY FIX."""
+    core_sample_count/halo_sample_count/n_intervals_with_data: same fix
+    and same reasoning as NdviCoreHaloResult's own fields above -- see
+    module docstring, SAMPLE-COUNT VISIBILITY FIX."""
     lat: float
     lon: float
     core_mean: float | None
@@ -408,7 +428,55 @@ class OpticalCoreHaloResult:
     n_intervals_with_data: int | None = None
 
 
-# --- DETECTION STABILITY (added this session) ---
+@dataclass
+class SarCoreHaloResult:
+    """One real per-candidate Sentinel-1 SAR backscatter core/halo check
+    result (or a recorded failure) -- ADDED THIS SESSION. Kept as a
+    plain dataclass so evidence_record.py's asdict() call works on it,
+    routed into ninth_evidence_detail (never merged into anomalies[])
+    for the same reason as NdviCoreHaloResult/ThermalCoreHaloResult/
+    OpticalCoreHaloResult above -- its schema has nothing in common with
+    AnomalyCandidate.
+
+    UNLIKE the other three per-candidate check results, this combines
+    TWO sub-measurements (vv/vh) into one result, mirroring
+    sar_source_mobile.fetch_sar_core_halo_check()'s own returned shape
+    exactly -- see that function's docstring. vv/vh are each either a
+    dict with core_mean/halo_mean/z_score/detected/core_sample_count/
+    halo_sample_count, or None if that polarization had no usable data
+    for this candidate this run (an honest per-polarization "untested"
+    outcome, not folded into the other polarization's result).
+
+    sar_detected is True if EITHER polarization's own "detected" flag is
+    True (see sar_source_mobile.py's module docstring for why SAR is
+    two-directional and VV/VH are tracked separately rather than
+    combined into one number) -- this mirrors thermal_anomaly_detected/
+    optical_anomaly_detected's role for _build_correlated_candidates()
+    below, but is derived from vv/vh rather than being a field the
+    underlying source function itself returns directly, since that
+    function deliberately returns per-polarization results, not one
+    pre-combined flag (see module docstring for why: collapsing VV/VH
+    into one number would throw away real, separately-distinguishable
+    information).
+
+    error is only ever set when BOTH polarizations failed the
+    sample-count/variance floor or had no usable data at all (i.e.
+    sar_source_mobile.SARFetchError was raised) -- unlike the other
+    three sources, a single polarization's own failure does NOT set
+    this field; it simply leaves that polarization's own sub-dict as
+    None while the other polarization's result (if any) is still
+    reported. This mirrors sar_source_mobile.fetch_sar_core_halo_check's
+    own "a thin result on one channel is honest information, not a hard
+    failure" design."""
+    lat: float
+    lon: float
+    vv: dict | None
+    vh: dict | None
+    sar_detected: bool
+    error: str | None = None
+
+
+# --- DETECTION STABILITY (added a prior session) ---
 
 DEFAULT_AUTO_STABILITY_OFFSETS_M: list[tuple[float, float]] = [
     (15.0, 0.0), (-15.0, 0.0), (0.0, 15.0), (0.0, -15.0),
@@ -688,21 +756,21 @@ def _get_shared_copernicus_token(
     client_id: str, client_secret: str, timeout: float
 ) -> tuple[str | None, str | None]:
     """Fetches ONE OAuth access token to be shared across the NDVI,
-    Thermal, AND Optical per-candidate checks this run (all three use
-    the same Copernicus Data Space Ecosystem account) -- GPR, ERT, and
-    Detection Stability need no token at all (manual-entry-only, and
+    Thermal, Optical, AND SAR per-candidate checks this run (all four
+    use the same Copernicus Data Space Ecosystem account) -- GPR, ERT,
+    and Detection Stability need no token at all (manual-entry-only, and
     OpenTopography-key-only respectively), so none of the three is
     involved here.
 
     Returns (token_or_None, error_message_or_None). Missing credentials
     is treated exactly like a fetch failure -- callers get a uniform
     honest error message either way, applied identically to every
-    candidate for all three sources, rather than raising."""
+    candidate for all four sources, rather than raising."""
     if not client_id or not client_secret:
         return None, (
             "Copernicus OAuth client ID/secret not configured yet -- enter "
             "your free client credentials (dataspace.copernicus.eu) to "
-            "enable live real per-candidate NDVI/Thermal/Optical checks."
+            "enable live real per-candidate NDVI/Thermal/Optical/SAR checks."
         )
     try:
         token = ndvi_source_mobile.get_access_token(client_id, client_secret, timeout=timeout)
@@ -731,8 +799,8 @@ def _run_ndvi_checks(
     shared token. Returns one NdviCoreHaloResult per candidate (success
     or honestly-recorded failure) -- does NOT build CorrelatedCandidate
     itself anymore (see _build_correlated_candidates below); this keeps
-    NDVI, Thermal, and Optical checking fully independent of each other
-    and of however their results get combined."""
+    NDVI, Thermal, Optical, and SAR checking fully independent of each
+    other and of however their results get combined."""
     results: list[NdviCoreHaloResult] = []
     total = len(dem_candidates)
     for i, dem_candidate in enumerate(dem_candidates):
@@ -762,9 +830,6 @@ def _run_ndvi_checks(
                 core_mean=check["core_mean"], halo_mean=check["halo_mean"],
                 halo_stddev=check["halo_stddev"], z_score=check["z_score"],
                 vegetation_stress_detected=check["vegetation_stress_detected"],
-                # SAMPLE-COUNT VISIBILITY FIX (this session, see module
-                # docstring): these were already present in `check` --
-                # only now actually being read into the result.
                 core_sample_count=check.get("core_sample_count"),
                 halo_sample_count=check.get("halo_sample_count"),
                 n_intervals_with_data=check.get("n_intervals_with_data"),
@@ -788,10 +853,10 @@ def _run_thermal_checks(
 ) -> list[ThermalCoreHaloResult]:
     """For each DEM candidate, run a real Landsat thermal core/halo
     check anchored at that candidate's location, using the SAME
-    pre-fetched shared token as NDVI/Optical. Mirrors _run_ndvi_checks
-    exactly. Runs regardless of whether NDVI's own checks succeeded or
-    failed for any given candidate -- all three sources are fully
-    independent."""
+    pre-fetched shared token as NDVI/Optical/SAR. Mirrors
+    _run_ndvi_checks exactly. Runs regardless of whether NDVI's own
+    checks succeeded or failed for any given candidate -- all four
+    sources are fully independent."""
     results: list[ThermalCoreHaloResult] = []
     total = len(dem_candidates)
     for i, dem_candidate in enumerate(dem_candidates):
@@ -824,8 +889,6 @@ def _run_thermal_checks(
                 halo_stddev=check["halo_stddev"], z_score=check["z_score"],
                 thermal_anomaly_detected=check["thermal_anomaly_detected"],
                 core_warmer_than_halo=check["core_warmer_than_halo"],
-                # SAMPLE-COUNT VISIBILITY FIX (this session, see module
-                # docstring): mirrors _run_ndvi_checks' own fix above.
                 core_sample_count=check.get("core_sample_count"),
                 halo_sample_count=check.get("halo_sample_count"),
                 n_intervals_with_data=check.get("n_intervals_with_data"),
@@ -849,10 +912,10 @@ def _run_optical_checks(
 ) -> list[OpticalCoreHaloResult]:
     """For each DEM candidate, run a real Sentinel-2 visible-brightness
     core/halo check anchored at that candidate's location, using the
-    SAME pre-fetched shared token as NDVI/Thermal. Mirrors
+    SAME pre-fetched shared token as NDVI/Thermal/SAR. Mirrors
     _run_thermal_checks exactly. Runs regardless of whether NDVI's or
     Thermal's own checks succeeded or failed for any given candidate --
-    all three sources are fully independent."""
+    all four sources are fully independent."""
     results: list[OpticalCoreHaloResult] = []
     total = len(dem_candidates)
     for i, dem_candidate in enumerate(dem_candidates):
@@ -885,8 +948,6 @@ def _run_optical_checks(
                 halo_stddev=check["halo_stddev"], z_score=check["z_score"],
                 optical_anomaly_detected=check["optical_anomaly_detected"],
                 core_brighter_than_halo=check["core_brighter_than_halo"],
-                # SAMPLE-COUNT VISIBILITY FIX (this session, see module
-                # docstring): mirrors _run_ndvi_checks' own fix above.
                 core_sample_count=check.get("core_sample_count"),
                 halo_sample_count=check.get("halo_sample_count"),
                 n_intervals_with_data=check.get("n_intervals_with_data"),
@@ -898,7 +959,65 @@ def _run_optical_checks(
     return results
 
 
-# --- TEMPORAL PERSISTENCE (added this session) ---
+def _run_sar_checks(
+    dem_candidates: list,
+    client_id: str,
+    client_secret: str,
+    token: str | None,
+    shared_error_message: str | None,
+    detection_zscore_threshold: float,
+    timeout: float,
+    progress_callback=None,
+) -> list[SarCoreHaloResult]:
+    """ADDED THIS SESSION -- for each DEM candidate, run a real
+    Sentinel-1 SAR backscatter core/halo check anchored at that
+    candidate's location, using the SAME pre-fetched shared token as
+    NDVI/Thermal/Optical. Mirrors _run_thermal_checks/_run_optical_checks
+    in overall shape, but reads sar_source_mobile.
+    fetch_sar_core_halo_check()'s two-polarization return shape (vv/vh
+    sub-dicts) rather than one flat set of core_mean/halo_mean/z_score
+    fields -- see SarCoreHaloResult's own docstring for exactly how
+    sar_detected is derived from the two sub-results. Runs regardless of
+    whether NDVI's/Thermal's/Optical's own checks succeeded or failed
+    for any given candidate -- all four sources are fully independent."""
+    results: list[SarCoreHaloResult] = []
+    total = len(dem_candidates)
+    for i, dem_candidate in enumerate(dem_candidates):
+        error_message = shared_error_message
+        check = None
+        if error_message is None:
+            try:
+                check = sar_source_mobile.fetch_sar_core_halo_check(
+                    dem_candidate.lat, dem_candidate.lon,
+                    client_id, client_secret,
+                    detection_zscore_threshold=detection_zscore_threshold,
+                    timeout=timeout,
+                    access_token=token,
+                )
+            except SARFetchError as exc:
+                error_message = str(exc)
+
+        if error_message is not None:
+            results.append(SarCoreHaloResult(
+                lat=dem_candidate.lat, lon=dem_candidate.lon,
+                vv=None, vh=None, sar_detected=False, error=error_message,
+            ))
+        else:
+            vv = check.get("vv")
+            vh = check.get("vh")
+            detected = bool((vv and vv.get("detected")) or (vh and vh.get("detected")))
+            results.append(SarCoreHaloResult(
+                lat=dem_candidate.lat, lon=dem_candidate.lon,
+                vv=vv, vh=vh, sar_detected=detected,
+            ))
+
+        if progress_callback is not None:
+            progress_callback(i + 1, total)
+
+    return results
+
+
+# --- TEMPORAL PERSISTENCE (added a prior session) ---
 
 DEFAULT_TEMPORAL_PERSISTENCE_DAYS_BACK = 180.0  # matches each source
                                             # module's own persistence-
@@ -918,7 +1037,9 @@ class TemporalPersistenceResult:
     evidence_record.py's own EIGHTH EVIDENCE SLOT docstring section for
     the three design decisions behind this shape (decision 2
     specifically: ONE combined slot per candidate, not three separate
-    ones).
+    ones). SAR (added a later session) is deliberately NOT part of this
+    -- temporal persistence stays scoped to NDVI/Thermal/Optical only,
+    per the original queue-item-2 design decisions.
 
     lat/lon match every other per-candidate evidence dataclass in this
     file (NdviCoreHaloResult, StabilityResult, etc.), so
@@ -998,7 +1119,8 @@ def _run_temporal_persistence_checks(
     was added, unlike Detection Stability's MAX_AUTO_STABILITY_
     CANDIDATES, since persistence (like Thermal/Optical's snapshot
     checks) is intended to run for every real candidate, not just a
-    borderline subset.
+    borderline subset. Deliberately excludes SAR (see
+    TemporalPersistenceResult's own docstring).
     """
     results: list[TemporalPersistenceResult] = []
     n_ndvi_errors = 0
@@ -1048,11 +1170,6 @@ def _run_temporal_persistence_checks(
             except OpticalFetchError:
                 n_optical_errors += 1
         else:
-            # No token / credentials not configured -- same uniform
-            # honest treatment as the snapshot checks above (see
-            # _get_shared_copernicus_token()'s own docstring): every
-            # source for this candidate is honestly untested, never
-            # silently skipped without being counted.
             n_ndvi_errors += 1
             n_thermal_errors += 1
             n_optical_errors += 1
@@ -1138,11 +1255,10 @@ class TemporalPersistenceCheckEvidence:
 
 def _format_sample_counts(core_n: int | None, halo_n: int | None) -> str:
     """Renders the "n=core/halo" suffix appended to each source's note
-    text in _build_correlated_candidates() below (ADDED THIS SESSION --
-    see module docstring, SAMPLE-COUNT VISIBILITY FIX). Returns an empty
-    string if either count is missing (e.g. a result built before this
-    session's fix, or a genuinely absent value) rather than printing a
-    misleading "n=None/None"."""
+    text in _build_correlated_candidates() below -- see module
+    docstring, SAMPLE-COUNT VISIBILITY FIX. Returns an empty string if
+    either count is missing rather than printing a misleading
+    "n=None/None"."""
     if core_n is None or halo_n is None:
         return ""
     return f", n={core_n}/{halo_n}"
@@ -1153,37 +1269,38 @@ def _build_correlated_candidates(
     ndvi_results: list[NdviCoreHaloResult],
     thermal_results: list[ThermalCoreHaloResult],
     optical_results: list[OpticalCoreHaloResult],
+    sar_results: list[SarCoreHaloResult],
 ) -> list[CorrelatedCandidate]:
-    """Combines per-candidate NDVI, Thermal, and Optical results into ONE
-    CorrelatedCandidate per DEM candidate, reflecting whichever real
-    source(s) actually corroborated it. supporting_sources is always DEM
-    plus zero, one, two, or all three of NDVI/THERMAL/OPTICAL, in that
-    order -- NEVER a candidate that "loses" a real corroborating result
-    just because another source also happened to succeed or fail. GPR,
-    ERT, and Detection Stability are deliberately NOT part of this
-    combiner -- GPR/ERT are single site-anchored readings and Stability
-    is a diagnostic-only check, all handled separately, never full
-    per-candidate correlation sources.
+    """Combines per-candidate NDVI, Thermal, Optical, and (ADDED THIS
+    SESSION) SAR results into ONE CorrelatedCandidate per DEM candidate,
+    reflecting whichever real source(s) actually corroborated it.
+    supporting_sources is always DEM plus zero or more of NDVI/THERMAL/
+    OPTICAL/SAR, in that order -- NEVER a candidate that "loses" a real
+    corroborating result just because another source also happened to
+    succeed or fail. GPR, ERT, and Detection Stability are deliberately
+    NOT part of this combiner -- GPR/ERT are single site-anchored
+    readings and Stability is a diagnostic-only check, all handled
+    separately, never full per-candidate correlation sources.
 
     A per-candidate failure on any source is recorded honestly in the
     combined_confidence_note (not silently dropped), and does not
     prevent the OTHER sources from still corroborating that candidate --
-    e.g. if NDVI and Thermal both failed but Optical detected a real
-    anomaly, the candidate is still CORROBORATED via DEM+OPTICAL, with
-    NDVI's and Thermal's unavailability noted honestly alongside it.
+    e.g. if NDVI and Thermal both failed but Optical or SAR detected a
+    real anomaly, the candidate is still CORROBORATED, with the failed
+    sources' unavailability noted honestly alongside it.
 
-    Sorted the same way the NDVI-only and NDVI+Thermal versions were:
-    CORROBORATED first, then by number of supporting sources descending.
+    Sorted the same way the earlier versions were: CORROBORATED first,
+    then by number of supporting sources descending.
 
-    NOTE TEXT NOW INCLUDES SAMPLE COUNTS (ADDED THIS SESSION -- see
-    module docstring, SAMPLE-COUNT VISIBILITY FIX): each source's mean/
-    z-score note is now followed by ", n=<core_sample_count>/
-    <halo_sample_count>" via _format_sample_counts() above, so a
-    sentinel z=+/-50.0 (see each source module's own docstring for when
-    that's returned) backed by a thin sample is visibly distinguishable
-    from one backed by a robust one, directly in the investigation
-    output -- purely additive to the note text; the underlying
-    CORROBORATED/SINGLE_SOURCE status logic below is unchanged.
+    NOTE TEXT INCLUDES SAMPLE COUNTS for NDVI/Thermal/Optical (see
+    module docstring, SAMPLE-COUNT VISIBILITY FIX) via
+    _format_sample_counts() above. SAR's own note text is built
+    separately (see below) since its result combines two polarizations
+    rather than one flat mean/z-score pair -- it reports whichever
+    polarization(s) actually detected an anomaly, with each
+    polarization's own direction (brighter/darker, i.e. z_score sign)
+    stated explicitly, per sar_source_mobile.py's own two-directional
+    design.
     """
     out: list[CorrelatedCandidate] = []
     for i, dem_candidate in enumerate(dem_candidates):
@@ -1255,6 +1372,38 @@ def _build_correlated_candidates(
                 f"{_format_sample_counts(opr.core_sample_count, opr.halo_sample_count)})."
             )
 
+        sr = sar_results[i]
+        if sr.error is not None:
+            notes.append(f"Real SAR backscatter check unavailable for this candidate: {sr.error}.")
+        else:
+            pol_notes = []
+            for pol_label, pol in (("VV", sr.vv), ("VH", sr.vh)):
+                if pol is None:
+                    pol_notes.append(f"{pol_label}: no usable data")
+                    continue
+                direction = "brighter than" if pol["z_score"] > 0 else "darker than"
+                pol_notes.append(
+                    f"{pol_label} {direction} halo (core={pol['core_mean']:.4f}, "
+                    f"halo={pol['halo_mean']:.4f}, z={pol['z_score']:.2f}"
+                    f"{_format_sample_counts(pol.get('core_sample_count'), pol.get('halo_sample_count'))})"
+                )
+            if sr.sar_detected:
+                sources.append("SAR")
+                notes.append(
+                    f"Real Sentinel-1 SAR backscatter shows a significant "
+                    f"core/halo difference at this DEM candidate on at "
+                    f"least one polarization ({'; '.join(pol_notes)}). SAR "
+                    f"can indicate a buried feature via either brighter OR "
+                    f"darker backscatter depending on soil moisture and "
+                    f"roughness -- no single direction is assumed."
+                )
+            else:
+                notes.append(
+                    f"Real Sentinel-1 SAR backscatter at this DEM candidate "
+                    f"shows no significant anomaly on either polarization "
+                    f"({'; '.join(pol_notes)})."
+                )
+
         n_independent = len(sources) - 1  # sources beyond DEM itself
         if n_independent >= 1:
             status = "CORROBORATED"
@@ -1297,7 +1446,7 @@ def _build_gpr_evidence(
     limitation_message_or_None) -- a failure (bad soil preset key,
     non-positive travel time) is recorded as an honest limitation
     string rather than raised, so one bad GPR input never fails the
-    whole DEM/NDVI/Thermal/Optical/ERT/Stability investigation it's
+    whole DEM/NDVI/Thermal/Optical/SAR/ERT/Stability investigation it's
     attached to.
 
     Raises ValueError only for the caller-programming-error case of
@@ -1411,7 +1560,7 @@ class RealThermalCoreHaloEvidence:
             "synthetic": self.synthetic,
             "method": (
                 "Same Copernicus Data Space Ecosystem OAuth2 client-"
-                "credentials account used for NDVI/Optical; per-DEM-candidate "
+                "credentials account used for NDVI/Optical/SAR; per-DEM-candidate "
                 "real Landsat 8/9 TOP-OF-ATMOSPHERE BRIGHTNESS TEMPERATURE "
                 "(Kelvin) -- Copernicus Data Space Ecosystem offers Landsat "
                 "8/9 at Level 1 only, not the atmospherically-corrected "
@@ -1445,7 +1594,7 @@ class RealOpticalCoreHaloEvidence:
             "synthetic": self.synthetic,
             "method": (
                 "Same Copernicus Data Space Ecosystem OAuth2 client-"
-                "credentials account used for NDVI/Thermal; per-DEM-candidate "
+                "credentials account used for NDVI/Thermal/SAR; per-DEM-candidate "
                 "real broadband visible reflectance (mean of B02/B03/B04, "
                 "0-1 scale), fetched server-side for a small core bbox and "
                 "a larger halo bbox around each candidate -- the real "
@@ -1462,6 +1611,52 @@ class RealOpticalCoreHaloEvidence:
                 "threshold in EITHER direction (a soilmark can be brighter "
                 "or darker than its surroundings depending on fill "
                 "material -- no direction is assumed)."
+            ),
+            "n_candidates_checked": self.n_candidates_checked,
+            "n_fetch_errors": self.n_fetch_errors,
+        }
+
+
+class RealSarCoreHaloEvidence:
+    """ADDED THIS SESSION. Mirrors RealThermalCoreHaloEvidence/
+    RealOpticalCoreHaloEvidence exactly in shape -- see
+    sar_source_mobile.py's own module docstring for the full
+    real-literature-grounded reasoning behind SAR's two-directional,
+    per-polarization design."""
+
+    source = "Sentinel-1 GRD VV/VH backscatter (Sentinel Hub Statistical API via Copernicus Data Space Ecosystem, real per-candidate core/halo check)"
+    synthetic = False
+
+    def __init__(self, n_candidates_checked: int, n_fetch_errors: int):
+        self.n_candidates_checked = n_candidates_checked
+        self.n_fetch_errors = n_fetch_errors
+
+    def as_evidence_record(self) -> dict:
+        return {
+            "evidence_type": "SAR",
+            "source": self.source,
+            "synthetic": self.synthetic,
+            "method": (
+                "Same Copernicus Data Space Ecosystem OAuth2 client-"
+                "credentials account used for NDVI/Thermal/Optical; "
+                "per-DEM-candidate real Sentinel-1 GRD (Interferometric "
+                "Wide swath, dual VV+VH polarization) backscatter, fetched "
+                "server-side (calibration/terrain-correction handled by "
+                "the Statistical API) for a small core bbox and a larger "
+                "halo bbox around each candidate. VV and VH are tracked "
+                "and tested SEPARATELY, not merged -- published research "
+                "shows the two polarizations separately discriminate soil "
+                "moisture from surface roughness contributions. A SAR "
+                "anomaly is flagged when EITHER polarization's core/halo "
+                "difference clears a z-score threshold in EITHER direction "
+                "(buried features show up brighter OR darker than "
+                "surroundings in real published Sentinel-1 archaeology "
+                "studies, depending on soil moisture/roughness/season -- no "
+                "single direction is assumed, unlike NDVI). This measures "
+                "single-date backscatter statistics only, not the "
+                "coherence/interferometric analysis some published SAR "
+                "archaeology methods also use -- informative, but not as "
+                "strong evidence on its own as a full SAR pipeline."
             ),
             "n_candidates_checked": self.n_candidates_checked,
             "n_fetch_errors": self.n_fetch_errors,
@@ -1488,6 +1683,8 @@ def run_investigation_multi_json(
     thermal_timeout_s: float = 8.0,
     optical_zscore_threshold: float = 1.5,
     optical_timeout_s: float = 8.0,
+    sar_zscore_threshold: float = 1.5,
+    sar_timeout_s: float = 8.0,
     offline_data_root: str = "",
     use_gpr: bool = False,
     gpr_soil_preset_key: str | None = None,
@@ -1503,13 +1700,13 @@ def run_investigation_multi_json(
     max_auto_stability_candidates: int = MAX_AUTO_STABILITY_CANDIDATES_DEFAULT,
     temporal_persistence_days_back: float = DEFAULT_TEMPORAL_PERSISTENCE_DAYS_BACK,
 ) -> str:
-    """Run a DEM + NDVI + Thermal + Optical investigation and return the
-    InvestigationRecord as a JSON string. This is the function
-    MainActivity.kt calls when the "Include NDVI correlation" switch
-    is on (Thermal and Optical now run automatically alongside it -- no
-    separate toggle for either, same as NDVI itself has none). Detection
-    Stability (added this session) also runs automatically, with no
-    separate toggle, for whichever DEM candidates qualify.
+    """Run a DEM + NDVI + Thermal + Optical + SAR investigation and
+    return the InvestigationRecord as a JSON string. This is the
+    function MainActivity.kt calls when the "Include NDVI correlation"
+    switch is on (Thermal, Optical, and now SAR all run automatically
+    alongside it -- no separate toggle for any of them, same as NDVI
+    itself has none). Detection Stability also runs automatically, with
+    no separate toggle, for whichever DEM candidates qualify.
 
     DEM: real (OpenTopography) always attempted first via api_key; on
     failure, falls back to this device's offline DEM library. If both
@@ -1524,8 +1721,8 @@ def run_investigation_multi_json(
     NDVI: real (Copernicus Sentinel Hub Statistical API, per-DEM-candidate
     core/halo check) always attempted first via ndvi_client_id/secret,
     using ONE shared access token for the whole run (now shared with
-    Thermal AND Optical too). If EVERY candidate's live check failed,
-    falls back to this device's offline Sentinel-2 composite (a
+    Thermal, Optical, AND SAR too). If EVERY candidate's live check
+    failed, falls back to this device's offline Sentinel-2 composite (a
     full-AOI raster, independently scanned and correlated against the
     DEM candidates -- can find NDVI anomalies the per-candidate check
     couldn't). If that's also unavailable, the honest per-candidate-
@@ -1535,8 +1732,8 @@ def run_investigation_multi_json(
     THERMAL: real (Landsat 8/9 via the same Copernicus Sentinel Hub
     Statistical API/account as NDVI, per-DEM-candidate core/halo check,
     see thermal_source_mobile.py) always attempted for every DEM
-    candidate, using the SAME shared access token as NDVI/Optical. Runs
-    independently of NDVI's own success or failure.
+    candidate, using the SAME shared access token as NDVI/Optical/SAR.
+    Runs independently of NDVI's own success or failure.
 
     OPTICAL: real (Sentinel-2 L2A visible-band brightness via the SAME
     Copernicus Sentinel Hub Statistical API/account as NDVI/Thermal,
@@ -1545,18 +1742,27 @@ def run_investigation_multi_json(
     access token. Runs independently of NDVI's and Thermal's own
     success or failure.
 
+    SAR (ADDED THIS SESSION): real (Sentinel-1 GRD VV/VH backscatter via
+    the SAME Copernicus Sentinel Hub Statistical API/account as
+    NDVI/Thermal/Optical, per-DEM-candidate core/halo check, see
+    sar_source_mobile.py for the full real-literature-grounded
+    two-directional/per-polarization design) always attempted for every
+    DEM candidate, using the SAME shared access token. Runs
+    independently of NDVI's, Thermal's, and Optical's own success or
+    failure.
+
     In the common case (live NDVI succeeds for at least one candidate),
-    NDVI, Thermal, and Optical results are combined per-candidate so a
-    single candidate can be corroborated by any subset of the three. In
+    NDVI, Thermal, Optical, and SAR results are combined per-candidate so
+    a single candidate can be corroborated by any subset of the four. In
     the rare case where live NDVI fails for every candidate (triggering
-    the offline NDVI raster fallback), Thermal's AND Optical's results
-    are still fully recorded (fourth_evidence_detail /
-    fifth_evidence_detail) but are NOT folded into that fallback's
-    per-candidate correlation notes -- see this module's own docstring
-    for why (unconfirmed index/geometric alignment guarantees in that
-    code path). Neither Thermal nor Optical has an offline-raster
-    fallback of its own yet (a real, known, honestly-noted gap, unlike
-    NDVI).
+    the offline NDVI raster fallback), Thermal's, Optical's, AND SAR's
+    results are still fully recorded (fourth_evidence_detail /
+    fifth_evidence_detail / ninth_evidence_detail) but are NOT folded
+    into that fallback's per-candidate correlation notes -- see this
+    module's own docstring for why (unconfirmed index/geometric
+    alignment guarantees in that code path). None of Thermal, Optical,
+    or SAR has an offline-raster fallback of its own yet (a real, known,
+    honestly-noted gap, unlike NDVI).
 
     GPR (optional, use_gpr=True): a single real manual pick (two-way
     travel time + soil preset) anchored at this investigation's
@@ -1571,54 +1777,41 @@ def run_investigation_multi_json(
     evidence entry -- mirrors GPR's own wiring exactly. All ert_*
     parameters default to off/empty.
 
-    DETECTION STABILITY (ADDED THIS SESSION, automatic, no toggle):
-    after DEM candidates are detected, any candidate whose |z| falls
-    within stability_margin of dem_zscore_threshold is automatically
-    re-tested at max_auto_stability_candidates independent offset AOI
-    windows (see _select_stability_candidates()/_run_stability_check()
-    above), reusing the primary DEM fetch's own live-first/offline-
-    fallback pattern for each offset. Results feed evidence_record.py's
-    seventh evidence slot and, via debate_mobile.py, Scientific
-    Steward's confidence ceiling as an unconditional cap for fragile
-    candidates -- see steward_confidence_ceiling.py's own docstring.
-    Never fails the investigation -- a stability sub-fetch failure is
-    recorded honestly, never silently treated as instability, and a
-    candidate whose |z| doesn't qualify simply has no stability data at
-    all (unknown, not assumed stable).
+    DETECTION STABILITY (automatic, no toggle): after DEM candidates are
+    detected, any candidate whose |z| falls within stability_margin of
+    dem_zscore_threshold is automatically re-tested at
+    max_auto_stability_candidates independent offset AOI windows (see
+    _select_stability_candidates()/_run_stability_check() above),
+    reusing the primary DEM fetch's own live-first/offline-fallback
+    pattern for each offset. Results feed evidence_record.py's seventh
+    evidence slot and, via debate_mobile.py, Scientific Steward's
+    confidence ceiling as an unconditional cap for fragile candidates.
+    Never fails the investigation.
 
-    TEMPORAL PERSISTENCE (ADDED THIS SESSION, automatic, no toggle):
-    after the NDVI/Thermal/Optical snapshot checks above, every DEM
-    candidate is also checked for whether each of those three sources'
-    anomaly signal reproduces across multiple real, independent
-    satellite acquisitions over a temporal_persistence_days_back-day
-    window (default 180 -- see _run_temporal_persistence_checks()/
-    TemporalPersistenceResult above), using the SAME shared Copernicus
-    token as the snapshot checks. Runs unconditionally for every DEM
-    candidate, unlike Detection Stability's bounded borderline subset --
-    see this module's own docstring, TEMPORAL PERSISTENCE section, for
-    the real network-cost tradeoff this implies. Results are combined
-    per-candidate (one TemporalPersistenceResult with ndvi/thermal/
-    optical sub-dicts) and feed evidence_record.py's eighth evidence
-    slot, then (via debate_mobile.py) Scientific Steward's confidence
-    ceiling as a robustness input -- NOT as a new independent evidence
-    source (see evidence_record.py's own docstring for the three locked
-    design decisions behind this). Never fails the investigation -- a
-    per-source fetch failure for one candidate is recorded honestly as
-    that source being None for that candidate (untested, never assumed
-    unstable), and the other two sources and every other candidate are
-    unaffected.
+    TEMPORAL PERSISTENCE (automatic, no toggle): after the NDVI/Thermal/
+    Optical snapshot checks above, every DEM candidate is also checked
+    for whether each of those three sources' anomaly signal reproduces
+    across multiple real, independent satellite acquisitions over a
+    temporal_persistence_days_back-day window (default 180 -- see
+    _run_temporal_persistence_checks()/TemporalPersistenceResult above),
+    using the SAME shared Copernicus token as the snapshot checks.
+    Deliberately excludes SAR (see TemporalPersistenceResult's own
+    docstring). Results feed evidence_record.py's eighth evidence slot,
+    then Scientific Steward's confidence ceiling as a robustness input --
+    NOT as a new independent evidence source. Never fails the
+    investigation.
 
     Writes investigation_status.json into offline_data_root as it works
-    (phase "dem" / "ndvi" / "thermal" / "optical" / "stability" /
-    "persistence" / "done"), polled by MainActivity.kt for live
-    progress display. Best-effort -- never raises on its own.
+    (phase "dem" / "ndvi" / "thermal" / "optical" / "sar" / "stability" /
+    "persistence" / "done"), polled by MainActivity.kt for live progress
+    display. Best-effort -- never raises on its own.
 
     Raises ValueError if use_gpr=True without both gpr_soil_preset_key
     and gpr_two_way_time_ns, or if use_ert=True without both
     ert_resistivity_ohm_m and ert_depth_m. Raises
     OpenTopographyFetchError if DEM is unavailable both live and
     offline (see above) -- this is the only hard failure; every
-    NDVI-side, Thermal-side, Optical-side, GPR-side, ERT-side,
+    NDVI-side, Thermal-side, Optical-side, SAR-side, GPR-side, ERT-side,
     Stability-side, and Temporal-Persistence-side failure degrades
     gracefully with an honest limitations[] entry instead.
     """
@@ -1662,7 +1855,7 @@ def run_investigation_multi_json(
         min_area_cells=3,
     )
 
-    # --- DETECTION STABILITY: automatic, borderline-only (added this session) ---
+    # --- DETECTION STABILITY: automatic, borderline-only (added a prior session) ---
     stability_candidates = _select_stability_candidates(
         dem_candidates, dem_zscore_threshold, stability_margin, max_auto_stability_candidates,
     )
@@ -1690,7 +1883,7 @@ def run_investigation_multi_json(
         ert_entry_method, ert_device_note,
     )
 
-    # --- Shared Copernicus token, fetched ONCE for NDVI, Thermal, AND Optical ---
+    # --- Shared Copernicus token, fetched ONCE for NDVI, Thermal, Optical, AND SAR ---
     n_candidates = len(dem_candidates)
     token, token_error_message = _get_shared_copernicus_token(
         ndvi_client_id, ndvi_client_secret, timeout=ndvi_timeout_s,
@@ -1741,12 +1934,27 @@ def run_investigation_multi_json(
     )
     n_optical_errors = sum(1 for r in optical_results if r.error is not None)
 
+    # --- SAR: real per-candidate check, independent of NDVI's/Thermal's/
+    # Optical's outcome (ADDED THIS SESSION) ---
+    _write_investigation_status(offline_data_root, "sar", 0, max(1, n_candidates))
+
+    def _report_sar_progress(done: int, total: int) -> None:
+        _write_investigation_status(offline_data_root, "sar", done, total)
+
+    sar_results = _run_sar_checks(
+        dem_candidates, ndvi_client_id, ndvi_client_secret,
+        token, token_error_message,
+        detection_zscore_threshold=sar_zscore_threshold,
+        timeout=sar_timeout_s,
+        progress_callback=_report_sar_progress,
+    )
+    n_sar_errors = sum(1 for r in sar_results if r.error is not None)
+
     # --- TEMPORAL PERSISTENCE: real per-candidate check across all
-    # three sources, UNCONDITIONAL per decision 1 (see evidence_record.py's
-    # own EIGHTH EVIDENCE SLOT docstring) -- runs independently of
-    # whether NDVI's own snapshot check succeeded, failed, or fell back
-    # to the offline raster path this run, mirroring Thermal's/
-    # Optical's own snapshot-check independence from NDVI exactly. ---
+    # three sources (NDVI/Thermal/Optical only -- see
+    # TemporalPersistenceResult's own docstring for why SAR is
+    # deliberately excluded), UNCONDITIONAL per decision 1 (see
+    # evidence_record.py's own EIGHTH EVIDENCE SLOT docstring). ---
     _write_investigation_status(offline_data_root, "persistence", 0, max(1, n_candidates))
 
     def _report_persistence_progress(done: int, total: int) -> None:
@@ -1772,10 +1980,12 @@ def run_investigation_multi_json(
 
     fourth_evidence: object = None
     fifth_evidence: object = None
+    ninth_evidence: object = None
     used_offline_ndvi = False
     ndvi_limitations: list[str] = []
     thermal_limitations: list[str] = []
     optical_limitations: list[str] = []
+    sar_limitations: list[str] = []
 
     second_evidence = RealNdviCoreHaloEvidence(
         n_candidates_checked=n_candidates, n_fetch_errors=n_ndvi_errors,
@@ -1785,6 +1995,9 @@ def run_investigation_multi_json(
     )
     fifth_evidence = RealOpticalCoreHaloEvidence(
         n_candidates_checked=n_candidates, n_fetch_errors=n_optical_errors,
+    )
+    ninth_evidence = RealSarCoreHaloEvidence(
+        n_candidates_checked=n_candidates, n_fetch_errors=n_sar_errors,
     )
 
     if dem_candidates and n_ndvi_errors == n_candidates:
@@ -1836,6 +2049,14 @@ def run_investigation_multi_json(
                 "Thermal above. Optical has no offline-raster fallback of "
                 "its own yet either."
             )
+            sar_limitations.append(
+                "Because NDVI fell back to the offline raster/geometric "
+                "correlation path this run, SAR's per-candidate results "
+                "(recorded below) were NOT combined into that path's "
+                "supporting_sources/notes, for the same reason as Thermal "
+                "and Optical above. SAR has no offline-raster fallback of "
+                "its own either."
+            )
         except OfflineDataUnavailableError as offline_ndvi_error:
             ndvi_limitations.append(
                 f"Live per-candidate NDVI checks were unavailable for "
@@ -1844,186 +2065,4 @@ def run_investigation_multi_json(
                 f"({offline_ndvi_error}). NDVI correlation could not be "
                 f"performed for this run -- the DEM results above are "
                 f"unaffected."
-            )
-            second_anomalies = ndvi_results
-            second_anomalies_are_candidates = False
-            correlation_results = _build_correlated_candidates(
-                dem_candidates, ndvi_results, thermal_results, optical_results,
-            )
-    else:
-        second_anomalies = ndvi_results
-        second_anomalies_are_candidates = False
-        correlation_results = _build_correlated_candidates(
-            dem_candidates, ndvi_results, thermal_results, optical_results,
-        )
-        if n_ndvi_errors > 0:
-            ndvi_limitations.append(
-                f"{n_ndvi_errors} of {n_candidates} candidate(s) had a real "
-                f"NDVI check unavailable (network/auth/no-data) and were "
-                f"recorded with the real reason rather than silently "
-                f"dropped or faked."
-            )
-
-    if n_thermal_errors > 0 and n_thermal_errors < n_candidates:
-        thermal_limitations.append(
-            f"{n_thermal_errors} of {n_candidates} candidate(s) had a real "
-            f"Thermal check unavailable (network/auth/no-data/cloud cover) "
-            f"and were recorded with the real reason rather than silently "
-            f"dropped or faked."
-        )
-    elif n_thermal_errors == n_candidates and n_candidates > 0:
-        thermal_limitations.append(
-            f"Real Thermal checks were unavailable for every candidate "
-            f"this run: {thermal_results[0].error}. Thermal contributed "
-            f"no corroboration this run; DEM/NDVI results above are "
-            f"unaffected."
-        )
-
-    if n_optical_errors > 0 and n_optical_errors < n_candidates:
-        optical_limitations.append(
-            f"{n_optical_errors} of {n_candidates} candidate(s) had a real "
-            f"Optical check unavailable (network/auth/no-data/cloud cover) "
-            f"and were recorded with the real reason rather than silently "
-            f"dropped or faked."
-        )
-    elif n_optical_errors == n_candidates and n_candidates > 0:
-        optical_limitations.append(
-            f"Real Optical checks were unavailable for every candidate "
-            f"this run: {optical_results[0].error}. Optical contributed "
-            f"no corroboration this run; DEM/NDVI/Thermal results above "
-            f"are unaffected."
-        )
-
-    record = build_investigation_record(
-        aoi, dem, dem_candidates, dem_zscore_threshold, dem_kernel_sigma_cells,
-        second_evidence=second_evidence,
-        second_anomalies=second_anomalies,
-        second_evidence_type="NDVI",
-        correlation_results=correlation_results,
-        second_anomalies_are_candidates=second_anomalies_are_candidates,
-        third_evidence=gpr_evidence,
-        third_evidence_type="GPR",
-        fourth_evidence=fourth_evidence,
-        fourth_anomalies=thermal_results,
-        fourth_evidence_type="THERMAL",
-        fifth_evidence=fifth_evidence,
-        fifth_anomalies=optical_results,
-        fifth_evidence_type="OPTICAL",
-        sixth_evidence=ert_evidence,
-        sixth_evidence_type="ERT",
-        seventh_evidence=(
-            StabilityCheckEvidence(
-                n_candidates_tested=len(stability_results),
-                margin=stability_margin,
-                offsets_m=DEFAULT_AUTO_STABILITY_OFFSETS_M,
-            ) if stability_results else None
-        ),
-        seventh_anomalies=stability_results,
-        seventh_evidence_type="DETECTION_STABILITY",
-        eighth_evidence=(
-            TemporalPersistenceCheckEvidence(
-                n_candidates_checked=n_candidates,
-                days_back=temporal_persistence_days_back,
-                n_ndvi_fetch_errors=n_ndvi_persistence_errors,
-                n_thermal_fetch_errors=n_thermal_persistence_errors,
-                n_optical_fetch_errors=n_optical_persistence_errors,
-            ) if persistence_results else None
-        ),
-        eighth_anomalies=persistence_results,
-    )
-
-    if used_offline_dem:
-        record.limitations.append(
-            f"This run used the offline DEM library, not a live fetch -- "
-            f"the live OpenTopography attempt failed with: {live_dem_error}. "
-            f"If you expected a live fetch to succeed (e.g. you have "
-            f"network and a valid API key), this real error message is the "
-            f"actual reason it didn't."
-        )
-
-    if not used_offline_ndvi:
-        record.limitations.append(
-            "Real NDVI in this run (where a live per-candidate check "
-            "succeeded) is a TARGETED PER-CANDIDATE check (core bbox vs. "
-            "halo bbox around each DEM candidate), not an independent "
-            "full-grid NDVI scan -- unlike the DEM anomaly detector, this "
-            "method cannot discover a candidate that DEM missed. It can "
-            "only confirm or fail to confirm vegetation stress at "
-            "locations DEM already flagged. The halo bbox also "
-            "geometrically includes the core bbox rather than being a "
-            "true annulus, a documented approximation of the underlying "
-            "Statistical API's bbox-only interface."
-        )
-    record.limitations.append(
-        "Real Thermal in this run is, like NDVI's real per-candidate "
-        "check, a TARGETED PER-CANDIDATE check (core bbox vs. halo bbox "
-        "around each DEM candidate), not an independent full-grid "
-        "thermal scan -- it cannot discover a candidate that DEM missed, "
-        "only confirm or fail to confirm a thermal anomaly at locations "
-        "DEM already flagged. Landsat's 30m (resampled from ~100m native) "
-        "thermal resolution is coarser than Sentinel-2's 10m used for "
-        "NDVI/Optical. This is Landsat Level 1 Top-of-Atmosphere "
-        "BRIGHTNESS TEMPERATURE, not atmospherically-corrected surface "
-        "temperature (Copernicus Data Space Ecosystem does not offer "
-        "Landsat Level 2) -- it can be influenced by atmospheric "
-        "conditions on top of any real ground-level thermal contrast, "
-        "and a thermal anomaly can arise from many causes besides a "
-        "buried feature (soil moisture, shadow, recent land use, "
-        "atmospheric effects) -- no causal interpretation should be "
-        "inferred from this check alone."
-    )
-    record.limitations.append(
-        "Real Optical in this run is, like NDVI's and Thermal's real "
-        "per-candidate checks, a TARGETED PER-CANDIDATE check (core bbox "
-        "vs. halo bbox around each DEM candidate), not an independent "
-        "full-grid optical scan -- it cannot discover a candidate that "
-        "DEM missed, only confirm or fail to confirm a visible-brightness "
-        "anomaly at locations DEM already flagged. This measures "
-        "broadband visible reflectance (mean of B02/B03/B04), the real "
-        "aerial-archaeology 'soilmark' signature -- but on VEGETATED "
-        "ground it measures canopy brightness, not soil tone, since only "
-        "water (not vegetation) is masked out of the underlying pixels "
-        "(see optical_source_mobile.py's own docstring for the full "
-        "masking-design-decision reasoning). An optical anomaly can arise "
-        "from many causes besides a buried feature (soil moisture, "
-        "shadow, recent land use, seasonal vegetation cover) -- no "
-        "causal interpretation should be inferred from this check alone."
-    )
-    # Temporal Persistence's own general explanatory limitations note
-    # is already added by build_investigation_record() itself (see
-    # evidence_record.py's own EIGHTH EVIDENCE SLOT block -- appended
-    # only when persistence_results is non-empty) -- deliberately not
-    # duplicated here, mirroring how Detection Stability's own
-    # explanatory note lives solely in evidence_record.py too. Only add
-    # a note here for the specific edge case where every source failed
-    # for every candidate this run (nothing useful was gathered), since
-    # that's a distinct, actionable signal the general explanatory note
-    # doesn't call out on its own.
-    if (
-        n_candidates > 0
-        and n_ndvi_persistence_errors == n_candidates
-        and n_thermal_persistence_errors == n_candidates
-        and n_optical_persistence_errors == n_candidates
-    ):
-        record.limitations.append(
-            "Real temporal persistence checks were unavailable for every "
-            "candidate and every source this run (no network, or "
-            "Copernicus credentials not yet configured) -- no persistence "
-            "evidence was gathered this run; the DEM/NDVI/Thermal/Optical "
-            "snapshot results above are unaffected."
-        )
-
-    for note in ndvi_limitations:
-        record.limitations.append(note)
-    for note in thermal_limitations:
-        record.limitations.append(note)
-    for note in optical_limitations:
-        record.limitations.append(note)
-    if gpr_limitation:
-        record.limitations.append(gpr_limitation)
-    if ert_limitation:
-        record.limitations.append(ert_limitation)
-
-    _write_investigation_status(offline_data_root, "done", max(1, n_candidates), max(1, n_candidates))
-
-    return record.to_json()
+  
