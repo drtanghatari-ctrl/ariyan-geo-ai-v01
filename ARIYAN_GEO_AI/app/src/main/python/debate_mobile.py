@@ -986,19 +986,24 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
     has_ert = bool(candidate.get("ert_confirmed"))
 
     # DEM CROSS-CHECK (ADDED THIS SESSION): candidate["dem_cross_check_tested"]/
-    # candidate["dem_cross_check_confirmed"] are now attached (see
-    # _attach_dem_cross_check_detail() above) and available here, but are
-    # NOT YET passed into steward_evaluate_candidate() below -- doing so
-    # correctly requires adding a matching parameter to
-    # steward_engine.evaluate_candidate() AND the actual unconditional-cap
-    # logic in steward_confidence_ceiling.govern_confidence() (mirroring
-    # stability_score's own priority tier), which requires the REAL
-    # current content of both files, not a guess. Deliberately deferred to
-    # avoid silently breaking already-working Steward Stage 1 behavior --
-    # same discipline this project already applies everywhere else
-    # (verify against real files, never guess at a codebase's internals).
-    # dem_cross_check_tested = candidate.get("dem_cross_check_tested")
-    # dem_cross_check_confirmed = candidate.get("dem_cross_check_confirmed")
+    # candidate["dem_cross_check_confirmed"] are attached above by
+    # _attach_dem_cross_check_detail(). Now that the real
+    # steward_confidence_ceiling.py/steward_warnings.py content is in
+    # hand and both have been updated with the matching unconditional
+    # cap/warning (mirroring stability_score's own priority tier -- see
+    # those modules' own SECOND INDEPENDENT DEM CROSS-CHECK EXTENSION
+    # docstrings), this is passed straight through to
+    # steward_evaluate_candidate() below. dem_cross_check_tested is
+    # False whenever the check never ran for this candidate (or the
+    # second dataset's fetch failed this run) -- in that case the value
+    # passed downstream is None ("not tested"), NOT
+    # dem_cross_check_confirmed's own (meaningless, unset) value, to
+    # avoid ever passing a stale/undefined boolean as if it were a real
+    # tested result.
+    dem_cross_check_tested = bool(candidate.get("dem_cross_check_tested"))
+    dem_cross_check_confirmed = (
+        candidate.get("dem_cross_check_confirmed") if dem_cross_check_tested else None
+    )
 
     stability_score = candidate.get("stability_score")
     stability_windows_detected = candidate.get("stability_windows_detected")
@@ -1053,6 +1058,7 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
         stability_windows_detected=stability_windows_detected,
         stability_windows_fetched=stability_windows_fetched,
         stability_z_range=stability_z_range,
+        dem_cross_check_confirmed=dem_cross_check_confirmed,
         persistence_score=persistence_score,
         interpretation=steward_note,
         hypothesis=hypothesis,
