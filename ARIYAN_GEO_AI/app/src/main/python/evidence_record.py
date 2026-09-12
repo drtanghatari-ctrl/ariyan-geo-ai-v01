@@ -75,7 +75,7 @@ how much the EXISTING DEM evidence can be trusted). See
 steward_confidence_ceiling.py's own docstring for why it feeds the
 confidence ceiling directly instead of correlation().
 
-EIGHTH EVIDENCE SLOT ADDED THIS SESSION (Temporal Persistence): checks
+EIGHTH EVIDENCE SLOT ADDED A PRIOR SESSION (Temporal Persistence): checks
 whether NDVI/Thermal/Optical's core-vs-halo anomaly (see the second/
 fourth/fifth evidence items above) reproduces across MULTIPLE real,
 independent satellite acquisitions in a wider time window, rather than
@@ -121,10 +121,7 @@ notes for the full reasoning):
      Stability: NO `derived_products` entry is added for this slot, it
      is never folded into `correlation_results`/`supporting_sources`,
      and it feeds Scientific Steward as a confidence-ceiling input
-     instead (a warning type, in the spirit of Stability's own
-     WINDOW_SENSITIVITY_WARNING -- exact mechanism not yet finalized,
-     to be designed alongside steward_confidence_ceiling.py separately
-     from this evidence-record change).
+     instead.
 
 `eighth_evidence` (optional, like seventh_evidence) is an aggregate
 wrapper object describing the method/window/thresholds used this run
@@ -133,6 +130,35 @@ when `eighth_anomalies` is non-empty, mirroring Stability's own
 "no misleading zero-candidates entry on every run" precedent, even
 though decision 1 above means this will in practice almost always be
 non-empty once at least one DEM candidate exists.
+
+NINTH EVIDENCE SLOT ADDED THIS SESSION (SAR): real Sentinel-1 backscatter
+core/halo check (sar_source_mobile.fetch_sar_core_halo_check(), see that
+module's own docstring for the full real-literature-grounded reasoning).
+UNLIKE Detection Stability and Temporal Persistence, SAR IS a genuine new
+independent per-DEM-candidate corroborating evidence source -- it follows
+the FOURTH/FIFTH (Thermal/Optical) pattern exactly, not the
+seventh/eighth pattern: a single aggregate wrapper appended to `evidence`
+(describing the method used this run), plus a per-candidate detail list
+kept OUT of `anomalies[]` (a SAR result's schema -- vv/vh sub-dicts, each
+with their own core_mean/halo_mean/z_score -- has nothing in common with
+AnomalyCandidate) and reported in its own `ninth_evidence_detail` field.
+It DOES get a `derived_products` entry (mirroring fourth/fifth, unlike
+seventh/eighth), and it DOES participate in correlation()/
+supporting_sources (added in investigation_multi_mobile.py's
+_build_correlated_candidates()) -- SAR is architecturally a genuinely
+independent physical measurement (active radar, not passive optical/
+thermal), so it earns its own place in steward_evidence_matrix.py's
+INDEPENDENCE_GROUPS rather than being folded into the existing
+optical_family group.
+
+Each ninth_evidence_detail item combines BOTH polarizations (vv/vh
+sub-dicts, each None if that polarization had no usable data for this
+candidate this run) into ONE per-candidate result, following the same
+"combine sub-measurements into one item" convention eighth's ndvi/
+thermal/optical sub-dicts already established -- but unlike eighth,
+ninth_evidence_type IS a caller-supplied parameter here (always "SAR" in
+practice), matching third/fourth/fifth/sixth/seventh's convention, since
+there is only one evidence_type to name (SAR), not three combined ones.
 
 CONFIDENCE-STATEMENT FIX (a prior session): previously, the "co-located
 anomalies in X + Y" phrase listed every evidence_type present in
@@ -145,9 +171,11 @@ Optical) would make it actively wrong (claiming a source co-located
 candidates it never touched). Fixed to derive the list from the sources
 that actually appear in `supporting_sources` for CORROBORATED candidates
 specifically -- this logic needed no further change to accommodate
-Optical, ERT, Stability, or Temporal Persistence: none of these four
-ever participates in correlation() or appears in supporting_sources, so
-this phrase correctly never mentions any of them.
+Optical, ERT, Stability, Temporal Persistence, or SAR: SAR's own
+evidence_type only ever appears in supporting_sources when it genuinely
+corroborated a candidate (see investigation_multi_mobile.py's
+_build_correlated_candidates()), so this phrase stays correct
+automatically.
 
 CONFIDENCE-STATEMENT WORDING FIX (a prior session -- REAL on-device
 readability bug, reported by the user): the CORROBORATED branch of the
@@ -203,6 +231,7 @@ class InvestigationRecord:
     sixth_evidence_detail: list[dict] = field(default_factory=list)
     seventh_evidence_detail: list[dict] = field(default_factory=list)
     eighth_evidence_detail: list[dict] = field(default_factory=list)
+    ninth_evidence_detail: list[dict] = field(default_factory=list)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(asdict(self), indent=indent, default=str)
@@ -234,6 +263,9 @@ def build_investigation_record(
     seventh_evidence_type: str | None = None,
     eighth_evidence: Any = None,
     eighth_anomalies: list | None = None,
+    ninth_evidence: Any = None,
+    ninth_anomalies: list | None = None,
+    ninth_evidence_type: str | None = None,
 ) -> InvestigationRecord:
     """Build the InvestigationRecord JSON payload.
 
@@ -296,21 +328,32 @@ def build_investigation_record(
     source, it's a statement about how much the EXISTING DEM evidence
     can be trusted (see steward_confidence_ceiling.py's own docstring).
 
-    eighth_evidence/eighth_anomalies (optional, ADDED THIS SESSION) are
-    Temporal Persistence's real per-candidate results -- see this
-    module's own EIGHTH EVIDENCE SLOT docstring section above for the
-    three design decisions behind this slot's shape. Structurally like
-    seventh (aggregate wrapper + per-item detail list, no
-    derived_products entry, never folded into correlation()), but with
-    two real differences from seventh: (a) runs unconditionally for ALL
-    DEM candidates rather than a bounded borderline subset, so
-    `eighth_anomalies` is expected to be non-empty whenever this run has
-    at least one DEM candidate; (b) each item combines all three sources
-    (NDVI/Thermal/Optical) via ndvi/thermal/optical sub-dict fields
-    rather than being source-specific, so `eighth_evidence_type` is not
-    a caller-supplied parameter here -- it's the single fixed literal
-    "TEMPORAL_PERSISTENCE", tagged onto every eighth_evidence_detail
-    item below.
+    eighth_evidence/eighth_anomalies (optional) are Temporal
+    Persistence's real per-candidate results -- see this module's own
+    EIGHTH EVIDENCE SLOT docstring section above for the three design
+    decisions behind this slot's shape. Structurally like seventh
+    (aggregate wrapper + per-item detail list, no derived_products
+    entry, never folded into correlation()), but with two real
+    differences from seventh: (a) runs unconditionally for ALL DEM
+    candidates rather than a bounded borderline subset; (b) each item
+    combines all three sources (NDVI/Thermal/Optical) via ndvi/thermal/
+    optical sub-dict fields rather than being source-specific, so
+    `eighth_evidence_type` is not a caller-supplied parameter here --
+    it's the single fixed literal "TEMPORAL_PERSISTENCE".
+
+    ninth_evidence/ninth_anomalies (optional, ADDED THIS SESSION) are
+    SAR's real per-candidate backscatter core/halo results -- see this
+    module's own NINTH EVIDENCE SLOT docstring section above. UNLIKE
+    seventh/eighth, this DOES get a derived_products entry and DOES
+    participate in correlation()/supporting_sources -- SAR is a
+    genuine new independent evidence source, architecturally following
+    the fourth/fifth (Thermal/Optical) pattern: a single aggregate
+    wrapper appended to `evidence`, plus a per-candidate detail list
+    (each item combining vv/vh sub-dicts) kept out of `anomalies[]` and
+    reported in `ninth_evidence_detail`. ninth_evidence_type IS a
+    caller-supplied parameter (unlike eighth's fixed literal), since
+    there's only one evidence_type here ("SAR"), not three combined
+    sources sharing one slot.
     """
     evidence = [dem.as_evidence_record()]
     derived_products = [{
@@ -328,6 +371,7 @@ def build_investigation_record(
     sixth_evidence_detail: list[dict] = []
     seventh_evidence_detail: list[dict] = []
     eighth_evidence_detail: list[dict] = []
+    ninth_evidence_detail: list[dict] = []
 
     limitations = [
         "Anomalies reflect statistical deviation from local terrain/spectral "
@@ -480,17 +524,10 @@ def build_investigation_record(
     # Temporal Persistence (eighth) -- see this module's own EIGHTH
     # EVIDENCE SLOT docstring section for the three design decisions
     # behind this shape. Like Stability, only appended when there is at
-    # least one real item to report (decision 1 means this will in
-    # practice almost always be non-empty once any DEM candidate
-    # exists, but the check is kept for the same "no misleading
-    # zero-candidates entry" reason as Stability, and to stay correct
-    # for a future run where persistence checking is disabled/skipped
-    # entirely for some external reason). Per decision 3: NO
-    # derived_products entry (not a new measurement source), and
-    # eighth_evidence_detail is NEVER read by correlation() or folded
-    # into supporting_sources -- it feeds Scientific Steward as a
-    # confidence-ceiling input only (mechanism designed separately,
-    # alongside steward_confidence_ceiling.py).
+    # least one real item to report. Per decision 3: NO derived_products
+    # entry (not a new measurement source), and eighth_evidence_detail
+    # is NEVER read by correlation() or folded into supporting_sources
+    # -- it feeds Scientific Steward as a confidence-ceiling input only.
     if eighth_anomalies:
         if eighth_evidence is not None:
             evidence.append(eighth_evidence.as_evidence_record())
@@ -514,6 +551,50 @@ def build_investigation_record(
         eighth_evidence_detail = [
             {**asdict(a), "evidence_type": "TEMPORAL_PERSISTENCE"}
             for a in eighth_anomalies
+        ]
+
+    # SAR (ninth, ADDED THIS SESSION) -- see this module's own NINTH
+    # EVIDENCE SLOT docstring section. UNLIKE seventh/eighth, this is a
+    # genuine new independent evidence source: gets a derived_products
+    # entry, and (via investigation_multi_mobile.py's
+    # _build_correlated_candidates()) participates in correlation() and
+    # can appear in supporting_sources. Runs unconditionally for every
+    # DEM candidate, mirroring Thermal's/Optical's own no-toggle
+    # philosophy, so ninth_evidence_detail is expected to be populated
+    # whenever this run has at least one DEM candidate and SAR was
+    # attempted at all.
+    if ninth_evidence is not None:
+        evidence.append(ninth_evidence.as_evidence_record())
+        if getattr(ninth_evidence, "synthetic", False):
+            limitations.insert(0, (
+                f"THIS RUN USED SYNTHETIC {ninth_evidence_type}, NOT REAL "
+                f"DATA. Every '{ninth_evidence_type}' result below is a "
+                f"statistical description of the synthetic surface, not a "
+                f"claim about any real location."
+            ))
+        derived_products.append({
+            "product": f"{ninth_evidence_type} residual + z-score anomaly map",
+            "derived_from": ninth_evidence.source,
+            "method": "Gaussian regional-trend removal + z-score thresholding",
+            "kernel_sigma_cells": kernel_sigma_cells,
+            "zscore_threshold": zscore_threshold,
+        })
+        limitations.append(
+            "Real SAR (Sentinel-1) evidence in this run flags a core/halo "
+            "backscatter anomaly in EITHER direction (brighter OR darker "
+            "than surroundings) on VV and VH polarizations separately, "
+            "never assuming a single direction the way NDVI does -- "
+            "published research on Sentinel-1 over buried archaeological "
+            "features shows both signatures occur, driven by a mix of "
+            "soil moisture and surface roughness that can push either "
+            "way. This measures single-date backscatter statistics only; "
+            "it does not include the coherence/interferometric analysis "
+            "some published SAR archaeology methods also use, and should "
+            "be read as informative, not as strong evidence on its own."
+        )
+        ninth_evidence_detail = [
+            {**asdict(a), "evidence_type": ninth_evidence_type}
+            for a in (ninth_anomalies or [])
         ]
 
     correlation_dicts = []
@@ -545,14 +626,7 @@ def build_investigation_record(
             # CONFIDENCE-STATEMENT WORDING FIX (a prior session -- see module
             # docstring): only append the "N additional single-source
             # candidate(s) remain LOW confidence" sentence when there is
-            # actually a nonzero count to report. Previously this ran
-            # unconditionally, producing "...MODERATE to HIGH... 0
-            # additional single-source candidate(s) remain LOW confidence"
-            # for a run where every detected candidate was already
-            # CORROBORATED -- factually vacuous (0 candidates really do
-            # remain LOW), but read like a self-contradiction placing "LOW
-            # confidence" immediately after "MODERATE to HIGH" for what
-            # looked like the same candidate.
+            # actually a nonzero count to report.
             n_single_source_remaining = len(correlation_results) - n_corroborated
             if n_single_source_remaining > 0:
                 confidence += (
@@ -608,5 +682,7 @@ def build_investigation_record(
         record_kwargs["seventh_evidence_detail"] = seventh_evidence_detail
     if eighth_evidence_detail:
         record_kwargs["eighth_evidence_detail"] = eighth_evidence_detail
+    if ninth_evidence_detail:
+        record_kwargs["ninth_evidence_detail"] = ninth_evidence_detail
 
     return InvestigationRecord(**record_kwargs)
