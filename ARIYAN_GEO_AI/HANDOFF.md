@@ -1,4 +1,4 @@
-ARIYAN GEO AI — Status & Roadmap (updated 2026-09-12, SAR CLOSED + DEM CROSS-CHECK IN PROGRESS)
+ARIYAN GEO AI — Status & Roadmap (updated 2026-09-12, SAR + DEM CROSS-CHECK BOTH CLOSED)
 This file is the durable source of truth for project status. It is updated at the end of every working session so the project state survives even if a chat session or device is interrupted.
 
 What this is
@@ -37,20 +37,20 @@ All three confirmed fixed and working on real device. CLOSED.
 SAR (Sentinel-1) — CLOSED, CI GREEN
 Live-tested successfully on 2026-09-10 via Termux/curl (real VV/VH backscatter returned). Built and wired this session: `sar_source_mobile.py` (two-directional, VV/VH tracked separately -- grounded in real published Sentinel-1 archaeology literature, not guessed), plus the ninth evidence slot across `evidence_record.py`, `investigation_multi_mobile.py`, `steward_evidence_matrix.py` (SAR gets its OWN "radar" independence group, separate from NDVI/Thermal/Optical's "optical_family"), `steward_engine.py`, and `debate_mobile.py`. All 5 files sandbox-verified (correlation logic, full investigation run, `effective_independent_sources` math, full debate run) before delivery. No Kotlin/XML changes needed -- SAR mirrors Thermal/Optical's automatic no-toggle design. User committed, confirmed CI green. **CLOSED.**
 
-SECOND INDEPENDENT DEM CROSS-CHECK (queue item 4) — IN PROGRESS, PARTIALLY BUILT THIS SESSION
+SECOND INDEPENDENT DEM CROSS-CHECK (queue item 4) — CLOSED, ALL FILES SANDBOX-VERIFIED
 Cross-validates the elevation VALUE of each DEM candidate against a second, genuinely independent global elevation dataset -- distinct from the closed window-sensitivity fix (which re-tests ONE source across sampling windows, not a second source).
 
 DATASET CHOICE, VERIFIED AGAINST REAL OPENTOPOGRAPHY DOCUMENTATION (corrects an earlier casual assumption): NASADEM was the obvious first guess, but OpenTopography's own dataset documentation confirms NASADEM is explicitly a reprocessing of the SAME underlying SRTM radar acquisitions this project's primary DEM (SRTMGL1) already uses -- cross-checking against it would not be genuinely independent. **COP30 (Copernicus GLO-30)** was chosen instead: derived from the TanDEM-X mission, a different agency (ESA), a different acquisition period (2011-2015 vs. SRTM's 2000 campaign) -- a real independent confirmation. COP30 is also OpenTopography's own current default dataset.
 
 DESIGN DECISION: unlike SAR, this does NOT count as a new independent evidence source -- a second DEM measures the SAME physical quantity (elevation) via a different pipeline, not a different physical mechanism. Follows Detection Stability's/Temporal Persistence's philosophy (no `derived_products` entry, never folds into `correlation()`/`supporting_sources`), not SAR's (no new `INDEPENDENCE_GROUPS` entry). Feeds Scientific Steward as an UNCONDITIONAL cap, mirroring Stability's own priority tier (not Temporal Persistence's softer one) -- a candidate that fails to reproduce in COP30 is not rescued by any amount of other evidence.
 
-BUILT AND SANDBOX-VERIFIED THIS SESSION: evidence_record.py's tenth slot, `investigation_multi_mobile.py`'s `DemCrossCheckResult`/`_run_dem_cross_check()`/`DemCrossCheckEvidence` (ONE extra COP30 fetch per investigation, reused for every candidate via nearest-match -- much cheaper than Stability's per-candidate multi-offset re-fetch), and `debate_mobile.py`'s `_attach_dem_cross_check_detail()`. Full end-to-end test confirmed a mocked COP30 match correctly confirms a candidate with its own real z-score, gets no derived_products entry, and never enters correlation.
+FULLY BUILT AND SANDBOX-VERIFIED THIS SESSION: evidence_record.py's tenth slot, `investigation_multi_mobile.py`'s `DemCrossCheckResult`/`_run_dem_cross_check()`/`DemCrossCheckEvidence` (ONE extra COP30 fetch per investigation, reused for every candidate via nearest-match -- much cheaper than Stability's per-candidate multi-offset re-fetch), `debate_mobile.py`'s `_attach_dem_cross_check_detail()`, and -- once the user supplied their real current content -- `steward_confidence_ceiling.py`'s new tri-state `dem_cross_check_confirmed` gate (unconditional LOW cap when False, at the SAME priority tier as `stability_score`, before source count/field validation are ever consulted) and `steward_warnings.py`'s new `DEM_CROSS_CHECK_WARNING` (fires only when the check genuinely ran and did not reproduce -- re-checked directly, no derived "capped" flag needed, since this gate is unconditional and never hidden behind a downstream branch, unlike Temporal Persistence's softer one). `steward_engine.py` threads `dem_cross_check_confirmed` through to both. `debate_mobile.py`'s `_build_steward_report()` now computes the real tri-state value from the attached candidate flags (None when never tested or the second dataset's fetch failed -- never a stale/undefined boolean) and passes it straight through.
 
-NOT YET DONE: the actual confidence-ceiling CAP logic in `steward_confidence_ceiling.py` and the matching warning in `steward_warnings.py` -- deliberately NOT touched this session because doing so correctly requires each file's REAL current content (not a guess), to avoid silently breaking already-working Steward Stage 1 behavior. `steward_engine.py` and `debate_mobile.py` also still need a `has_dem_cross_check`-style parameter threaded through once those two files are in hand. The candidate-level flags (`dem_cross_check_tested`/`dem_cross_check_confirmed`) ARE already attached and available in `debate_mobile.py` -- they're just not yet passed into the Steward call.
+Three real end-to-end scenarios sandbox-verified: (1) COP30 mismatch → Steward band correctly capped to LOW with `DEM_CROSS_CHECK_WARNING` present; (2) COP30 confirms → no cap, no warning (informative only); (3) COP30 fetch fails entirely → honestly treated as "not tested," no cap, no warning -- absence of a test is never treated as evidence against a candidate. **CLOSED.**
 
-NEXT SESSION RESUME POINT: get `steward_confidence_ceiling.py` and `steward_warnings.py` from the user (their real current content), add the unconditional cap + warning mirroring Detection Stability's own mechanism, thread `has_dem_cross_check`/`dem_cross_check_confirmed` through `steward_engine.py` and `debate_mobile.py`'s `_build_steward_report()`, then sandbox-verify and hand off for commit. After that: queue item 4 closes, and Grand Projects Framework (not yet scoped) is next.
+NEXT UP: Grand Projects Framework (not yet scoped — ask user for specifics before starting).
 
-Known bugsKnown bugs
+Known bugsKnown bugsKnown bugs
 - "Candidate null" intermittent header bug — deprioritized by user, not being worked on, root cause not found.
 
 Cleanup — paused, not yet done
@@ -82,7 +82,7 @@ Working infrastructure notes
 
 Resume-here checklist (read this first after any interruption)
 1. Roadmap items (1)–(3), (5), plus every evidence source through SAR, are ALL closed and on-device/CI confirmed. Nothing there is mid-flight.
-2. Second independent DEM cross-check (queue item 4): the data-gathering half is built and sandbox-verified (COP30 fetch, per-candidate matching, evidence slot, debate_mobile.py attach). The Steward-side cap is NOT yet wired -- get the real `steward_confidence_ceiling.py`/`steward_warnings.py` from the user first, do not guess at their internals.
-3. After the DEM cross-check closes: Grand Projects Framework (not yet scoped — ask for specifics).
+2. Second independent DEM cross-check (queue item 4) is fully CLOSED and sandbox-verified end-to-end, including the Steward-side cap and warning.
+3. Grand Projects Framework is next (not yet scoped — ask user for specifics before starting).
 4. Lower-priority, can be picked up any time: delete the 2 stale duplicate files; the intermittent "Candidate null" bug (deprioritized). Do NOT investigate the "Python Package using Conda" workflow.
 5. Item (4) [roadmap]'s automated GPR device-export parsing stays parked until GPR hardware is affordable.
