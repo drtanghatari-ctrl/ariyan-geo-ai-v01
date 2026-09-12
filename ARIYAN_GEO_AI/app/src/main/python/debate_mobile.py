@@ -47,7 +47,9 @@ REAL SCHEMA NOTES (why this file looks the way it does):
   used to be silently merged into one field; conflating them was the
   root cause of a real on-device bug, now fixed and unaffected by
   Optical's, ERT's, or Stability's addition (each follows its own
-  documented, distinct match strategy, never touching this split).
+  documented, distinct match strategy, never touching this split). SAR
+  (added this session) follows the SAME precise pattern from the start
+  -- see SAR PRECISION, BUILT IN FROM THE START note below.
 - SCOPE: only anomalies[] entries with evidence_type == "DEM" (or no
   evidence_type at all -- single-source runs) are debated. In synthetic-
   NDVI mode, anomalies[] can also hold NDVI-raster-detected candidates
@@ -135,8 +137,8 @@ candidate, since Scientific Steward needs the actual score value, not
 just a yes/no -- see _build_steward_report() below for exactly how it's
 read and passed through to steward_engine.evaluate_candidate().
 
-TEMPORAL PERSISTENCE EXTENSION, ADDED THIS SESSION -- closes out queue
-item 2: unlike GPR/ERT (single site-anchored readings) and unlike
+TEMPORAL PERSISTENCE EXTENSION, ADDED A PRIOR SESSION -- closes out
+queue item 2: unlike GPR/ERT (single site-anchored readings) and unlike
 Detection Stability (borderline-only subset), Temporal Persistence
 (evidence_record.py's eighth evidence slot -- see
 investigation_multi_mobile.py's _run_temporal_persistence_checks()) is
@@ -172,6 +174,34 @@ Stability's unconditional cap -- see steward_confidence_ceiling.py's
 own TEMPORAL PERSISTENCE EXTENSION docstring for the full reasoning on
 why this deliberately does not mirror Stability's mechanism.
 
+SAR EXTENSION, ADDED THIS SESSION: like NDVI/Thermal/Optical, real
+Sentinel-1 backscatter (evidence_record.py's ninth evidence slot -- see
+sar_source_mobile.py and investigation_multi_mobile.py's
+_run_sar_checks()) is a per-DEM-candidate check, run UNCONDITIONALLY at
+EACH candidate's own exact (lat, lon) -- so matching uses the SAME
+tight-tolerance exact-match approach as _attach_thermal_detail()/
+_attach_optical_detail() via the shared _attach_per_candidate_detail()
+helper -- see _attach_sar_detail() below. UNLIKE Thermal/Optical/NDVI
+(each a single flat mean/z-score result), SAR's own per-candidate result
+combines TWO sub-measurements (vv/vh) -- see investigation_multi_mobile.
+SarCoreHaloResult's own docstring. _attach_per_candidate_detail()'s
+existing exact-match/error-check logic still applies unchanged (it only
+needs each entry's lat/lon and error field, both present on
+SarCoreHaloResult exactly like the other three), setting
+candidate["sar_checked"] precisely -- SAR's OWN corroboration
+(candidate["sources"]) is set generically from correlation_entry's
+supporting_sources exactly like Optical's, no SAR-specific code needed
+in _build_candidate() itself.
+
+SAR PRECISION, BUILT IN FROM THE START (contrast with NDVI PRECISION FIX
+below): the whole-run-union imprecision NDVI suffered (checked_sources
+inheriting "SAR" from context["sources"] whenever SAR was attempted
+ANYWHERE this run, rather than genuinely succeeding for THIS candidate)
+is avoided for SAR from the outset -- run_debate_json() below applies
+the SAME strip-and-re-add correction to SAR's checked_sources membership
+that NDVI needed retrofitted, using the newly-added candidate["sar_checked"]
+flag, so SAR never ships with that bug in the first place.
+
 SOURCES-SPLIT FIX (a prior session -- REAL on-device bug, unaffected by
 Optical's, ERT's, or Stability's addition): candidate["sources"] is the
 PRECISE list of sources that actually corroborated this candidate
@@ -196,11 +226,15 @@ it's a statement about how much the existing DEM evidence can be
 trusted) -- see steward_confidence_ceiling.py's own docstring for why
 it's read as a confidence-ceiling modifier instead, never counted as an
 EvidenceCategory or folded into either sources list here. Temporal
-Persistence (ADDED THIS SESSION) doesn't participate in it either, for
-the SAME reason as Detection Stability -- see the TEMPORAL PERSISTENCE
-EXTENSION note above.
+Persistence doesn't participate in it either, for the SAME reason as
+Detection Stability -- see the TEMPORAL PERSISTENCE EXTENSION note
+above. SAR (added this session) DOES participate, exactly like Optical
+-- it is a genuine new corroborating evidence source (see
+investigation_multi_mobile.py's own docstring for why), so it follows
+the precise exact-match pattern from the start (see SAR PRECISION note
+above).
 
-NDVI PRECISION FIX (this session -- REAL on-device bug, previously
+NDVI PRECISION FIX (a prior session -- REAL on-device bug, previously
 flagged as deferred): a real investigation run showed candidate
 ["checked_sources"] including "NDVI" purely because
 investigation_multi_mobile.py always appends a RealNdviCoreHaloEvidence
@@ -238,21 +272,8 @@ why non-DEM candidates from that path are skipped entirely), so
 ndvi_checked correctly defaults to False there too, rather than
 guessing. has_ndvi in _build_steward_report() below needed NO separate
 change -- it already reads candidate["checked_sources"], which is now
-precise by the time that function runs.
-
-KNOWN, FLAGGED, NOT-YET-FIXED IMPRECISION -- NOW FIXED (see NDVI
-PRECISION FIX above; this section kept as history rather than deleted,
-per this project's own preference for an honest, visible record over a
-silently rewritten one): this used to read "candidate["checked_sources"]
-... cannot distinguish 'NDVI genuinely succeeded for THIS candidate'
-from 'NDVI evidence exists somewhere in this run but genuinely failed
-for EVERY candidate'. The SAME exact-match technique now used for
-Thermal, Optical, and Stability could fix this too, if wanted --
-deliberately not applied to NDVI here without asking first, since it
-would change already-proven on-device behavior." That question has now
-been asked and answered, with a real on-device case demonstrating the
-imprecision produced a wrong synthesis -- see NDVI PRECISION FIX above
-for the applied fix.
+precise by the time that function runs. SAR (added this session) gets
+the same correction applied in run_debate_json() below, from the start.
 
 SCIENTIFIC STEWARD STAGE 1 EXTENSION: after debate_engine.run_debate()
 returns its positions + synthesis for a candidate, this module also
@@ -270,13 +291,12 @@ guessing, per this project's zero-fabrication rule:
     union -- see SOURCES-SPLIT FIX above). DEM is unaffected by the NDVI
     PRECISION FIX above -- every debated candidate originates from a DEM
     anomaly, so "DEM" is always genuinely present.
-  - has_ndvi: real, taken from candidate["checked_sources"] -- now
-    PRECISE as of this session (see NDVI PRECISION FIX above): "NDVI"
-    only appears there when this specific candidate's real per-candidate
-    check genuinely succeeded, or NDVI genuinely corroborated it. This
-    function itself needed no code change -- it already read
-    checked_sources; the fix happened upstream, in run_debate_json(),
-    before this function is ever called.
+  - has_ndvi: real, taken from candidate["checked_sources"] -- precise
+    (see NDVI PRECISION FIX above): "NDVI" only appears there when this
+    specific candidate's real per-candidate check genuinely succeeded,
+    or NDVI genuinely corroborated it. This function itself needed no
+    code change -- it already read checked_sources; the fix happened
+    upstream, in run_debate_json(), before this function is ever called.
   - has_gpr / has_field_validation: real, taken directly from
     candidate["gpr_confirmed"] (see _attach_gpr() above -- set only
     when a real GPR pick colocated with this specific candidate).
@@ -287,6 +307,13 @@ guessing, per this project's zero-fabrication rule:
   - has_optical: real, taken directly from candidate["optical_checked"]
     (see _attach_optical_detail() below -- same "genuinely succeeded
     for THIS EXACT candidate" semantics as has_thermal).
+  - has_sar (ADDED THIS SESSION): real, taken directly from
+    candidate["sar_checked"] (see _attach_sar_detail() below -- same
+    "genuinely succeeded for THIS EXACT candidate" semantics as
+    has_thermal/has_optical; a per-polarization failure on one channel
+    doesn't set this False if the other channel succeeded -- see
+    SarCoreHaloResult's own docstring for why its own error field is
+    only set on a TOTAL failure).
   - has_ert: real, taken directly from candidate["ert_confirmed"] (see
     _attach_ert() below -- set only when a real ERT reading colocated
     with this specific candidate, exactly like has_gpr/
@@ -311,8 +338,8 @@ guessing, per this project's zero-fabrication rule:
     four values all default to None, meaning "not tested," not
     "unstable." See steward_confidence_ceiling.py's own docstring for
     exactly how these feed into the confidence ceiling.
-  - persistence_score (ADDED THIS SESSION): real, but a REDUCED value,
-    not a raw field read straight off the candidate -- computed by
+  - persistence_score: real, but a REDUCED value, not a raw field read
+    straight off the candidate -- computed by
     _compute_persistence_score_for_steward() below from candidate
     ["temporal_persistence"]'s ndvi/thermal/optical sub-dicts (set by
     _attach_temporal_persistence_detail()), restricted to ONLY the
@@ -324,9 +351,11 @@ guessing, per this project's zero-fabrication rule:
     average. None (meaning "not applicable," never "unstable" -- see
     steward_confidence_ceiling.py's own docstring) when this candidate
     has no temporal_persistence entry, none of its corroborating
-    sources are NDVI/THERMAL/OPTICAL, or every corroborating source's
-    own persistence check was itself untestable/hard-failed for this
-    candidate.
+    sources are NDVI/THERMAL/OPTICAL (SAR is deliberately excluded from
+    temporal persistence -- see investigation_multi_mobile.
+    TemporalPersistenceResult's own docstring), or every corroborating
+    source's own persistence check was itself untestable/hard-failed
+    for this candidate.
   - raw_debate_confidence: real, taken directly from
     synthesis["leading_confidence"] (0.0 when NO_DATA / absent, which
     correctly yields the Steward's NO_DATA band).
@@ -360,16 +389,16 @@ from debate_engine import run_debate
 from steward_engine import evaluate_candidate as steward_evaluate_candidate
 
 # Tolerance for matching a DEM candidate to its OWN per-candidate NDVI,
-# Thermal, Optical, or Stability detail entry. Deliberately tight (a few
-# meters) -- unlike GPR's/ERT's colocation-radius-style tolerance for
-# "was this nearby", NDVI/Thermal/Optical/Stability detail entries are
+# Thermal, Optical, SAR, or Stability detail entry. Deliberately tight (a
+# few meters) -- unlike GPR's/ERT's colocation-radius-style tolerance for
+# "was this nearby", NDVI/Thermal/Optical/SAR/Stability detail entries are
 # all built directly from the SAME dem_candidate.lat/lon (see
 # investigation_multi_mobile.py's _run_ndvi_checks/_run_thermal_checks/
-# _run_optical_checks/_run_stability_check), so any real distance here
-# should only ever reflect floating-point noise, not a genuine
-# "different but nearby location" case. Shared by _attach_ndvi_detail(),
-# _attach_thermal_detail(), _attach_optical_detail(), and
-# _attach_stability_detail().
+# _run_optical_checks/_run_sar_checks/_run_stability_check), so any real
+# distance here should only ever reflect floating-point noise, not a
+# genuine "different but nearby location" case. Shared by
+# _attach_ndvi_detail(), _attach_thermal_detail(), _attach_optical_detail(),
+# _attach_sar_detail(), and _attach_stability_detail().
 _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M = 5.0
 
 
@@ -476,7 +505,7 @@ def _attach_ert(candidate: dict, anomaly: dict, ert_item: Optional[dict], max_di
     sixth_evidence slot) is a single, site-anchored reading, not a
     per-candidate check, so it uses the same colocation-radius match
     style as GPR rather than the tight exact-match style used by
-    NDVI/Thermal/Optical/Stability below. Sets ert_confirmed/ert_distance_m/
+    NDVI/Thermal/Optical/SAR/Stability below. Sets ert_confirmed/ert_distance_m/
     ert_resistivity_ohm_m/ert_depth_m/ert_matched_bands/ert_lean on the
     candidate only when the ERT reading is close enough to plausibly be
     about the same physical location."""
@@ -513,29 +542,37 @@ def _attach_per_candidate_detail(
     tolerance_m: float = _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M,
 ) -> None:
     """Shared exact-match logic for _attach_ndvi_detail(),
-    _attach_thermal_detail(), and _attach_optical_detail() below --
-    sets candidate[flag_key] = True only when a real per-candidate
-    result exists for THIS exact candidate (tight tolerance) AND that
-    result's own error field is None (i.e. the check genuinely
-    succeeded for this candidate, regardless of whether it detected an
-    anomaly). False for: no detail present at all (this source never
-    attempted this run, or -- for NDVI specifically -- the offline
-    raster fallback ran instead of the live per-candidate path, so
-    there is no per-candidate detail to match against), a detail entry
-    existing only for a different/distant candidate, or a genuinely
-    matched entry whose error field is set (this candidate's own check
-    failed).
+    _attach_thermal_detail(), _attach_optical_detail(), and
+    _attach_sar_detail() below -- sets candidate[flag_key] = True only
+    when a real per-candidate result exists for THIS exact candidate
+    (tight tolerance) AND that result's own error field is None (i.e.
+    the check genuinely succeeded for this candidate, regardless of
+    whether it detected an anomaly). False for: no detail present at
+    all (this source never attempted this run, or -- for NDVI
+    specifically -- the offline raster fallback ran instead of the live
+    per-candidate path, so there is no per-candidate detail to match
+    against), a detail entry existing only for a different/distant
+    candidate, or a genuinely matched entry whose error field is set
+    (this candidate's own check failed).
 
-    NDVI's, Thermal's, and Optical's identical matching logic isn't
-    duplicated verbatim -- each public function below is a thin wrapper
-    naming its own detail list and flag key, preserving each one's own
-    previously-proven behavior unchanged. Not used by GPR/ERT -- both
-    are site-anchored (colocation-radius match via _attach_gpr()/
-    _attach_ert() above), not per-candidate. Not used directly by
-    Stability either -- see _attach_stability_detail() below, which
-    needs the real stability_score value, not just a boolean, so it
-    uses its own small nearest-match loop instead of this boolean-only
-    helper.
+    NDVI's, Thermal's, Optical's, and SAR's identical matching logic
+    isn't duplicated verbatim -- each public function below is a thin
+    wrapper naming its own detail list and flag key, preserving each
+    one's own previously-proven behavior unchanged. For SAR
+    specifically: SarCoreHaloResult's own "error" field is only ever
+    set on a TOTAL failure (both VV and VH unusable) -- see that
+    dataclass's own docstring -- so this helper's existing
+    "error is None means genuinely succeeded" check applies unchanged;
+    a single-polarization failure with the other polarization still
+    usable correctly leaves error=None and therefore sar_checked=True,
+    which is the intended behavior (SAR "checked" means at least one
+    real polarization measurement was obtained, not that both were).
+    Not used by GPR/ERT -- both are site-anchored (colocation-radius
+    match via _attach_gpr()/_attach_ert() above), not per-candidate.
+    Not used directly by Stability either -- see
+    _attach_stability_detail() below, which needs the real
+    stability_score value, not just a boolean, so it uses its own small
+    nearest-match loop instead of this boolean-only helper.
     """
     best = None
     best_dist = None
@@ -562,7 +599,7 @@ def _attach_ndvi_detail(
     second_evidence_detail: list[dict],
     tolerance_m: float = _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M,
 ) -> None:
-    """Sets candidate["ndvi_checked"] -- ADDED THIS SESSION, mirrors
+    """Sets candidate["ndvi_checked"] -- mirrors
     _attach_thermal_detail()/_attach_optical_detail() exactly via the
     shared _attach_per_candidate_detail() helper above. See module
     docstring, NDVI PRECISION FIX, for the full real on-device reasoning
@@ -604,6 +641,25 @@ def _attach_optical_detail(
     _attach_per_candidate_detail(candidate, anomaly, fifth_evidence_detail, "optical_checked", tolerance_m)
 
 
+def _attach_sar_detail(
+    candidate: dict,
+    anomaly: dict,
+    ninth_evidence_detail: list[dict],
+    tolerance_m: float = _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M,
+) -> None:
+    """ADDED THIS SESSION. Sets candidate["sar_checked"] -- mirrors
+    _attach_thermal_detail()/_attach_optical_detail() exactly via the
+    shared _attach_per_candidate_detail() helper above.
+    ninth_evidence_detail is investigation_multi_mobile.py's real
+    per-candidate SarCoreHaloResult list (populated whenever SAR was
+    attempted this investigation, success or failure). See
+    _attach_per_candidate_detail()'s own docstring for exactly how
+    SarCoreHaloResult's error field (only set on a TOTAL, both-
+    polarizations failure) interacts with this helper's existing
+    "error is None means genuinely succeeded" check."""
+    _attach_per_candidate_detail(candidate, anomaly, ninth_evidence_detail, "sar_checked", tolerance_m)
+
+
 def _attach_stability_detail(
     candidate: dict,
     anomaly: dict,
@@ -616,11 +672,12 @@ def _attach_stability_detail(
     candidate["stability_z_range"] -- added a prior session.
 
     Unlike _attach_ndvi_detail()/_attach_thermal_detail()/
-    _attach_optical_detail() (which set a single boolean via the shared
-    _attach_per_candidate_detail() helper), Scientific Steward needs the
-    REAL stability_score value (and the real z-range, when available),
-    not just a yes/no -- so this uses its own small tight-tolerance
-    nearest-match loop instead of reusing that boolean-only helper.
+    _attach_optical_detail()/_attach_sar_detail() (which set a single
+    boolean via the shared _attach_per_candidate_detail() helper),
+    Scientific Steward needs the REAL stability_score value (and the
+    real z-range, when available), not just a yes/no -- so this uses
+    its own small tight-tolerance nearest-match loop instead of reusing
+    that boolean-only helper.
 
     A candidate with no matching entry in seventh_evidence_detail
     (either because it never qualified for the automatic check, or the
@@ -665,8 +722,7 @@ def _attach_temporal_persistence_detail(
     """Sets candidate["temporal_persistence"] to the matched
     TemporalPersistenceResult-shaped dict (ndvi/thermal/optical
     sub-fields, each None on a hard per-source fetch failure for that
-    candidate) -- ADDED THIS SESSION, see module docstring, TEMPORAL
-    PERSISTENCE EXTENSION.
+    candidate) -- see module docstring, TEMPORAL PERSISTENCE EXTENSION.
 
     eighth_evidence_detail entries are anchored at each DEM candidate's
     own exact (lat, lon) (per evidence_record.py's decision 1 -- runs
@@ -710,9 +766,9 @@ def _attach_temporal_persistence_detail(
 def _compute_persistence_score_for_steward(candidate: dict) -> Optional[float]:
     """Reduces candidate["temporal_persistence"]'s ndvi/thermal/optical
     sub-dicts down to the SINGLE scalar Scientific Steward actually
-    consumes -- ADDED THIS SESSION, see steward_confidence_ceiling.py's
-    own TEMPORAL PERSISTENCE EXTENSION docstring for how this value is
-    used once it gets there.
+    consumes -- see steward_confidence_ceiling.py's own TEMPORAL
+    PERSISTENCE EXTENSION docstring for how this value is used once it
+    gets there.
 
     ONLY considers sources that actually CORROBORATED this candidate
     (candidate["sources"] -- the precise list, see this module's own
@@ -721,7 +777,11 @@ def _compute_persistence_score_for_steward(candidate: dict) -> Optional[float]:
     candidate in the first place would be meaningless (there is no
     corroborating signal to ask "did it persist?" about). GPR/ERT are
     never in this intersection since neither ever appears in
-    candidate["sources"] (see this module's own docstring).
+    candidate["sources"] (see this module's own docstring). SAR is
+    also never in this intersection -- deliberately excluded from
+    temporal persistence entirely (see investigation_multi_mobile.
+    TemporalPersistenceResult's own docstring), even though SAR DOES
+    appear in candidate["sources"] when it corroborates a candidate.
 
     Among the corroborating sources' own persistence_score values (only
     those that are genuinely non-None -- i.e. that source's persistence
@@ -735,10 +795,10 @@ def _compute_persistence_score_for_steward(candidate: dict) -> Optional[float]:
     Returns None (meaning "not applicable," never "unstable" -- see
     steward_confidence_ceiling.py's own docstring) when: this candidate
     has no temporal_persistence entry at all, none of its corroborating
-    sources are NDVI/THERMAL/OPTICAL (e.g. a GPR/ERT-only corroboration),
-    or every corroborating source's own persistence check was itself
-    untestable (persistence_score None) or hard-failed (sub-dict None)
-    for this candidate.
+    sources are NDVI/THERMAL/OPTICAL (e.g. a GPR/ERT/SAR-only
+    corroboration), or every corroborating source's own persistence
+    check was itself untestable (persistence_score None) or hard-failed
+    (sub-dict None) for this candidate.
     """
     persistence = candidate.get("temporal_persistence")
     if not persistence:
@@ -769,38 +829,38 @@ def _build_candidate(
 
     candidate["sources"] is set to ONLY this candidate's own
     supporting_sources -- precise, exactly what corroborated THIS
-    candidate (already correctly includes OPTICAL whenever
-    investigation_multi_mobile.py's _build_correlated_candidates()
-    determined it genuinely corroborated this candidate, with no
-    changes needed here -- this function already treats
-    correlation_entry["supporting_sources"] generically, however many
-    real source types it lists). ERT (like GPR) never appears here --
-    neither ever participates in correlation(). Detection Stability
-    doesn't participate here either, for a different reason -- it
-    isn't a corroborating evidence source at all, see this module's own
-    docstring, SOURCES-SPLIT FIX note.
+    candidate (already correctly includes OPTICAL and, as of this
+    session, SAR whenever investigation_multi_mobile.py's
+    _build_correlated_candidates() determined either genuinely
+    corroborated this candidate, with no changes needed here -- this
+    function already treats correlation_entry["supporting_sources"]
+    generically, however many real source types it lists). ERT (like
+    GPR) never appears here -- neither ever participates in
+    correlation(). Detection Stability doesn't participate here either,
+    for a different reason -- it isn't a corroborating evidence source
+    at all, see this module's own docstring, SOURCES-SPLIT FIX note.
 
     candidate["checked_sources"] carries the whole-run union
     (supporting_sources + checked_sources param, deduplicated) -- read
     by debate_engine.py's _sources_checked_present() (Vegetation/
     Agronomic perspective) and this module's own _build_steward_report()
-    below for has_dem/has_ndvi. AS OF THIS SESSION, the caller
-    (run_debate_json() below) POST-PROCESSES this field immediately
-    after _build_candidate() returns, to correct "NDVI"'s membership
-    from whole-run-attempted to per-candidate-succeeded precision (see
-    module docstring, NDVI PRECISION FIX) -- this function itself is
-    UNCHANGED and still performs the original, simple whole-run merge;
-    the precision fix is applied as a deliberate, clearly-marked
-    post-processing step in the caller, not folded silently in here, so
-    this function's own well-understood behavior stays easy to reason
-    about in isolation. Optical does NOT feed into this broader/
-    imprecise union at all (even before the caller's post-processing) --
-    it uses the precise exact-match _attach_optical_detail() above
-    instead, exactly like Thermal. ERT does not feed into it either, for
-    the same reason GPR doesn't -- it's read only via its own dedicated
-    ert_confirmed/... fields. Detection Stability doesn't feed into it
-    either -- it's read only via its own dedicated stability_score/...
-    fields, same reasoning.
+    below for has_dem/has_ndvi. The caller (run_debate_json() below)
+    POST-PROCESSES this field immediately after _build_candidate()
+    returns, to correct "NDVI"'s AND (as of this session) "SAR"'s
+    membership from whole-run-attempted to per-candidate-succeeded
+    precision (see module docstring, NDVI PRECISION FIX / SAR
+    PRECISION) -- this function itself is UNCHANGED and still performs
+    the original, simple whole-run merge; the precision fix is applied
+    as a deliberate, clearly-marked post-processing step in the caller,
+    not folded silently in here, so this function's own well-understood
+    behavior stays easy to reason about in isolation. Optical does NOT
+    feed into this broader/imprecise union at all (even before the
+    caller's post-processing) -- it uses the precise exact-match
+    _attach_optical_detail() above instead, exactly like Thermal. ERT
+    does not feed into it either, for the same reason GPR doesn't --
+    it's read only via its own dedicated ert_confirmed/... fields.
+    Detection Stability doesn't feed into it either -- it's read only
+    via its own dedicated stability_score/... fields, same reasoning.
     """
     candidate: dict[str, Any] = {
         "location": {"lat": anomaly.get("lat"), "lon": anomaly.get("lon")},
@@ -845,10 +905,11 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
     this module's own docstring) for exactly which inputs are real vs.
     deliberately conservative placeholders.
 
-    has_ndvi below needed NO code change for the NDVI PRECISION FIX (see
-    module docstring) -- it already reads candidate["checked_sources"],
-    which run_debate_json() now corrects for NDVI precision BEFORE this
-    function is ever called for that candidate.
+    has_ndvi/has_sar below needed NO code change for the NDVI PRECISION
+    FIX / SAR PRECISION (see module docstring) -- they already read
+    candidate["checked_sources"], which run_debate_json() now corrects
+    for NDVI and SAR precision BEFORE this function is ever called for
+    that candidate.
 
     stability_score/stability_windows_detected/stability_windows_fetched/
     stability_z_range are real -- see this module's own docstring,
@@ -864,6 +925,7 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
     has_gpr = bool(candidate.get("gpr_confirmed"))
     has_thermal = bool(candidate.get("thermal_checked"))
     has_optical = bool(candidate.get("optical_checked"))
+    has_sar = bool(candidate.get("sar_checked"))
     has_ert = bool(candidate.get("ert_confirmed"))
 
     stability_score = candidate.get("stability_score")
@@ -871,9 +933,9 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
     stability_windows_fetched = candidate.get("stability_windows_fetched")
     stability_z_range = candidate.get("stability_z_range")
 
-    # TEMPORAL PERSISTENCE EXTENSION (ADDED THIS SESSION): see this
-    # module's own docstring, HONEST MAPPING NOTES, for exactly how
-    # this reduced value is computed and what None means here.
+    # TEMPORAL PERSISTENCE EXTENSION: see this module's own docstring,
+    # HONEST MAPPING NOTES, for exactly how this reduced value is
+    # computed and what None means here.
     persistence_score = _compute_persistence_score_for_steward(candidate)
 
     synthesis = debate.get("synthesis") or {}
@@ -910,6 +972,7 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
         has_gpr=has_gpr,
         has_thermal=has_thermal,
         has_ert=has_ert,
+        has_sar=has_sar,
         raw_debate_confidence=raw_confidence,
         has_field_validation=has_gpr,
         environmental_confounders_controlled=False,
@@ -939,6 +1002,7 @@ def run_debate_json(investigation_json: str) -> str:
         fifth_evidence_detail = investigation.get("fifth_evidence_detail") or []
         seventh_evidence_detail = investigation.get("seventh_evidence_detail") or []
         eighth_evidence_detail = investigation.get("eighth_evidence_detail") or []
+        ninth_evidence_detail = investigation.get("ninth_evidence_detail") or []
         context = _build_context(investigation)
 
         gpr_item = _gpr_evidence_item(evidence)
@@ -964,26 +1028,30 @@ def run_debate_json(investigation_json: str) -> str:
             _attach_ndvi_detail(candidate, anomaly, second_evidence_detail)
             _attach_thermal_detail(candidate, anomaly, fourth_evidence_detail)
             _attach_optical_detail(candidate, anomaly, fifth_evidence_detail)
+            _attach_sar_detail(candidate, anomaly, ninth_evidence_detail)
             _attach_stability_detail(candidate, anomaly, seventh_evidence_detail)
             _attach_temporal_persistence_detail(candidate, anomaly, eighth_evidence_detail)
 
-            # NDVI PRECISION FIX (this session -- see module docstring):
+            # NDVI PRECISION FIX / SAR PRECISION (see module docstring):
             # candidate["checked_sources"] was built above from
             # context["sources"], the whole-run union, which includes
-            # "NDVI" whenever NDVI was ATTEMPTED this run (an aggregate
-            # RealNdviCoreHaloEvidence wrapper is always appended to
+            # "NDVI" and "SAR" whenever either was ATTEMPTED this run
+            # (an aggregate evidence wrapper is always appended to
             # evidence[] regardless of success/failure) -- not whenever
             # it genuinely succeeded for THIS candidate. Correct it now
-            # using the precise candidate["ndvi_checked"] flag just
-            # attached above: strip any imprecise "NDVI" entry, then add
-            # it back only if NDVI already genuinely corroborated this
-            # candidate (candidate["sources"] -- already precise,
-            # unaffected by this fix) or this candidate's own real
-            # per-candidate check genuinely succeeded (ndvi_checked).
-            checked = [s for s in (candidate.get("checked_sources") or []) if s != "NDVI"]
-            ndvi_already_corroborating = "NDVI" in (candidate.get("sources") or [])
-            if ndvi_already_corroborating or candidate.get("ndvi_checked"):
+            # using the precise candidate["ndvi_checked"]/
+            # candidate["sar_checked"] flags just attached above: strip
+            # any imprecise "NDVI"/"SAR" entry, then add each back only
+            # if it already genuinely corroborated this candidate
+            # (candidate["sources"] -- already precise, unaffected by
+            # this fix) or this candidate's own real per-candidate check
+            # genuinely succeeded (ndvi_checked / sar_checked).
+            checked = [s for s in (candidate.get("checked_sources") or []) if s not in ("NDVI", "SAR")]
+            already_corroborating = set(candidate.get("sources") or [])
+            if "NDVI" in already_corroborating or candidate.get("ndvi_checked"):
                 checked.append("NDVI")
+            if "SAR" in already_corroborating or candidate.get("sar_checked"):
+                checked.append("SAR")
             if checked:
                 candidate["checked_sources"] = checked
             elif "checked_sources" in candidate:
