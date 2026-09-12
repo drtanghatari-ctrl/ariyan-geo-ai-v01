@@ -160,6 +160,56 @@ ninth_evidence_type IS a caller-supplied parameter here (always "SAR" in
 practice), matching third/fourth/fifth/sixth/seventh's convention, since
 there is only one evidence_type to name (SAR), not three combined ones.
 
+TENTH EVIDENCE SLOT ADDED THIS SESSION (Second Independent DEM
+Cross-Check): checks whether a DEM candidate detected in the PRIMARY
+elevation dataset (SRTMGL1, this project's existing default) also shows
+up as an anomaly in a SECOND, genuinely independent elevation dataset
+(Copernicus GLO-30 / "COP30" via OpenTopography) fetched once over the
+same AOI -- see investigation_multi_mobile.py's own DEM CROSS-CHECK
+section for the full real mechanics.
+
+COP30 was chosen deliberately over the more casually-obvious NASADEM
+after checking OpenTopography's own real dataset documentation: NASADEM
+is explicitly a reprocessing of the SAME underlying SRTM radar
+acquisitions this project's primary DEM (SRTMGL1) already uses --
+cross-checking against it would not be a genuinely independent
+confirmation, just the same radar data run through a different
+pipeline. COP30 is derived from the Copernicus TanDEM-X mission (a
+different agency, a different satellite pair, a different acquisition
+period), so a candidate that reproduces in BOTH is real, independent
+elevation-value corroboration in a way NASADEM could not honestly
+provide.
+
+UNLIKE the ninth slot (SAR) and like the seventh/eighth slots
+(Detection Stability / Temporal Persistence), this is explicitly NOT
+counted as a new independent EvidenceCategory: a second DEM dataset
+measures the SAME physical quantity (elevation) via a different
+processing pipeline, not a genuinely different physical measurement
+mechanism the way radar/thermal/optical/vegetation-index are relative
+to each other. Counting it as independent evidence would let two
+correlated measurements of the same underlying terrain masquerade as
+two sources. So, like Stability and Temporal Persistence: NO
+`derived_products` entry, NEVER folded into `correlation_results`/
+`supporting_sources`, and it feeds Scientific Steward's confidence
+ceiling directly instead -- as an UNCONDITIONAL cap (mirroring
+Stability's own priority tier, not Temporal Persistence's softer one):
+a candidate whose elevation anomaly does not reproduce in a second,
+genuinely independent DEM source is not rescued by any amount of other
+corroborating evidence, exactly like a candidate that fails Detection
+Stability's window-placement check.
+
+Runs UNCONDITIONALLY for every DEM candidate this run (ONE second-DEM
+fetch covering the whole AOI, reused for every candidate via nearest-
+match -- much cheaper than Detection Stability's per-candidate
+multi-offset re-fetch, since there is only one second dataset to check,
+not several offset windows), mirroring Thermal's/Optical's/SAR's own
+no-toggle, every-candidate philosophy for WHEN it runs, while following
+Stability's/Temporal-Persistence's philosophy for HOW it counts
+(robustness check, not new evidence). `tenth_evidence` (the aggregate
+wrapper describing the second dataset and method) is only appended to
+`evidence` when `tenth_anomalies` is non-empty, mirroring seventh/
+eighth's own "no misleading zero-candidates entry" precedent.
+
 CONFIDENCE-STATEMENT FIX (a prior session): previously, the "co-located
 anomalies in X + Y" phrase listed every evidence_type present in
 `evidence[]`, regardless of whether that source actually corroborated
@@ -171,11 +221,14 @@ Optical) would make it actively wrong (claiming a source co-located
 candidates it never touched). Fixed to derive the list from the sources
 that actually appear in `supporting_sources` for CORROBORATED candidates
 specifically -- this logic needed no further change to accommodate
-Optical, ERT, Stability, Temporal Persistence, or SAR: SAR's own
-evidence_type only ever appears in supporting_sources when it genuinely
-corroborated a candidate (see investigation_multi_mobile.py's
-_build_correlated_candidates()), so this phrase stays correct
-automatically.
+Optical, ERT, Stability, Temporal Persistence, SAR, or the DEM
+Cross-Check: SAR's own evidence_type only ever appears in
+supporting_sources when it genuinely corroborated a candidate (see
+investigation_multi_mobile.py's _build_correlated_candidates()), so
+this phrase stays correct automatically; the DEM Cross-Check never
+appears in supporting_sources at all (see this module's own TENTH
+EVIDENCE SLOT docstring section above), so it was never a risk here to
+begin with.
 
 CONFIDENCE-STATEMENT WORDING FIX (a prior session -- REAL on-device
 readability bug, reported by the user): the CORROBORATED branch of the
@@ -232,6 +285,7 @@ class InvestigationRecord:
     seventh_evidence_detail: list[dict] = field(default_factory=list)
     eighth_evidence_detail: list[dict] = field(default_factory=list)
     ninth_evidence_detail: list[dict] = field(default_factory=list)
+    tenth_evidence_detail: list[dict] = field(default_factory=list)
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(asdict(self), indent=indent, default=str)
@@ -266,6 +320,9 @@ def build_investigation_record(
     ninth_evidence: Any = None,
     ninth_anomalies: list | None = None,
     ninth_evidence_type: str | None = None,
+    tenth_evidence: Any = None,
+    tenth_anomalies: list | None = None,
+    tenth_evidence_type: str | None = None,
 ) -> InvestigationRecord:
     """Build the InvestigationRecord JSON payload.
 
@@ -354,6 +411,17 @@ def build_investigation_record(
     caller-supplied parameter (unlike eighth's fixed literal), since
     there's only one evidence_type here ("SAR"), not three combined
     sources sharing one slot.
+
+    tenth_evidence/tenth_anomalies (optional, ADDED THIS SESSION) are
+    the Second Independent DEM Cross-Check's real per-candidate results
+    -- see this module's own TENTH EVIDENCE SLOT docstring section
+    above. Structurally like seventh/eighth (aggregate wrapper +
+    per-item detail list, NO derived_products entry, never folded into
+    correlation()) -- a second DEM dataset is a robustness check on the
+    EXISTING DEM evidence, not a new independent measurement mechanism,
+    so it is deliberately NOT treated like ninth (SAR). tenth_evidence_type
+    IS a caller-supplied parameter (always "DEM_CROSS_CHECK" in
+    practice), matching seventh's own convention.
     """
     evidence = [dem.as_evidence_record()]
     derived_products = [{
@@ -372,6 +440,7 @@ def build_investigation_record(
     seventh_evidence_detail: list[dict] = []
     eighth_evidence_detail: list[dict] = []
     ninth_evidence_detail: list[dict] = []
+    tenth_evidence_detail: list[dict] = []
 
     limitations = [
         "Anomalies reflect statistical deviation from local terrain/spectral "
@@ -597,6 +666,40 @@ def build_investigation_record(
             for a in (ninth_anomalies or [])
         ]
 
+    # Second Independent DEM Cross-Check (tenth, ADDED THIS SESSION) --
+    # see this module's own TENTH EVIDENCE SLOT docstring section.
+    # Mirrors Stability/Temporal Persistence: only appended when there
+    # is at least one real item to report, NO derived_products entry
+    # (not a new measurement mechanism -- see docstring for why COP30
+    # vs. SRTMGL1 is still "the same physical quantity, a different
+    # pipeline" rather than a genuinely independent evidence source the
+    # way SAR is), and tenth_evidence_detail is NEVER read by
+    # correlation() or folded into supporting_sources -- it feeds
+    # Scientific Steward's confidence ceiling as an UNCONDITIONAL cap
+    # input, mirroring Detection Stability's own priority tier.
+    if tenth_anomalies:
+        if tenth_evidence is not None:
+            evidence.append(tenth_evidence.as_evidence_record())
+        limitations.append(
+            "Second independent DEM cross-check evidence in this run "
+            "compared each DEM candidate against a genuinely independent "
+            "second elevation dataset (Copernicus GLO-30 / COP30 -- a "
+            "different mission, agency, and acquisition period than this "
+            "project's primary SRTMGL1 DEM, not merely a different "
+            "processing of the same underlying radar data) to check "
+            "whether the same elevation anomaly reproduces there too -- "
+            "see the evidence item's own record above and each "
+            "candidate's own cross_dem_confirmed/cross_dem_peak_zscore "
+            "for the real per-candidate results. A candidate this could "
+            "not be tested for (e.g. the second dataset has no coverage "
+            "at this location) has an honest untested state, not an "
+            "assumed-unconfirmed one."
+        )
+        tenth_evidence_detail = [
+            {**asdict(a), "evidence_type": tenth_evidence_type}
+            for a in tenth_anomalies
+        ]
+
     correlation_dicts = []
     if correlation_results:
         for r in correlation_results:
@@ -684,5 +787,7 @@ def build_investigation_record(
         record_kwargs["eighth_evidence_detail"] = eighth_evidence_detail
     if ninth_evidence_detail:
         record_kwargs["ninth_evidence_detail"] = ninth_evidence_detail
+    if tenth_evidence_detail:
+        record_kwargs["tenth_evidence_detail"] = tenth_evidence_detail
 
     return InvestigationRecord(**record_kwargs)
