@@ -11,7 +11,7 @@ confidence value pass through unexamined.
 
 "The AI's enthusiasm must never override scientific evidence."
 
-DETECTION STABILITY EXTENSION (added a prior session): real on-device
+DETECTION STABILITY EXTENSION (a prior session): real on-device
 testing (18+ live investigations, see project notes) found that
 detect_anomalies() -- run once per investigation, against whatever DEM
 raster this run's specific AOI window happened to fetch -- can
@@ -39,6 +39,57 @@ means "not tested," not "unstable" -- it applies NO cap and changes
 NOTHING about this function's existing behavior. Only a candidate that
 WAS tested and came back fragile is affected.
 
+SECOND INDEPENDENT DEM CROSS-CHECK EXTENSION (ADDED THIS SESSION): a
+`dem_cross_check_confirmed` (optional, tri-state: True/False/None --
+see below) input describes whether this candidate's elevation anomaly
+also shows up in a SECOND, genuinely independent global elevation
+dataset (Copernicus GLO-30 / COP30 -- a different mission, agency, and
+acquisition period than this project's primary SRTMGL1 DEM, verified
+via OpenTopography's own dataset documentation to be genuinely
+independent, unlike NASADEM which is explicitly a reprocessing of the
+SAME underlying SRTM data -- see investigation_multi_mobile.py's own
+DEM CROSS-CHECK section for the full reasoning), fetched once over the
+AOI and nearest-matched against each primary DEM candidate.
+
+PLACED AT THE SAME PRIORITY TIER AS stability_score, immediately
+alongside it -- and for the SAME underlying reason: this, like
+Detection Stability, questions whether the candidate's own elevation
+anomaly is a reproducible physical feature at all, just via a
+different perturbation (a second, independently-acquired dataset,
+rather than a different sampling-window placement of the SAME
+dataset). If the foundation itself doesn't reproduce in a second,
+genuinely independent measurement of the same terrain, no amount of
+field validation or other corroborating evidence rescues it -- exactly
+Stability's own reasoning, applied to a different (and complementary)
+kind of reproducibility check.
+
+UNLIKE stability_score (a continuous 0-1 fraction across several offset
+windows, needing two graduated thresholds), this is a single boolean
+test against ONE second dataset, so it uses a simple tri-state
+contract instead of a threshold:
+  - dem_cross_check_confirmed=None (default): the check was never run
+    for this candidate, or the second dataset's fetch itself failed
+    this run (see investigation_multi_mobile.DemCrossCheckResult's own
+    "error" field) -- means "not tested," applies NO cap, changes
+    NOTHING about this function's existing behavior.
+  - dem_cross_check_confirmed=True: the candidate's elevation anomaly
+    WAS found in the second dataset too -- informative, but (like a
+    passing stability_score) does not itself unlock any higher band;
+    it simply does not trigger this cap.
+  - dem_cross_check_confirmed=False: the check genuinely ran but did
+    NOT find a matching anomaly in the second, independent dataset --
+    caps the ceiling at LOW unconditionally, the same tier and same
+    reasoning as a failing stability_score or a genuine contradiction.
+
+Because this is an unconditional top-tier gate (never hidden behind a
+downstream branch the way the Temporal Persistence cap is -- see that
+extension's own docstring below for why THAT one needed an honestly-
+derived `persistence_capped` flag), steward_warnings.py can safely
+re-check dem_cross_check_confirmed directly, the exact same pattern
+already used for stability_score's own WINDOW_SENSITIVITY_WARNING --
+no derived "capped" field is needed on ConfidenceCeilingResult for this
+extension.
+
 EVIDENCE-INDEPENDENCE WEIGHTING EXTENSION (a prior session): the
 source-count gate below previously used matrix.independent_used_sources
 -- a flat, equally-weighted count of distinct used evidence categories.
@@ -63,9 +114,13 @@ changed, from raw count to weighted count. The raw count
 the reasoning trace alongside the weighted value, so nothing about the
 original evidence-category count disappears from the explanation --
 it is now presented honestly alongside its weighted counterpart rather
-than being the sole number quoted.
+than being the sole number quoted. SAR's own "radar" independence group
+and the DEM Cross-Check's deliberate EXCLUSION from any independence
+group (it is a robustness check on DEM, not a new measurement
+mechanism -- see steward_evidence_matrix.py) both flow through this
+gate unchanged, with zero code changes needed here.
 
-TEMPORAL PERSISTENCE EXTENSION (ADDED THIS SESSION): a `persistence_score`
+TEMPORAL PERSISTENCE EXTENSION (a prior session): a `persistence_score`
 (optional, see below) describes whether the remote-sensing signal(s)
 that actually corroborated this candidate (NDVI/Thermal/Optical) hold
 up across MULTIPLE real, independent satellite acquisitions over a
@@ -76,14 +131,15 @@ background (queue item 2, decision 3 specifically: persistence is NOT
 a new independent evidence source, it is a robustness check on the
 EXISTING corroborating signals).
 
-DELIBERATELY A SOFTER MECHANISM THAN DETECTION STABILITY, NOT A COPY OF
-IT -- this was the one open design question left from decision 3
-("unconditional cap vs. softer signal, to be designed when building
-steward_confidence_ceiling.py's side of this"), resolved here as
-follows. Detection Stability questions whether the DEM candidate's own
-elevation anomaly EXISTS as a reproducible physical feature at all --
-if the foundation itself isn't reproducible, nothing built on top of
-it matters, which is why it caps unconditionally at the very top of
+DELIBERATELY A SOFTER MECHANISM THAN DETECTION STABILITY (AND THE DEM
+CROSS-CHECK ABOVE), NOT A COPY OF THEM -- this was the one open design
+question left from decision 3 ("unconditional cap vs. softer signal, to
+be designed when building steward_confidence_ceiling.py's side of
+this"), resolved here as follows. Detection Stability and the DEM
+Cross-Check both question whether the DEM candidate's own elevation
+anomaly EXISTS as a reproducible physical feature at all -- if the
+foundation itself isn't reproducible, nothing built on top of it
+matters, which is why both cap unconditionally at the very top of
 compute_confidence_band(), before field validation or source count are
 even consulted. Temporal Persistence is a different kind of question:
 it asks whether one of SEVERAL corroborating signals for a candidate
@@ -99,14 +155,14 @@ severity as a genuine detection instability or a real contradiction
 would therefore overstate what the evidence supports. Instead,
 persistence_score is consulted ONLY at the point where the function
 would otherwise return the TOP band, SUBSTANTIAL (i.e. inside the
-has_field_validation branch, AFTER the contradiction/stability/source-
-count/confounder gates have already all passed) -- a weak persistence
-signal there caps that specific return at HIGH instead of SUBSTANTIAL,
-with an honest reasoning line explaining why, rather than reaching back
-to override any of the earlier, unconditional gates. This is a
-narrower, more targeted mechanism than Stability's, matching the
-narrower and more ambiguous nature of what persistence actually tells
-us.
+has_field_validation branch, AFTER the contradiction/stability/DEM-
+cross-check/source-count/confounder gates have already all passed) --
+a weak persistence signal there caps that specific return at HIGH
+instead of SUBSTANTIAL, with an honest reasoning line explaining why,
+rather than reaching back to override any of the earlier, unconditional
+gates. This is a narrower, more targeted mechanism than Stability's/the
+DEM Cross-Check's, matching the narrower and more ambiguous nature of
+what persistence actually tells us.
 
 `persistence_score` is a single, ALREADY-REDUCED scalar (see
 debate_mobile.py's own _compute_persistence_score_for_steward() for
@@ -123,22 +179,22 @@ cap and changes NOTHING about this function's existing SUBSTANTIAL
 branch. Only a candidate with a genuinely computed, genuinely low
 persistence_score is affected.
 
-REAL BUG FOUND AND FIXED VIA ON-DEVICE TESTING (same session as the
-extension above): steward_warnings.py's original TEMPORAL_PERSISTENCE_
-WARNING fired whenever persistence_score alone was low, evaluated
-completely independently of whether this function ever actually
-reached the has_field_validation branch where persistence_score is
-consulted. Since environmental_confounders_controlled is hardcoded
-False for the whole of Stage 1 (see EVIDENCE-INDEPENDENCE WEIGHTING
-EXTENSION above -- the exact same "invisible until Stage 2" situation),
+REAL BUG FOUND AND FIXED VIA ON-DEVICE TESTING (a prior session):
+steward_warnings.py's original TEMPORAL_PERSISTENCE_WARNING fired
+whenever persistence_score alone was low, evaluated completely
+independently of whether this function ever actually reached the
+has_field_validation branch where persistence_score is consulted.
+Since environmental_confounders_controlled is hardcoded False for the
+whole of Stage 1 (see EVIDENCE-INDEPENDENCE WEIGHTING EXTENSION above
+-- the exact same "invisible until Stage 2" situation),
 compute_confidence_band() can currently NEVER reach the
 has_field_validation branch at all, for ANY candidate, regardless of
-GPR/ERT colocation -- confirmed by two real on-device runs this
-session, both landing on MODERATE via the confounders gate. Yet the
-independent warning check would still have fired "confidence has been
-capped below SUBSTANTIAL" on a future 4-source-corroborated candidate
-with a low persistence_score, which is FALSE in Stage 1: the ceiling
-was never actually touched by persistence at all -- it was held at
+GPR/ERT colocation -- confirmed by two real on-device runs, both
+landing on MODERATE via the confounders gate. Yet the independent
+warning check would still have fired "confidence has been capped
+below SUBSTANTIAL" on a future 4-source-corroborated candidate with a
+low persistence_score, which is FALSE in Stage 1: the ceiling was
+never actually touched by persistence at all -- it was held at
 MODERATE by the confounders gate for entirely unrelated reasons, the
 same way CONFIDENCE_WARNING or DATA_GAP already correctly report only
 what actually happened, never what would hypothetically happen under
@@ -150,7 +206,11 @@ own docstring for exactly how -- so steward_warnings.py can read the
 ACTUAL observed effect off the result object (the same pattern
 CONFIDENCE_WARNING already uses via ceiling_result.numeric_ceiling)
 rather than re-deriving a hypothetical one from persistence_score in
-isolation.
+isolation. The DEM Cross-Check extension above needed NO equivalent
+derived flag -- see that extension's own docstring for why its
+unconditional top-tier placement makes a direct re-check in
+steward_warnings.py always safe, unlike persistence's branch-dependent
+placement.
 """
 
 from __future__ import annotations
@@ -220,7 +280,7 @@ class ConfidenceCeilingResult:
     clamped_confidence: float
     was_clamped: bool
     reasoning: list[str]
-    # ADDED THIS SESSION (bug fix -- see module docstring, REAL BUG
+    # ADDED a prior session (bug fix -- see module docstring, REAL BUG
     # FOUND AND FIXED VIA ON-DEVICE TESTING): True only when
     # persistence_score ACTUALLY capped this specific result at HIGH
     # instead of SUBSTANTIAL -- see govern_confidence() for exactly how
@@ -257,6 +317,7 @@ def compute_confidence_band(
     has_contradiction: bool,
     stability_score: float | None = None,
     stability_z_range: tuple[float, float] | None = None,
+    dem_cross_check_confirmed: bool | None = None,
     persistence_score: float | None = None,
 ) -> tuple[ConfidenceBand, list[str]]:
     """
@@ -271,6 +332,15 @@ def compute_confidence_band(
     source count/quality are consulted -- a low score caps the ceiling
     unconditionally, the same way a contradiction does.
 
+    dem_cross_check_confirmed (tri-state bool/None -- see module
+    docstring, SECOND INDEPENDENT DEM CROSS-CHECK EXTENSION) is checked
+    at the SAME priority tier as stability_score, immediately alongside
+    it -- False caps the ceiling at LOW unconditionally, for the same
+    underlying reason (an elevation anomaly that isn't reproducible in
+    a second, genuinely independent measurement doesn't get rescued by
+    other evidence). None means not tested; True means confirmed but
+    does not itself unlock anything.
+
     The multi-source tier below is now gated on
     matrix.effective_independent_sources (evidence-independence-weighted),
     not the raw matrix.independent_used_sources count -- see module
@@ -281,7 +351,8 @@ def compute_confidence_band(
     the has_field_validation/SUBSTANTIAL branch, deliberately AFTER
     every other gate above it has already passed -- a low score there
     caps that specific return at HIGH instead of SUBSTANTIAL. Unlike
-    stability_score, it never affects any other branch or band.
+    stability_score/dem_cross_check_confirmed, it never affects any
+    other branch or band.
     """
     reasoning: list[str] = []
 
@@ -330,6 +401,20 @@ def compute_confidence_band(
         )
         return ConfidenceBand.MODERATE, reasoning
 
+    if dem_cross_check_confirmed is False:
+        reasoning.append(
+            "This candidate's elevation anomaly was checked against a "
+            "second, genuinely independent global elevation dataset "
+            "(Copernicus GLO-30 / COP30 -- a different mission, agency, "
+            "and acquisition period than the primary DEM) and did NOT "
+            "reproduce there. Like a failed detection-stability check, "
+            "this questions whether the underlying elevation anomaly is "
+            "a real, reproducible feature at all -- confidence is capped "
+            "at LOW regardless of other factors (including field "
+            "validation)."
+        )
+        return ConfidenceBand.LOW, reasoning
+
     if effective_sources < EFFECTIVE_SOURCES_MULTI_GROUP_THRESHOLD:
         reasoning.append(
             f"Evidence-independence-weighted source count is "
@@ -360,6 +445,15 @@ def compute_confidence_band(
         f"correlated readings from the same underlying source."
     )
 
+    if dem_cross_check_confirmed is True:
+        reasoning.append(
+            "This candidate's elevation anomaly was also confirmed in the "
+            "second, independent COP30 dataset -- additional, informative "
+            "confirmation of the underlying DEM detection, though it does "
+            "not by itself raise the confidence band beyond what the "
+            "gates below determine."
+        )
+
     if not environmental_confounders_controlled:
         reasoning.append(
             "Environmental confounders (vegetation/moisture/season/etc.) were not "
@@ -370,11 +464,12 @@ def compute_confidence_band(
     reasoning.append("Environmental confounders were considered/controlled.")
 
     if has_field_validation:
-        # TEMPORAL PERSISTENCE EXTENSION (ADDED THIS SESSION -- see
-        # module docstring for the full reasoning on why this is
-        # consulted ONLY here, deliberately after every earlier gate
-        # has already passed, and why it caps at HIGH rather than
-        # crashing to LOW/MODERATE the way stability_score above does).
+        # TEMPORAL PERSISTENCE EXTENSION (a prior session -- see module
+        # docstring for the full reasoning on why this is consulted
+        # ONLY here, deliberately after every earlier gate has already
+        # passed, and why it caps at HIGH rather than crashing to
+        # LOW/MODERATE the way stability_score/dem_cross_check_confirmed
+        # above do).
         if persistence_score is not None and persistence_score < PERSISTENCE_SUBSTANTIAL_CAP_THRESHOLD:
             reasoning.append(
                 f"Field validation (GPR/ERT pick colocated with this "
@@ -413,6 +508,7 @@ def govern_confidence(
     has_contradiction: bool = False,
     stability_score: float | None = None,
     stability_z_range: tuple[float, float] | None = None,
+    dem_cross_check_confirmed: bool | None = None,
     persistence_score: float | None = None,
 ) -> ConfidenceCeilingResult:
     """
@@ -426,10 +522,15 @@ def govern_confidence(
 
     stability_score/stability_z_range are optional (default None =
     "not tested for this candidate" -- see module docstring); passed
-    straight through to compute_confidence_band(). persistence_score is
-    likewise optional (default None = "not applicable" -- see module
-    docstring, TEMPORAL PERSISTENCE EXTENSION); also passed straight
-    through.
+    straight through to compute_confidence_band(). dem_cross_check_confirmed
+    is likewise optional (default None = "not tested" -- see module
+    docstring, SECOND INDEPENDENT DEM CROSS-CHECK EXTENSION); also
+    passed straight through, and needs no derived "capped" flag on the
+    result (unlike persistence_score below) since it is an unconditional
+    top-tier gate, never hidden behind a downstream branch.
+    persistence_score is likewise optional (default None = "not
+    applicable" -- see module docstring, TEMPORAL PERSISTENCE
+    EXTENSION); also passed straight through.
 
     ALSO computes ConfidenceCeilingResult.persistence_capped here (bug
     fix, see module docstring) -- honestly, from what actually happened,
@@ -455,6 +556,7 @@ def govern_confidence(
         has_contradiction,
         stability_score=stability_score,
         stability_z_range=stability_z_range,
+        dem_cross_check_confirmed=dem_cross_check_confirmed,
         persistence_score=persistence_score,
     )
     persistence_capped = (
