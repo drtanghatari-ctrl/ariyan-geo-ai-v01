@@ -62,6 +62,22 @@ Defaults to False ("SAR was not checked or did not succeed for this
 candidate"), which changes NOTHING about this function's existing
 behavior for a candidate SAR wasn't run against.
 
+DEM CROSS-CHECK EXTENSION (ADDED THIS SESSION): evaluate_candidate()
+now also accepts dem_cross_check_confirmed: bool | None = None,
+threaded straight through to govern_confidence() (NOT to
+build_evidence_matrix() -- unlike SAR, a second DEM dataset is
+deliberately NOT a new EvidenceCategory, see
+steward_evidence_matrix.py's own docstring) and to generate_warnings().
+This is a DIRECT numeric-ceiling-style input, like stability_score, not
+a matrix-mediated one like has_sar -- see
+steward_confidence_ceiling.py's own SECOND INDEPENDENT DEM CROSS-CHECK
+EXTENSION docstring for the full tri-state contract (None = not
+tested, True = confirmed but no ceiling boost, False = tested and
+capped at LOW unconditionally, same priority tier as stability_score).
+Defaults to None ("not tested for this candidate"), which changes
+NOTHING about this function's existing behavior for a candidate the
+automatic check didn't run against or couldn't complete.
+
 This module is intentionally self-contained (new files only, zero
 changes to any existing file outside the Steward chain) so it can be
 sandbox-tested in full before anything in MainActivity.kt or
@@ -147,6 +163,7 @@ def evaluate_candidate(
     stability_windows_detected: int | None = None,
     stability_windows_fetched: int | None = None,
     stability_z_range: tuple[float, float] | None = None,
+    dem_cross_check_confirmed: bool | None = None,
     persistence_score: float | None = None,
     interpretation: str = "",
     hypothesis: str = "",
@@ -186,7 +203,7 @@ def evaluate_candidate(
     "not applicable for this candidate," which applies no cap and
     generates no warning.
 
-    `has_sar` (ADDED THIS SESSION) describes whether a real per-
+    `has_sar` describes whether a real per-
     candidate Sentinel-1 SAR check genuinely succeeded for this
     candidate -- passed straight through to build_evidence_matrix()
     below. Its effect on the confidence ceiling is entirely mediated by
@@ -194,6 +211,15 @@ def evaluate_candidate(
     has its own independence group -- see steward_evidence_matrix.py),
     so no separate SAR-specific parameter is needed on govern_confidence()
     itself.
+
+    `dem_cross_check_confirmed` (ADDED THIS SESSION) is a DIRECT
+    ceiling input, unlike has_sar -- see steward_confidence_ceiling.py's
+    own SECOND INDEPENDENT DEM CROSS-CHECK EXTENSION docstring for the
+    tri-state contract. None means not tested (no effect); True means
+    confirmed in the second, independent COP30 dataset (informative,
+    no ceiling boost by itself); False means tested and NOT confirmed,
+    capping the ceiling at LOW unconditionally, the same priority tier
+    as a failing stability_score.
     """
     alternative_hypotheses = alternative_hypotheses or []
     contradictions = contradictions or []
@@ -222,6 +248,7 @@ def evaluate_candidate(
         has_contradiction=has_contradiction,
         stability_score=stability_score,
         stability_z_range=stability_z_range,
+        dem_cross_check_confirmed=dem_cross_check_confirmed,
         persistence_score=persistence_score,
     )
 
@@ -237,6 +264,7 @@ def evaluate_candidate(
         stability_score=stability_score,
         stability_windows_detected=stability_windows_detected,
         stability_windows_fetched=stability_windows_fetched,
+        dem_cross_check_confirmed=dem_cross_check_confirmed,
         persistence_score=persistence_score,
     )
 
