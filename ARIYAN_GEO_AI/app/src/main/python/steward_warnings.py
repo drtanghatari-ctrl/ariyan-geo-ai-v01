@@ -15,17 +15,32 @@ is both present (the automatic check actually ran for it) and below
 the MODERATE-cap threshold -- a candidate that was never tested gets no
 warning, since absence of a test is not evidence of instability.
 
-TEMPORAL_PERSISTENCE_WARNING added this session (see
+DEM_CROSS_CHECK_WARNING added this session (see
+steward_confidence_ceiling.py's own SECOND INDEPENDENT DEM CROSS-CHECK
+EXTENSION docstring for the full background). Fires only when
+dem_cross_check_confirmed is explicitly False (the second, independent
+COP30 dataset's check genuinely ran for this candidate and did NOT
+reproduce the anomaly) -- None (never tested, e.g. the second
+dataset's fetch failed this run) or True (confirmed) both produce no
+warning. Unlike TEMPORAL_PERSISTENCE_WARNING below, this is safe to
+re-check directly here (rather than needing a derived "capped" flag on
+ConfidenceCeilingResult) because dem_cross_check_confirmed is consulted
+at an UNCONDITIONAL top-tier gate in compute_confidence_band() -- it is
+never hidden behind a downstream branch the way persistence_score is,
+so "dem_cross_check_confirmed is False" always means the LOW cap
+actually fired.
+
+TEMPORAL_PERSISTENCE_WARNING added a prior session (see
 steward_confidence_ceiling.py's own TEMPORAL PERSISTENCE EXTENSION
 docstring for the full background and for why this uses a narrower,
-softer gate than WINDOW_SENSITIVITY_WARNING above). CORRECTED THIS
-SESSION after real on-device testing surfaced a bug in the original
-version -- see steward_confidence_ceiling.py's own REAL BUG FOUND AND
-FIXED VIA ON-DEVICE TESTING docstring paragraph for the full story: the
-original condition checked persistence_score in isolation, so it could
-fire "confidence has been capped" even in Stage 1, where
-environmental_confounders_controlled is hardcoded False and the
-has_field_validation branch (where persistence_score is actually
+softer gate than WINDOW_SENSITIVITY_WARNING/DEM_CROSS_CHECK_WARNING
+above). CORRECTED a prior session after real on-device testing surfaced
+a bug in the original version -- see steward_confidence_ceiling.py's
+own REAL BUG FOUND AND FIXED VIA ON-DEVICE TESTING docstring paragraph
+for the full story: the original condition checked persistence_score in
+isolation, so it could fire "confidence has been capped" even in Stage
+1, where environmental_confounders_controlled is hardcoded False and
+the has_field_validation branch (where persistence_score is actually
 consulted) can therefore never be reached at all -- a claim of an
 effect that never happened. Fixed to instead read
 ceiling_result.persistence_capped directly, the SAME already-computed,
@@ -62,6 +77,7 @@ class WarningKind(Enum):
     DATA_GAP = "DATA_GAP"
     WINDOW_SENSITIVITY = "WINDOW_SENSITIVITY_WARNING"
     TEMPORAL_PERSISTENCE = "TEMPORAL_PERSISTENCE_WARNING"
+    DEM_CROSS_CHECK = "DEM_CROSS_CHECK_WARNING"
 
 
 @dataclass(frozen=True)
@@ -85,6 +101,7 @@ def generate_warnings(
     stability_score: float | None = None,
     stability_windows_detected: int | None = None,
     stability_windows_fetched: int | None = None,
+    dem_cross_check_confirmed: bool | None = None,
     persistence_score: float | None = None,
 ) -> list[StewardWarning]:
     """
@@ -181,8 +198,30 @@ def generate_warnings(
             )
         )
 
-    # TEMPORAL_PERSISTENCE_WARNING (ADDED THIS SESSION, CORRECTED THIS
-    # SESSION -- see module docstring for the real on-device bug this
+    # DEM_CROSS_CHECK_WARNING (ADDED THIS SESSION -- see module
+    # docstring): fires ONLY when dem_cross_check_confirmed is
+    # explicitly False -- the second, independent COP30 dataset's check
+    # genuinely ran for this candidate and did NOT reproduce the
+    # anomaly. None (never tested) or True (confirmed) both produce no
+    # warning. Safe to re-check directly here (unlike persistence,
+    # below) because this gate is unconditional and top-tier in
+    # compute_confidence_band() -- see steward_confidence_ceiling.py's
+    # own docstring for why.
+    if dem_cross_check_confirmed is False:
+        warnings.append(
+            StewardWarning(
+                WarningKind.DEM_CROSS_CHECK,
+                "This candidate's elevation anomaly did not reproduce in a "
+                "second, genuinely independent elevation dataset (Copernicus "
+                "GLO-30 / COP30) -- like a failed detection-stability check, "
+                "this questions whether the underlying elevation anomaly is "
+                "a real, reproducible terrain feature rather than an "
+                "artifact of the primary DEM's own acquisition/processing.",
+            )
+        )
+
+    # TEMPORAL_PERSISTENCE_WARNING (a prior session, CORRECTED a prior
+    # session -- see module docstring for the real on-device bug this
     # fixes): fires ONLY when ceiling_result.persistence_capped is True
     # -- i.e. only when persistence_score ACTUALLY capped this specific
     # candidate's ceiling at HIGH instead of SUBSTANTIAL, per
@@ -192,10 +231,11 @@ def generate_warnings(
     # a candidate can have a genuinely low persistence_score while the
     # ceiling was held at MODERATE (or lower) for a completely
     # unrelated reason (confounders, insufficient effective sources, a
-    # contradiction, a stability cap) -- persistence_score alone being
-    # low does NOT mean it was ever consulted, let alone that it capped
-    # anything. persistence_score is still taken as a parameter purely
-    # to render the message's percentage text.
+    # contradiction, a stability or DEM-cross-check cap) --
+    # persistence_score alone being low does NOT mean it was ever
+    # consulted, let alone that it capped anything. persistence_score is
+    # still taken as a parameter purely to render the message's
+    # percentage text.
     if ceiling_result.persistence_capped:
         warnings.append(
             StewardWarning(
