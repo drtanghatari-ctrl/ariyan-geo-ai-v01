@@ -2053,4 +2053,425 @@ def run_investigation_multi_json(
     NOT as a new independent evidence source. Never fails the
     investigation.
 
-    Writes
+    Writes investigation_status.json into offline_data_root as it works
+    (phase "dem" / "ndvi" / "thermal" / "optical" / "sar" / "stability" /
+    "dem_cross_check" / "persistence" / "done"), polled by MainActivity.kt
+    for live progress display. Best-effort -- never raises on its own.
+
+    Raises ValueError if use_gpr=True without both gpr_soil_preset_key
+    and gpr_two_way_time_ns, or if use_ert=True without both
+    ert_resistivity_ohm_m and ert_depth_m. Raises
+    OpenTopographyFetchError if DEM is unavailable both live and
+    offline (see above) -- this is the only hard failure; every
+    NDVI-side, Thermal-side, Optical-side, SAR-side, GPR-side, ERT-side,
+    Stability-side, Temporal-Persistence-side, and DEM-Cross-Check-side
+    failure degrades gracefully with an honest limitations[] entry
+    instead.
+    """
+    _write_investigation_status(offline_data_root, "dem", 0, 1)
+
+    center = GeoPoint(lat, lon)
+    aoi = build_aoi(center, radius_m=radius_m, grid_size=grid_size)
+
+    # --- DEM: real-first, offline-fallback (same pattern as investigation_mobile.py) ---
+    live_dem_error: OpenTopographyFetchError | None = None
+    dem = None
+    if api_key:
+        try:
+            dem = OpenTopographyAAIGridSource(
+                api_key, demtype=demtype, offline_data_root=offline_data_root,
+            ).fetch(aoi)
+        except OpenTopographyFetchError as exc:
+            live_dem_error = exc
+    else:
+        live_dem_error = OpenTopographyFetchError(
+            "No OpenTopography API key is configured yet -- enter your "
+            "free key (opentopography.org) to enable live real DEM fetch."
+        )
+
+    used_offline_dem = False
+    if dem is None:
+        used_offline_dem = True
+        try:
+            dem = fetch_offline_dem(aoi, offline_data_root)
+        except OfflineDataUnavailableError as offline_dem_error:
+            raise OpenTopographyFetchError(
+                f"Live DEM fetch failed ({live_dem_error}) and no offline "
+                f"data is available for this location either "
+                f"({offline_dem_error})."
+            ) from offline_dem_error
+
+    dem_candidates = detect_anomalies(
+        dem,
+        kernel_sigma_cells=dem_kernel_sigma_cells,
+        zscore_threshold=dem_zscore_threshold,
+        min_area_cells=3,
+    )
+
+    # --- DETECTION STABILITY: automatic, borderline-only ---
+    stability_candidates = _select_stability_candidates(
+        dem_candidates, dem_zscore_threshold, stability_margin, max_auto_stability_candidates,
+    )
+    stability_results: list[StabilityResult] = []
+    if stability_candidates:
+        _write_investigation_status(
+            offline_data_root, "stability", 0, len(stability_candidates)
+        )
+        for i, sc in enumerate(stability_candidates):
+            result = _run_stability_check(
+                sc, radius_m, api_key, demtype, offline_data_root,
+                grid_size, dem_kernel_sigma_cells, dem_zscore_threshold,
+            )
+            stability_results.append(result)
+            _write_investigation_status(
+                offline_data_root, "stability", i + 1, len(stability_candidates)
+            )
+
+    gpr_evidence, gpr_limitation = _build_gpr_evidence(
+        lat, lon, use_gpr, gpr_soil_preset_key, gpr_two_way_time_ns,
+        gpr_entry_method, gpr_device_note,
+    )
+    ert_evidence, ert_limitation = _build_ert_evidence(
+        lat, lon, use_ert, ert_resistivity_ohm_m, ert_depth_m,
+        ert_entry_method, ert_device_note,
+    )
+
+    # --- Shared Copernicus token, fetched ONCE for NDVI, Thermal, Optical, AND SAR ---
+    n_candidates = len(dem_candidates)
+    token, token_error_message = _get_shared_copernicus_token(
+        ndvi_client_id, ndvi_client_secret, timeout=ndvi_timeout_s,
+    )
+
+    # --- NDVI: real per-candidate check first ---
+    _write_investigation_status(offline_data_root, "ndvi", 0, max(1, n_candidates))
+
+    def _report_ndvi_progress(done: int, total: int) -> None:
+        _write_investigation_status(offline_data_root, "ndvi", done, total)
+
+    ndvi_results = _run_ndvi_checks(
+        dem_candidates, ndvi_client_id, ndvi_client_secret,
+        token, token_error_message,
+        stress_zscore_threshold=1.5,
+        timeout=ndvi_timeout_s,
+        progress_callback=_report_ndvi_progress,
+    )
+    n_ndvi_errors = sum(1 for r in ndvi_results if r.error is not None)
+
+    # --- THERMAL: real per-candidate check, independent of NDVI's outcome ---
+    _write_investigation_status(offline_data_root, "thermal", 0, max(1, n_candidates))
+
+    def _report_thermal_progress(done: int, total: int) -> None:
+        _write_investigation_status(offline_data_root, "thermal", done, total)
+
+    thermal_results = _run_thermal_checks(
+        dem_candidates, ndvi_client_id, ndvi_client_secret,
+        token, token_error_message,
+        anomaly_zscore_threshold=thermal_zscore_threshold,
+        timeout=thermal_timeout_s,
+        progress_callback=_report_thermal_progress,
+    )
+    n_thermal_errors = sum(1 for r in thermal_results if r.error is not None)
+
+    # --- OPTICAL: real per-candidate check, independent of NDVI's/Thermal's outcome ---
+    _write_investigation_status(offline_data_root, "optical", 0, max(1, n_candidates))
+
+    def _report_optical_progress(done: int, total: int) -> None:
+        _write_investigation_status(offline_data_root, "optical", done, total)
+
+    optical_results = _run_optical_checks(
+        dem_candidates, ndvi_client_id, ndvi_client_secret,
+        token, token_error_message,
+        anomaly_zscore_threshold=optical_zscore_threshold,
+        timeout=optical_timeout_s,
+        progress_callback=_report_optical_progress,
+    )
+    n_optical_errors = sum(1 for r in optical_results if r.error is not None)
+
+    # --- SAR (ADDED THIS SESSION): real per-candidate check, independent
+    # of NDVI's/Thermal's/Optical's outcome, using the SAME shared token ---
+    _write_investigation_status(offline_data_root, "sar", 0, max(1, n_candidates))
+
+    def _report_sar_progress(done: int, total: int) -> None:
+        _write_investigation_status(offline_data_root, "sar", done, total)
+
+    sar_results = _run_sar_checks(
+        dem_candidates, ndvi_client_id, ndvi_client_secret,
+        token, token_error_message,
+        detection_zscore_threshold=sar_zscore_threshold,
+        timeout=sar_timeout_s,
+        progress_callback=_report_sar_progress,
+    )
+    n_sar_errors = sum(1 for r in sar_results if r.error is not None)
+
+    # --- TEMPORAL PERSISTENCE: real per-candidate check across NDVI/
+    # Thermal/Optical only -- SAR deliberately excluded (see
+    # TemporalPersistenceResult's own docstring). ---
+    _write_investigation_status(offline_data_root, "persistence", 0, max(1, n_candidates))
+
+    def _report_persistence_progress(done: int, total: int) -> None:
+        _write_investigation_status(offline_data_root, "persistence", done, total)
+
+    (
+        persistence_results,
+        n_ndvi_persistence_errors,
+        n_thermal_persistence_errors,
+        n_optical_persistence_errors,
+    ) = _run_temporal_persistence_checks(
+        dem_candidates, ndvi_client_id, ndvi_client_secret,
+        token, token_error_message,
+        ndvi_stress_zscore_threshold=1.5,
+        thermal_zscore_threshold=thermal_zscore_threshold,
+        optical_zscore_threshold=optical_zscore_threshold,
+        days_back=temporal_persistence_days_back,
+        ndvi_timeout=ndvi_timeout_s,
+        thermal_timeout=thermal_timeout_s,
+        optical_timeout=optical_timeout_s,
+        progress_callback=_report_persistence_progress,
+    )
+
+    # --- SECOND INDEPENDENT DEM CROSS-CHECK (ADDED THIS SESSION): one
+    # extra COP30 fetch covering the whole AOI, reused for every
+    # candidate via nearest-match -- see _run_dem_cross_check()'s own
+    # docstring above. ---
+    _write_investigation_status(offline_data_root, "dem_cross_check", 0, max(1, n_candidates))
+
+    dem_cross_check_results = _run_dem_cross_check(
+        dem_candidates, aoi, api_key, offline_data_root,
+        dem_kernel_sigma_cells, dem_zscore_threshold,
+        second_dataset=dem_cross_check_dataset,
+    )
+
+    _write_investigation_status(
+        offline_data_root, "dem_cross_check", max(1, n_candidates), max(1, n_candidates)
+    )
+
+    fourth_evidence: object = None
+    fifth_evidence: object = None
+    ninth_evidence: object = None
+    tenth_evidence: object = None
+    used_offline_ndvi = False
+    ndvi_limitations: list[str] = []
+    thermal_limitations: list[str] = []
+    optical_limitations: list[str] = []
+    sar_limitations: list[str] = []
+
+    second_evidence = RealNdviCoreHaloEvidence(
+        n_candidates_checked=n_candidates, n_fetch_errors=n_ndvi_errors,
+    )
+    fourth_evidence = RealThermalCoreHaloEvidence(
+        n_candidates_checked=n_candidates, n_fetch_errors=n_thermal_errors,
+    )
+    fifth_evidence = RealOpticalCoreHaloEvidence(
+        n_candidates_checked=n_candidates, n_fetch_errors=n_optical_errors,
+    )
+    ninth_evidence = RealSarCoreHaloEvidence(
+        n_candidates_checked=n_candidates, n_fetch_errors=n_sar_errors,
+    )
+    tenth_evidence = (
+        DemCrossCheckEvidence(
+            second_dataset=dem_cross_check_dataset,
+            n_candidates_checked=len(dem_cross_check_results),
+            n_confirmed=sum(1 for r in dem_cross_check_results if r.cross_dem_confirmed),
+            n_fetch_errors=sum(1 for r in dem_cross_check_results if r.error is not None),
+        ) if dem_cross_check_results else None
+    )
+
+    if dem_candidates and n_ndvi_errors == n_candidates:
+        try:
+            offline_ndvi_raster = fetch_offline_ndvi(aoi, offline_data_root)
+            ndvi_candidates = detect_raster_anomalies(
+                aoi, offline_ndvi_raster.ndvi,
+                kernel_sigma_cells=ndvi_kernel_sigma_cells,
+                zscore_threshold=ndvi_zscore_threshold,
+                min_area_cells=3,
+            )
+            resolved_colocation = (
+                colocation_distance_m if colocation_distance_m is not None
+                else max(30.0, aoi.cell_size_m * 4)
+            )
+            correlation_results = correlate_anomalies(
+                {"DEM": dem_candidates, "NDVI": ndvi_candidates},
+                aoi_center=center,
+                colocation_distance_m=resolved_colocation,
+            )
+            second_evidence = offline_ndvi_raster
+            second_anomalies = ndvi_candidates
+            second_anomalies_are_candidates = True
+            used_offline_ndvi = True
+            ndvi_limitations.append(
+                "Live per-candidate NDVI checks were unavailable for every "
+                "candidate this run (no network, or Copernicus credentials "
+                "not yet configured), so NDVI correlation used this "
+                "device's offline Sentinel-2 composite instead -- real "
+                "data, but coarser resolution than the live per-candidate "
+                "check (see offline_evidence_fallback.py)."
+            )
+            thermal_limitations.append(
+                "Because NDVI fell back to the offline raster/geometric "
+                "correlation path this run, Thermal's per-candidate "
+                "results (recorded below) were NOT combined into that "
+                "path's supporting_sources/notes -- this module does not "
+                "have confirmed visibility into whether that path "
+                "preserves a stable per-candidate correspondence, and "
+                "guessing at it risked attaching a Thermal result to the "
+                "wrong candidate. Thermal has no offline-raster fallback "
+                "of its own yet."
+            )
+            optical_limitations.append(
+                "Because NDVI fell back to the offline raster/geometric "
+                "correlation path this run, Optical's per-candidate "
+                "results (recorded below) were NOT combined into that "
+                "path's supporting_sources/notes, for the same reason as "
+                "Thermal above. Optical has no offline-raster fallback of "
+                "its own yet either."
+            )
+            sar_limitations.append(
+                "Because NDVI fell back to the offline raster/geometric "
+                "correlation path this run, SAR's per-candidate results "
+                "(recorded below) were NOT combined into that path's "
+                "supporting_sources/notes, for the same reason as Thermal "
+                "and Optical above. SAR has no offline-raster fallback of "
+                "its own yet either."
+            )
+        except OfflineDataUnavailableError as offline_ndvi_error:
+            ndvi_limitations.append(
+                f"Live per-candidate NDVI checks were unavailable for "
+                f"every candidate this run, and no offline NDVI data is "
+                f"available for this location either "
+                f"({offline_ndvi_error}). NDVI correlation could not be "
+                f"performed for this run -- the DEM results above are "
+                f"unaffected."
+            )
+            second_anomalies = ndvi_results
+            second_anomalies_are_candidates = False
+            correlation_results = _build_correlated_candidates(
+                dem_candidates, ndvi_results, thermal_results, optical_results, sar_results,
+            )
+    else:
+        second_anomalies = ndvi_results
+        second_anomalies_are_candidates = False
+        correlation_results = _build_correlated_candidates(
+            dem_candidates, ndvi_results, thermal_results, optical_results, sar_results,
+        )
+        if n_ndvi_errors > 0:
+            ndvi_limitations.append(
+                f"{n_ndvi_errors} of {n_candidates} candidate(s) had a real "
+                f"NDVI check unavailable (network/auth/no-data) and were "
+                f"recorded with the real reason rather than silently "
+                f"dropped or faked."
+            )
+
+    if n_thermal_errors > 0 and n_thermal_errors < n_candidates:
+        thermal_limitations.append(
+            f"{n_thermal_errors} of {n_candidates} candidate(s) had a real "
+            f"Thermal check unavailable (network/auth/no-data/cloud cover) "
+            f"and were recorded with the real reason rather than silently "
+            f"dropped or faked."
+        )
+    elif n_thermal_errors == n_candidates and n_candidates > 0:
+        thermal_limitations.append(
+            f"Real Thermal checks were unavailable for every candidate "
+            f"this run: {thermal_results[0].error}. Thermal contributed "
+            f"no corroboration this run; DEM/NDVI results above are "
+            f"unaffected."
+        )
+
+    if n_optical_errors > 0 and n_optical_errors < n_candidates:
+        optical_limitations.append(
+            f"{n_optical_errors} of {n_candidates} candidate(s) had a real "
+            f"Optical check unavailable (network/auth/no-data/cloud cover) "
+            f"and were recorded with the real reason rather than silently "
+            f"dropped or faked."
+        )
+    elif n_optical_errors == n_candidates and n_candidates > 0:
+        optical_limitations.append(
+            f"Real Optical checks were unavailable for every candidate "
+            f"this run: {optical_results[0].error}. Optical contributed "
+            f"no corroboration this run; DEM/NDVI/Thermal results above "
+            f"are unaffected."
+        )
+
+    if n_sar_errors > 0 and n_sar_errors < n_candidates:
+        sar_limitations.append(
+            f"{n_sar_errors} of {n_candidates} candidate(s) had a real "
+            f"SAR check unavailable (network/auth/no-data) and were "
+            f"recorded with the real reason rather than silently dropped "
+            f"or faked."
+        )
+    elif n_sar_errors == n_candidates and n_candidates > 0:
+        sar_limitations.append(
+            f"Real SAR checks were unavailable for every candidate this "
+            f"run: {sar_results[0].error}. SAR contributed no "
+            f"corroboration this run; DEM/NDVI/Thermal/Optical results "
+            f"above are unaffected."
+        )
+
+    record = build_investigation_record(
+        aoi, dem, dem_candidates, dem_zscore_threshold, dem_kernel_sigma_cells,
+        second_evidence=second_evidence,
+        second_anomalies=second_anomalies,
+        second_evidence_type="NDVI",
+        correlation_results=correlation_results,
+        second_anomalies_are_candidates=second_anomalies_are_candidates,
+        third_evidence=gpr_evidence,
+        third_evidence_type="GPR",
+        fourth_evidence=fourth_evidence,
+        fourth_anomalies=thermal_results,
+        fourth_evidence_type="THERMAL",
+        fifth_evidence=fifth_evidence,
+        fifth_anomalies=optical_results,
+        fifth_evidence_type="OPTICAL",
+        sixth_evidence=ert_evidence,
+        sixth_evidence_type="ERT",
+        seventh_evidence=(
+            StabilityCheckEvidence(
+                n_candidates_tested=len(stability_results),
+                margin=stability_margin,
+                offsets_m=DEFAULT_AUTO_STABILITY_OFFSETS_M,
+            ) if stability_results else None
+        ),
+        seventh_anomalies=stability_results,
+        seventh_evidence_type="DETECTION_STABILITY",
+        eighth_evidence=(
+            TemporalPersistenceCheckEvidence(
+                n_candidates_checked=n_candidates,
+                days_back=temporal_persistence_days_back,
+                n_ndvi_fetch_errors=n_ndvi_persistence_errors,
+                n_thermal_fetch_errors=n_thermal_persistence_errors,
+                n_optical_fetch_errors=n_optical_persistence_errors,
+            ) if persistence_results else None
+        ),
+        eighth_anomalies=persistence_results,
+        ninth_evidence=ninth_evidence,
+        ninth_anomalies=sar_results,
+        ninth_evidence_type="SAR",
+        tenth_evidence=tenth_evidence,
+        tenth_anomalies=dem_cross_check_results,
+        tenth_evidence_type="DEM_CROSS_CHECK",
+    )
+
+    if used_offline_dem:
+        record.limitations.append(
+            f"This run used the offline DEM library, not a live fetch -- "
+            f"the live OpenTopography attempt failed with: {live_dem_error}. "
+            f"If you expected a live fetch to succeed (e.g. you have "
+            f"network and a valid API key), this real error message is the "
+            f"actual reason it didn't."
+        )
+
+    for note in ndvi_limitations:
+        record.limitations.append(note)
+    for note in thermal_limitations:
+        record.limitations.append(note)
+    for note in optical_limitations:
+        record.limitations.append(note)
+    for note in sar_limitations:
+        record.limitations.append(note)
+    if gpr_limitation:
+        record.limitations.append(gpr_limitation)
+    if ert_limitation:
+        record.limitations.append(ert_limitation)
+
+    _write_investigation_status(offline_data_root, "done", max(1, n_candidates), max(1, n_candidates))
+
+    return record.to_json()
