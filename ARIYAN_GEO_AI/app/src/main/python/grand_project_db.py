@@ -67,7 +67,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-
 DB_FILENAME = "grand_project.db"
 
 
@@ -227,14 +226,24 @@ def create_grand_project(
     description: str = "",
     research_area: Optional[Dict[str, Any]] = None,
     coordinate_ref_sys: str = "",
+    project_id: Optional[str] = None,
 ) -> str:
     """Creates a new Grand Project row. Returns the new project's id.
     `research_area`, if given, is stored as JSON (e.g. a bbox or polygon
-    dict) -- this module does not interpret its shape."""
+    dict) -- this module does not interpret its shape.
+
+    `project_id`, if given, is used as-is instead of generating a new
+    random id -- added so get_or_create_default_grand_project() (see
+    grand_project_sync.py) can create a row under a FIXED, known id and
+    reliably find that same row again on a later app run, rather than
+    every restart creating a fresh random-id project. Existing callers
+    (there are none yet in Kotlin, but this keeps the function
+    backward-compatible on principle) are entirely unaffected -- the
+    default (None) preserves the original random-id behavior exactly."""
     conn = get_connection(db_root)
     try:
         initialize_schema(conn)
-        project_id = _new_id()
+        project_id = project_id or _new_id()
         now = _now_iso()
         with conn:
             conn.execute(
