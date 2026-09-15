@@ -1,4 +1,5 @@
 package com.ariyan.geoai
+
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -23,7 +24,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
-
 
 /**
  * MainActivity — the entire native UI shell for the ARIYAN GEO AI Android
@@ -123,6 +123,23 @@ import java.io.File
  * the investigation results themselves -- it is caught and simply omits
  * the debate section.
  *
+ * GRAND PROJECT PERSISTENCE (ADDED THIS SESSION): after a successful
+ * investigation (and its best-effort debate/Steward evaluation) are
+ * rendered, this Activity ALSO calls grand_project_sync.
+ * record_investigation_results() to persist the run into the Grand
+ * Project SQLite database (grand_project_db.py, Phase 0/1 of the
+ * GRAND PROJECTS FRAMEWORK) -- confirmed 2026-09-14 that this call was
+ * previously drafted but never actually added here, so every
+ * investigation was being silently discarded despite the persistence
+ * layer itself being built and sandbox-verified. Uses
+ * grand_project_sync.get_or_create_default_grand_project() as an
+ * interim stopgap (no real Grand Project selection UI exists yet --
+ * see that function's own docstring) so the same project is reused
+ * across app restarts rather than a new one being created every run.
+ * Wrapped defensively, exactly like the existing runDebate() try/catch
+ * above it: a persistence failure must never hide the investigation/
+ * debate results already rendered on screen.
+ *
  * LIVE PROGRESS REPORTING (a prior session): a real on-device
  * airplane-mode test showed a multi-candidate NDVI-correlation run
  * could take several minutes with zero on-screen indication of what
@@ -170,10 +187,12 @@ class MainActivity : AppCompatActivity() {
     // location investigation_multi_mobile.py now writes
     // investigation_status.json to (see class doc comment above).
     private val offlineDataRoot: String by lazy { ExternalStorageAccess.offlineDataRoot().absolutePath }
+
     private val locationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             if (granted) fetchLocation() else toast("Location permission denied")
         }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -182,7 +201,7 @@ class MainActivity : AppCompatActivity() {
         // Chaquopy's Python interpreter is started once per process by
         // AriyanApplication.onCreate(). By the time any Activity runs,
         // Python.isStarted() is guaranteed true.
-       python = Python.getInstance()
+        python = Python.getInstance()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
         // Real-data-first redesign: load any previously-saved credentials
@@ -366,6 +385,28 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 renderResult(json, debateJson)
+
+                // Grand Project persistence -- best-effort, must never
+                // hide the investigation/debate results already rendered
+                // above (same defensive pattern already used for
+                // runDebate()'s own try/catch just above). See class doc
+                // comment, GRAND PROJECT PERSISTENCE.
+                withContext(Dispatchers.Default) {
+                    try {
+                        val grandProjectModule = python.getModule("grand_project_sync")
+                        val grandProjectId = grandProjectModule.callAttr(
+                            "get_or_create_default_grand_project", offlineDataRoot
+                        ).toString()
+                        grandProjectModule.callAttr(
+                            "record_investigation_results",
+                            offlineDataRoot, grandProjectId, json,
+                            Kwarg("debate_json", debateJson)
+                        )
+                    } catch (e: PyException) {
+                        // Persistence failure must never hide results
+                        // already on screen.
+                    }
+                }
             } catch (e: PyException) {
                 // Surface the real Python error rather than a generic
                 // "something went wrong" -- this app is a scientific
