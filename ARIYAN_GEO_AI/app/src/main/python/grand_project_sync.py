@@ -63,40 +63,40 @@ rest of this project already relies on, not a new assumption.
 
 EVIDENCE PERSISTED (matches evidence_record.py's real per-slot design,
 read directly, not approximated):
-  - DEM itself: always one evidence_link per candidate (relation=
-    "primary_detection" -- not "supports"/"contradicts"/"neutral",
-    since DEM's own anomaly is what DEFINES the candidate, not
-    corroborating evidence for something else).
-  - NDVI/THERMAL/OPTICAL/SAR: each candidate's REAL correlation[] entry
-    (built by investigation_multi_mobile._build_correlated_candidates(),
-    lat/lon copied directly from the SAME dem_candidate -- confirmed
-    exact-match reliable per debate_mobile.py's own REAL SCHEMA NOTES)
-    is read for its real supporting_sources list -- each source beyond
-    DEM that genuinely corroborated this candidate gets relation=
-    "supports", with the real per-candidate detail dict (second/
-    fourth/fifth/ninth_evidence_detail, matched by the SAME tight
-    lat/lon tolerance debate_mobile.py itself uses) stored verbatim as
-    detail_json -- not reshaped, not summarized.
-  - GPR/ERT: real, site-anchored evidence (evidence_record.py's third/
-    sixth slots) -- persisted only for whichever candidate(s) the real
-    colocation-radius match in debate_mobile.py already decided were
-    close enough (candidate["gpr_confirmed"]/candidate["ert_confirmed"]
-    on the ALREADY-BUILT debate candidate dict). This module does NOT
-    re-run that colocation logic -- it is not exposed on the JSON
-    debate_mobile.py returns to Kotlin today (only the CONSEQUENCE --
-    e.g. candidate["gpr_confirmed"] having fed into the Steward report
-    -- is visible via steward's own inputs, not the raw flag itself).
-    See KNOWN GAP note below for the honest limitation this causes.
-  - Detection Stability / Temporal Persistence / DEM Cross-Check
-    (seventh/eighth/tenth slots): these are explicitly NOT independent
-    evidence sources (see evidence_record.py's own docstring) -- they
-    are Steward confidence-ceiling inputs, not corroborating evidence
-    a hypothesis would cite. They are therefore NOT written as
-    evidence_link rows here (that would misrepresent them as if they
-    were a source like NDVI/SAR); their effect is already fully
-    captured in the Steward reasoning_snapshot saved to
-    confidence_history below, which is the correct, honest place for
-    them per this project's own design.
+- DEM itself: always one evidence_link per candidate (relation=
+  "primary_detection" -- not "supports"/"contradicts"/"neutral",
+  since DEM's own anomaly is what DEFINES the candidate, not
+  corroborating evidence for something else).
+- NDVI/THERMAL/OPTICAL/SAR: each candidate's REAL correlation[] entry
+  (built by investigation_multi_mobile._build_correlated_candidates(),
+  lat/lon copied directly from the SAME dem_candidate -- confirmed
+  exact-match reliable per debate_mobile.py's own REAL SCHEMA NOTES)
+  is read for its real supporting_sources list -- each source beyond
+  DEM that genuinely corroborated this candidate gets relation=
+  "supports", with the real per-candidate detail dict (second/
+  fourth/fifth/ninth_evidence_detail, matched by the SAME tight
+  lat/lon tolerance debate_mobile.py itself uses) stored verbatim as
+  detail_json -- not reshaped, not summarized.
+- GPR/ERT: real, site-anchored evidence (evidence_record.py's third/
+  sixth slots) -- persisted only for whichever candidate(s) the real
+  colocation-radius match in debate_mobile.py already decided were
+  close enough (candidate["gpr_confirmed"]/candidate["ert_confirmed"]
+  on the ALREADY-BUILT debate candidate dict). This module does NOT
+  re-run that colocation logic -- it is not exposed on the JSON
+  debate_mobile.py returns to Kotlin today (only the CONSEQUENCE --
+  e.g. candidate["gpr_confirmed"] having fed into the Steward report
+  -- is visible via steward's own inputs, not the raw flag itself).
+  See KNOWN GAP note below for the honest limitation this causes.
+- Detection Stability / Temporal Persistence / DEM Cross-Check
+  (seventh/eighth/tenth slots): these are explicitly NOT independent
+  evidence sources (see evidence_record.py's own docstring) -- they
+  are Steward confidence-ceiling inputs, not corroborating evidence
+  a hypothesis would cite. They are therefore NOT written as
+  evidence_link rows here (that would misrepresent them as if they
+  were a source like NDVI/SAR); their effect is already fully
+  captured in the Steward reasoning_snapshot saved to
+  confidence_history below, which is the correct, honest place for
+  them per this project's own design.
 
 KNOWN GAP, HONESTLY NOTED (not silently worked around): the JSON
 debate_mobile.run_debate_json() actually returns to Kotlin today does
@@ -145,6 +145,39 @@ import math
 from typing import Any, Dict, List, Optional
 
 import grand_project_db as db
+
+DEFAULT_GRAND_PROJECT_ID = "default"
+
+
+def get_or_create_default_grand_project(db_root: str) -> str:
+    """Interim stopgap until real Grand Project selection UI exists in
+    MainActivity.kt (see module docstring's own INTENDED CALL SITE note
+    -- this was the missing piece: the function this project's own
+    memory described as already built and sandbox-verified did not
+    actually exist in committed code, confirmed 2026-09-14 via grep
+    returning zero hits in both this file and grand_project_db.py).
+
+    Uses a FIXED, known id (DEFAULT_GRAND_PROJECT_ID) rather than a
+    randomly generated one, specifically so the SAME project is reused
+    across every app restart: get_grand_project() looks it up by that
+    fixed id first, and only creates a new row the very first time this
+    is ever called on a given device (fresh install, or first run after
+    this function was added). Future UI work should replace this
+    stopgap with real Grand Project selection/creation, not build
+    further logic on top of it.
+    """
+    existing = db.get_grand_project(db_root, DEFAULT_GRAND_PROJECT_ID)
+    if existing is not None:
+        return existing["id"]
+    return db.create_grand_project(
+        db_root,
+        name="Default Grand Project",
+        description=(
+            "Automatically created default Grand Project -- interim "
+            "stopgap until real Grand Project selection UI exists."
+        ),
+        project_id=DEFAULT_GRAND_PROJECT_ID,
+    )
 
 
 _PER_CANDIDATE_DETAIL_MATCH_TOLERANCE_M = 5.0  # SAME constant as
@@ -285,7 +318,6 @@ def record_investigation_results(
     )
 
     candidate_ids: List[str] = []
-
     for i, anomaly in enumerate(anomalies):
         # SCOPE, matching debate_mobile.py's own: only real DEM
         # candidates become Candidate rows. See module docstring.
