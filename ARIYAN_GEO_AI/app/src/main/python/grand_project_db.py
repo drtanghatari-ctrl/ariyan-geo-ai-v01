@@ -8,7 +8,10 @@ PURPOSE: gives ARIYAN a real, persistent, append-only scientific record
 that survives across app sessions and across individual investigations --
 the schema underlying Grand Project / Hypothesis / Investigation /
 Candidate / Evidence Link / Confidence History / Timeline Event /
-Calibration Version, per the roadmap agreed 2026-09-13.
+Calibration Version, per the roadmap agreed 2026-09-13. As of 2026-09-16
+(Phase 2.5 Item 3), also underlies Historical Finding / Geographic
+Suggestion -- see those tables' own section below for why they are
+separate from evidence_link/candidate rather than reusing them.
 
 STORAGE LOCATION -- DELIBERATELY NOT RESOLVED HERE. This module never
 decides where its database file lives. It accepts `db_root` as a plain
@@ -46,10 +49,14 @@ WHAT THIS MODULE DELIBERATELY DOES NOT DO YET:
 - No provenance/hash verification (Phase 4 / Steward Stage 2).
 - No calibration-suggestion logic (Phase 5) -- `calibration_version`
   is just a table today, nothing writes to it.
-- No historical/textual evidence type is defined yet (Phase 2.5) --
-  `evidence_link.evidence_type` is a free-text column specifically so a
-  future "HISTORICAL_ACCOUNT" or similar value can be added later
-  without an ALTER TABLE.
+- evidence_link.evidence_type remains free-text specifically so a
+  future "HISTORICAL_ACCOUNT" value can be added later WITHOUT a
+  migration, for the genuinely separate future case of tying an
+  already-geocoded historical claim back to an EXISTING DEM candidate's
+  lat/lon (post-hoc corroboration). That matching/colocation logic does
+  not exist yet and is explicitly NOT what historical_finding/
+  geographic_suggestion below are for -- see those tables' own
+  docstring note for the distinction.
 
 Every public function here opens its own connection (SQLite handles
 this cheaply and this app is single-process); nothing holds a
@@ -203,6 +210,63 @@ _SCHEMA_STATEMENTS = [
         approved_by_user       INTEGER NOT NULL DEFAULT 0
     )
     """,
+    # ==================== ADDED 2026-09-16, Phase 2.5 Item 3 ====================
+    # historical_finding / geographic_suggestion are DELIBERATELY separate
+    # from evidence_link/candidate, not a reuse of either. evidence_link
+    # requires a NOT NULL candidate_id (a candidate requires a completed
+    # DEM investigation) -- but historical research (Wikipedia/Wikisource/
+    # Internet Archive hits, and the place+radius suggestions extracted
+    # from them by historical_claim_extraction_mobile.py) happens BEFORE
+    # any DEM candidate exists, often before any investigation has run at
+    # all. There is nothing in the pre-2026-09-16 schema this genuinely
+    # fits -- forcing it into evidence_link/candidate would misrepresent
+    # a pre-investigation research suggestion as if it were post-hoc
+    # corroborating evidence for a detection that doesn't yet exist.
+    # (The genuinely separate future case -- tying an already-geocoded
+    # historical claim back to an EXISTING candidate's lat/lon -- remains
+    # unbuilt and would use evidence_link's own reserved
+    # evidence_type='HISTORICAL_ACCOUNT' value when it exists; that is
+    # NOT what these two tables are for.)
+    """
+    CREATE TABLE IF NOT EXISTS historical_finding (
+        id                TEXT PRIMARY KEY,
+        grand_project_id  TEXT NOT NULL,
+        hypothesis_id     TEXT,
+        source_type       TEXT NOT NULL,
+        title             TEXT,
+        url               TEXT,
+        item_detail_json  TEXT NOT NULL,
+        retrieved_at      TEXT NOT NULL,
+        created_at        TEXT NOT NULL,
+        FOREIGN KEY (grand_project_id) REFERENCES grand_project(id),
+        FOREIGN KEY (hypothesis_id) REFERENCES hypothesis(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS geographic_suggestion (
+        id                     TEXT PRIMARY KEY,
+        grand_project_id       TEXT NOT NULL,
+        hypothesis_id          TEXT,
+        historical_finding_id  TEXT,
+        kind                   TEXT NOT NULL,
+        place_name             TEXT,
+        resolved_name          TEXT,
+        lat                    REAL,
+        lon                    REAL,
+        bounding_box_json      TEXT,
+        radius_value           REAL,
+        radius_unit            TEXT,
+        radius_raw_text        TEXT,
+        has_proximity_keyword  INTEGER,
+        context                TEXT,
+        status                 TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+        created_at             TEXT NOT NULL,
+        FOREIGN KEY (grand_project_id) REFERENCES grand_project(id),
+        FOREIGN KEY (hypothesis_id) REFERENCES hypothesis(id),
+        FOREIGN KEY (historical_finding_id) REFERENCES historical_finding(id)
+    )
+    """,
+    # ================== END ADDED 2026-09-16, Phase 2.5 Item 3 ==================
 ]
 
 
@@ -693,6 +757,214 @@ def list_candidates_for_project(db_root: str, grand_project_id: str) -> List[Dic
         initialize_schema(conn)
         rows = conn.execute(
             "SELECT * FROM candidate WHERE grand_project_id = ? ORDER BY created_at ASC",
+            (grand_project_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# =========================== HISTORICAL FINDING (ADDED 2026-09-16, Phase 2.5 Item 3) ===========================
+
+def create_historical_finding(
+    db_root: str,
+    grand_project_id: str,
+    source_type: str,
+    item_detail: Dict[str, Any],
+    retrieved_at: str,
+    title: Optional[str] = None,
+    url: Optional[str] = None,
+    hypothesis_id: Optional[str] = None,
+) -> str:
+    """Records ONE real historical-research item (a Wikipedia/
+    Wikisource/Internet Archive hit) that backed at least one geographic
+    suggestion. `item_detail` is stored as-is as JSON, in full -- the
+    SAME real item dict historical_source_mobile_combined.py's own
+    fetch_combined_historical_evidence() already produced for this item,
+    reused rather than reshaped, matching add_evidence_link()'s own
+    `detail` convention above. `title`/`url` are ALSO pulled out into
+    their own columns purely so callers can query/display without
+    parsing item_detail_json every time -- item_detail remains the
+    single source of truth for anything not covered by a dedicated
+    column (e.g. `snippet` vs `description`, which differ by source
+    module and are therefore not each given their own column here).
+
+    See this module's docstring and the historical_finding/
+    geographic_suggestion schema comment for why this is a NEW table
+    rather than an evidence_link row: this fires BEFORE any DEM
+    candidate exists, often before any investigation has run at all.
+
+    `retrieved_at` is the caller-supplied retrieval_date string from the
+    real fetch_combined_historical_evidence() result (NOT independently
+    regenerated here) -- this preserves the actual moment the research
+    was fetched, not the (possibly much later, if a caller batches
+    persistence) moment it was written to the database; created_at below
+    is separately generated for exactly that "when was this DB row
+    written" distinction."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        finding_id = _new_id()
+        now = _now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO historical_finding
+                    (id, grand_project_id, hypothesis_id, source_type, title,
+                     url, item_detail_json, retrieved_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    finding_id, grand_project_id, hypothesis_id, source_type,
+                    title, url, json.dumps(item_detail), retrieved_at, now,
+                ),
+            )
+        log_timeline_event(
+            db_root, grand_project_id, "HISTORICAL_FINDING_RECORDED",
+            related_entity_type="historical_finding", related_entity_id=finding_id,
+            description=f"Historical finding recorded from {source_type}: {title or '(untitled)'}",
+        )
+        return finding_id
+    finally:
+        conn.close()
+
+
+def get_historical_findings_for_project(db_root: str, grand_project_id: str) -> List[Dict[str, Any]]:
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        rows = conn.execute(
+            "SELECT * FROM historical_finding WHERE grand_project_id = ? ORDER BY created_at ASC",
+            (grand_project_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# =========================== GEOGRAPHIC SUGGESTION (ADDED 2026-09-16, Phase 2.5 Item 3) ===========================
+
+def add_geographic_suggestion(
+    db_root: str,
+    grand_project_id: str,
+    kind: str,
+    hypothesis_id: Optional[str] = None,
+    historical_finding_id: Optional[str] = None,
+    place_name: Optional[str] = None,
+    resolved_name: Optional[str] = None,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    bounding_box: Optional[Dict[str, float]] = None,
+    radius_value: Optional[float] = None,
+    radius_unit: Optional[str] = None,
+    radius_raw_text: Optional[str] = None,
+    has_proximity_keyword: Optional[bool] = None,
+    context: Optional[str] = None,
+) -> str:
+    """Records ONE suggestion produced by
+    historical_claim_extraction_mobile.suggest_probable_areas(). NEVER a
+    committed search area -- `status` defaults to 'PENDING_REVIEW' and
+    this project's own design (user's mockup panel: "Research Hypothesis
+    -- Not a Claim") requires a human to review/promote/reject every row
+    here before it feeds any real AOI/tiling step. No rows are ever
+    silently filtered out before being written -- see this project's
+    2026-09-16 decision to persist every suggestion the extractor
+    produces, including ungrounded/noisy ones, rather than pre-filtering
+    for relevance (deferred to Phase 5, once real outcome data exists to
+    validate a filtering rule against).
+
+    `kind` MUST be one of 'PAIRED_SUGGESTION' / 'DISTANCE_ONLY' /
+    'UNGROUNDED_PLACE' (not DB-enforced, matching this project's existing
+    convention of leaving free-text columns unconstrained for forward
+    compatibility -- see add_evidence_link()'s own `relation` note).
+    The three kinds genuinely carry different real fields, matching
+    exactly what suggest_probable_areas() itself returns for each list
+    (NOT padded with fabricated values for fields a given kind never
+    has):
+      - PAIRED_SUGGESTION: place_name/resolved_name/lat/lon/bounding_box
+        (from the real Nominatim anchor) + radius_value/unit/raw_text +
+        context + historical_finding_id. has_proximity_keyword is
+        correctly NULL here -- suggest_probable_areas() strips that
+        field out of the "radius" sub-dict for suggested_areas entries,
+        it is only ever present on distance_only_mentions.
+      - DISTANCE_ONLY: radius_value/unit/raw_text + has_proximity_keyword
+        + context. No place_name/lat/lon/bounding_box/historical_finding_id
+        -- distance_only_mentions carries no source_item at all in the
+        real suggest_probable_areas() output, so there is nothing to
+        link to a historical_finding row.
+      - UNGROUNDED_PLACE: place_name only (the bare candidate string).
+        No radius/context/historical_finding_id -- ungrounded_place_
+        candidates is a flat list of strings in the real output, with no
+        other fields attached to lose.
+
+    `bounding_box`, if given, is stored as JSON -- the SAME real
+    bounding_box dict geocode_place_name() already returns
+    (min_lat/max_lat/min_lon/max_lon), reused rather than reshaped."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        suggestion_id = _new_id()
+        now = _now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO geographic_suggestion
+                    (id, grand_project_id, hypothesis_id, historical_finding_id,
+                     kind, place_name, resolved_name, lat, lon,
+                     bounding_box_json, radius_value, radius_unit,
+                     radius_raw_text, has_proximity_keyword, context,
+                     status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_REVIEW', ?)
+                """,
+                (
+                    suggestion_id, grand_project_id, hypothesis_id, historical_finding_id,
+                    kind, place_name, resolved_name, lat, lon,
+                    json.dumps(bounding_box) if bounding_box is not None else None,
+                    radius_value, radius_unit, radius_raw_text,
+                    (None if has_proximity_keyword is None else int(bool(has_proximity_keyword))),
+                    context, now,
+                ),
+            )
+        log_timeline_event(
+            db_root, grand_project_id, "GEOGRAPHIC_SUGGESTION_RECORDED",
+            related_entity_type="geographic_suggestion", related_entity_id=suggestion_id,
+            description=f"Geographic suggestion recorded ({kind}): {place_name or '(no place name)'}",
+        )
+        return suggestion_id
+    finally:
+        conn.close()
+
+
+def update_geographic_suggestion_status(
+    db_root: str, grand_project_id: str, suggestion_id: str, new_status: str
+) -> None:
+    """Changes ONLY the status column (e.g. a human reviewer setting it
+    to 'ACCEPTED'/'REJECTED') -- the row itself is never deleted, same
+    "dead ends are retained evidence" rule as
+    update_candidate_status() above."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        with conn:
+            conn.execute(
+                "UPDATE geographic_suggestion SET status = ? WHERE id = ?",
+                (new_status, suggestion_id),
+            )
+        log_timeline_event(
+            db_root, grand_project_id, "GEOGRAPHIC_SUGGESTION_STATUS_CHANGED",
+            related_entity_type="geographic_suggestion", related_entity_id=suggestion_id,
+            description=f"Geographic suggestion status changed to {new_status}.",
+        )
+    finally:
+        conn.close()
+
+
+def get_geographic_suggestions_for_project(db_root: str, grand_project_id: str) -> List[Dict[str, Any]]:
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        rows = conn.execute(
+            "SELECT * FROM geographic_suggestion WHERE grand_project_id = ? ORDER BY created_at ASC",
             (grand_project_id,),
         ).fetchall()
         return [dict(r) for r in rows]
