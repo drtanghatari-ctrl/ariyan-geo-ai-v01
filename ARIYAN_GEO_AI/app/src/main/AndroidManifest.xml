@@ -73,6 +73,10 @@
              OfflineDownloadService.kt's class doc. exported="false"
              because it's only ever started from within this app
              (OfflineDataActivity.kt), never by another app. -->
+<activity
+    android:name=".GrandProjectActivity"
+    android:exported="true"
+    android:windowSoftInputMode="adjustResize" />
         <service
             android:name=".OfflineDownloadService"
             android:exported="false"
