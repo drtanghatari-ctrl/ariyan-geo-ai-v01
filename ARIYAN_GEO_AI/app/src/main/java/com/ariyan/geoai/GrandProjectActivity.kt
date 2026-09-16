@@ -4,6 +4,8 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.View
+import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -14,6 +16,7 @@ import androidx.lifecycle.lifecycleScope
 import com.ariyan.geoai.databinding.ActivityGrandProjectBinding
 import com.chaquo.python.PyException
 import com.chaquo.python.Python
+import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -25,26 +28,44 @@ import org.json.JSONObject
  * Project database (grand_project_db.py).
  *
  * SCOPE (user's own explicit decisions across this project's Phase 2
- * sessions): three separate flat lists -- Investigations / Candidates
- * / Timeline -- switched between via the three buttons below.
- * Investigations and Timeline remain flat, read-only text blocks, by
- * design (no drill-down requested for those). Candidates got
- * DRILL-DOWN ADDED 2026-09-17: each candidate is now its own tappable
+ * sessions): four separate flat lists -- Investigations / Candidates /
+ * Timeline / Hypotheses -- switched between via the four buttons
+ * below. Investigations and Timeline remain flat, read-only text
+ * blocks, by design (no drill-down requested for those). Candidates
+ * got DRILL-DOWN ADDED 2026-09-17: each candidate is its own tappable
  * row; tapping one fetches and shows its own confidence history
  * trajectory + full evidence chain + parent-investigation context, in
  * a dialog -- this is the actual "Evidence Graph (backward
- * traceability)" part of Phase 2's own name. Deliberately built as a
- * dialog over the existing screen, not a new Activity/layout file --
- * fewer new manifest/XML surfaces, less risk of repeating the earlier
- * XML-comment '--' class of bug from this screen's first version.
+ * traceability)" part of Phase 2's own name. Hypotheses got its OWN
+ * tab ADDED 2026-09-17 (Phase 2's third and final scoped item): a
+ * simple "state a new hypothesis" text input + submit button, plus a
+ * flat list of existing ones -- the actual "explicit per-project
+ * Hypothesis objects" part of Phase 2's own name, since
+ * create_hypothesis() has existed since Phase 0 but never had a real
+ * UI path to reach it before now. LINKING a candidate to a hypothesis
+ * (also ADDED 2026-09-17, same pass, per the user's own explicit
+ * request) happens from the Candidate Detail dialog itself, not from
+ * the Hypotheses tab -- a "Link to Hypothesis" button there opens a
+ * native picker of existing hypotheses and calls
+ * link_candidate_to_hypothesis_json() on selection.
  *
- * READ-ONLY throughout. Investigations/Timeline call
- * grand_project_query_mobile.py's list_investigations_json()/
- * list_timeline_json(); Candidates calls list_candidates_json() for
- * the row list, then get_candidate_detail_json() per tap for detail --
- * all four are thin JSON-wrapper functions over already-tested
- * grand_project_db.py read functions. No new persistence logic, no
- * writes, nothing that could corrupt the database this screen displays.
+ * All new UI surfaces this session (candidate rows, the Candidate
+ * Detail dialog, the Hypotheses tab's input/button/list) are built
+ * entirely in Kotlin code rather than new XML layout files/elements
+ * with real content -- deliberately, to avoid repeating the
+ * double-hyphen-in-XML-comment class of bug this screen's first
+ * version hit twice.
+ *
+ * READ-ONLY plus TWO WRITE PATHS as of this session. Investigations/
+ * Timeline call grand_project_query_mobile.py's
+ * list_investigations_json()/list_timeline_json(); Candidates calls
+ * list_candidates_json() for the row list, then
+ * get_candidate_detail_json() per tap for detail; Hypotheses calls
+ * list_hypotheses_json() for its row list. The two WRITE paths --
+ * create_hypothesis_json() (stating a new hypothesis) and
+ * link_candidate_to_hypothesis_json() (linking a candidate to one) --
+ * are this screen's first writes; every other call remains a thin
+ * JSON-wrapper read over already-tested grand_project_db.py functions.
  *
  * PROJECT SCOPE: uses the SAME interim stopgap MainActivity.kt's
  * persistToGrandProject() already uses --
@@ -73,37 +94,66 @@ class GrandProjectActivity : AppCompatActivity() {
         binding.buttonShowInvestigations.setOnClickListener { loadAndShow(ListKind.INVESTIGATIONS) }
         binding.buttonShowCandidates.setOnClickListener { loadAndShow(ListKind.CANDIDATES) }
         binding.buttonShowTimeline.setOnClickListener { loadAndShow(ListKind.TIMELINE) }
+        binding.buttonShowHypotheses.setOnClickListener { loadAndShow(ListKind.HYPOTHESES) }
     }
 
-    private enum class ListKind { INVESTIGATIONS, CANDIDATES, TIMELINE }
+    private enum class ListKind { INVESTIGATIONS, CANDIDATES, TIMELINE, HYPOTHESES }
+
+    /** Resolves the (one, stopgap) Grand Project's id. Pulled out into
+     * its own suspend helper so every flow that needs it (loading a
+     * tab, submitting a new hypothesis, fetching the hypothesis
+     * picker's list) shares one implementation rather than repeating
+     * the same withContext block -- this was inlined three times
+     * before this session's Hypothesis UI pass made a fourth call site
+     * necessary, at which point pulling it out stopped being
+     * optional. */
+    private suspend fun getGrandProjectId(): String = withContext(Dispatchers.Default) {
+        python.getModule("grand_project_sync")
+            .callAttr("get_or_create_default_grand_project", offlineDataRoot)
+            .toString()
+    }
+
+    /** The actual load-and-render body, as a suspend function rather
+     * than a fire-and-forget launch{} -- so callers that are ALREADY
+     * inside their own coroutine (submitHypothesis(), below, refreshing
+     * the Hypotheses tab right after a successful create) can await it
+     * directly, instead of nesting a second independent launch{} whose
+     * own setLoading(true)/setLoading(false) would race the outer
+     * one's and cause the loading spinner to flicker off then back on.
+     * loadAndShow() below is the thin, non-suspend wrapper every button
+     * click listener actually calls. */
+    private suspend fun loadAndShowSuspend(kind: ListKind) {
+        val grandProjectId = getGrandProjectId()
+        val jsonText = withContext(Dispatchers.Default) {
+            val queryModule = python.getModule("grand_project_query_mobile")
+            val fnName = when (kind) {
+                ListKind.INVESTIGATIONS -> "list_investigations_json"
+                ListKind.CANDIDATES -> "list_candidates_json"
+                ListKind.TIMELINE -> "list_timeline_json"
+                ListKind.HYPOTHESES -> "list_hypotheses_json"
+            }
+            queryModule.callAttr(fnName, offlineDataRoot, grandProjectId).toString()
+        }
+        when (kind) {
+            ListKind.CANDIDATES -> renderCandidateRows(jsonText)
+            ListKind.HYPOTHESES -> renderHypotheses(jsonText, grandProjectId)
+            else -> {
+                binding.containerCandidateRows.visibility = View.GONE
+                binding.containerHypotheses.visibility = View.GONE
+                binding.textGrandProjectResults.visibility = View.VISIBLE
+                binding.textGrandProjectResults.text = formatList(kind, jsonText)
+            }
+        }
+    }
 
     private fun loadAndShow(kind: ListKind) {
         setLoading(true)
         lifecycleScope.launch {
             try {
-                val grandProjectId = withContext(Dispatchers.Default) {
-                    python.getModule("grand_project_sync")
-                        .callAttr("get_or_create_default_grand_project", offlineDataRoot)
-                        .toString()
-                }
-                val jsonText = withContext(Dispatchers.Default) {
-                    val queryModule = python.getModule("grand_project_query_mobile")
-                    val fnName = when (kind) {
-                        ListKind.INVESTIGATIONS -> "list_investigations_json"
-                        ListKind.CANDIDATES -> "list_candidates_json"
-                        ListKind.TIMELINE -> "list_timeline_json"
-                    }
-                    queryModule.callAttr(fnName, offlineDataRoot, grandProjectId).toString()
-                }
-                if (kind == ListKind.CANDIDATES) {
-                    renderCandidateRows(jsonText)
-                } else {
-                    binding.containerCandidateRows.visibility = View.GONE
-                    binding.textGrandProjectResults.visibility = View.VISIBLE
-                    binding.textGrandProjectResults.text = formatList(kind, jsonText)
-                }
+                loadAndShowSuspend(kind)
             } catch (e: PyException) {
                 binding.containerCandidateRows.visibility = View.GONE
+                binding.containerHypotheses.visibility = View.GONE
                 binding.textGrandProjectResults.visibility = View.VISIBLE
                 binding.textGrandProjectResults.text = "Failed to load: ${cleanErrorMessage(e.message)}"
             } finally {
@@ -127,18 +177,21 @@ class GrandProjectActivity : AppCompatActivity() {
             JSONArray(jsonText)
         } catch (e: Exception) {
             binding.containerCandidateRows.visibility = View.GONE
+            binding.containerHypotheses.visibility = View.GONE
             binding.textGrandProjectResults.visibility = View.VISIBLE
             binding.textGrandProjectResults.text = "Could not parse results."
             return
         }
         if (array.length() == 0) {
             binding.containerCandidateRows.visibility = View.GONE
+            binding.containerHypotheses.visibility = View.GONE
             binding.textGrandProjectResults.visibility = View.VISIBLE
             binding.textGrandProjectResults.text = "No candidates recorded yet for this Grand Project."
             return
         }
 
         binding.textGrandProjectResults.visibility = View.GONE
+        binding.containerHypotheses.visibility = View.GONE
         binding.containerCandidateRows.visibility = View.VISIBLE
         binding.containerCandidateRows.removeAllViews()
 
@@ -177,6 +230,150 @@ class GrandProjectActivity : AppCompatActivity() {
         }
     }
 
+    /** Builds the entire Hypotheses tab in code: a "state a new
+     * hypothesis" EditText + submit button at the top, then one plain
+     * row per existing hypothesis below. ADDED for Phase 2's
+     * Hypothesis UI (user's own explicit request this session).
+     * Rebuilds the whole container from scratch on every call
+     * (removeAllViews() first, same as renderCandidateRows()) -- this
+     * is also how a freshly submitted hypothesis ends up visible: after
+     * a successful create, submitHypothesis() below calls
+     * loadAndShowSuspend(HYPOTHESES) again, which re-fetches the real
+     * list and calls this function again, which naturally clears
+     * whatever the user had typed (acceptable here since it only
+     * happens right after a successful submit, not while they're still
+     * mid-typing).
+     *
+     * Hypothesis rows themselves are plain, non-clickable text -- no
+     * drill-down for hypotheses in this pass. Linking a candidate to a
+     * hypothesis happens the OTHER direction, from the Candidate Detail
+     * dialog's own "Link to Hypothesis" button (see
+     * showHypothesisPicker()), not from here. */
+    private fun renderHypotheses(jsonText: String, grandProjectId: String) {
+        val array = try {
+            JSONArray(jsonText)
+        } catch (e: Exception) {
+            binding.containerCandidateRows.visibility = View.GONE
+            binding.containerHypotheses.visibility = View.GONE
+            binding.textGrandProjectResults.visibility = View.VISIBLE
+            binding.textGrandProjectResults.text = "Could not parse results."
+            return
+        }
+
+        binding.textGrandProjectResults.visibility = View.GONE
+        binding.containerCandidateRows.visibility = View.GONE
+        binding.containerHypotheses.visibility = View.VISIBLE
+        binding.containerHypotheses.removeAllViews()
+
+        val density = resources.displayMetrics.density
+
+        val input = EditText(this).apply {
+            hint = "State a new hypothesis..."
+            setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_primary))
+            setHintTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
+            setPadding((12 * density).toInt(), (10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
+        }
+        binding.containerHypotheses.addView(input)
+
+        val submitButton = MaterialButton(this).apply {
+            text = "State Hypothesis"
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (8 * density).toInt() }
+            setOnClickListener {
+                val statement = input.text.toString().trim()
+                if (statement.isEmpty()) {
+                    Toast.makeText(this@GrandProjectActivity, "Enter a hypothesis statement first.", Toast.LENGTH_SHORT).show()
+                } else {
+                    submitHypothesis(grandProjectId, statement)
+                }
+            }
+        }
+        binding.containerHypotheses.addView(submitButton)
+
+        val spacer = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (20 * density).toInt())
+        }
+        binding.containerHypotheses.addView(spacer)
+
+        if (array.length() == 0) {
+            val emptyView = TextView(this).apply {
+                text = "No hypotheses stated yet for this Grand Project."
+                typeface = Typeface.MONOSPACE
+                textSize = 12f
+                setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
+            }
+            binding.containerHypotheses.addView(emptyView)
+            return
+        }
+
+        for (i in 0 until array.length()) {
+            val row = array.getJSONObject(i)
+            val rowText = buildString {
+                append("#").append(i + 1).append("  ").append(row.optString("created_at")).append("\n")
+                append(row.optString("statement")).append("\n")
+                append("status: ").append(row.optString("current_status", "UNKNOWN"))
+                if (!row.isNull("current_confidence")) {
+                    append(String.format("   confidence: %.2f", row.optDouble("current_confidence")))
+                }
+            }
+            val rowView = TextView(this).apply {
+                text = rowText
+                typeface = Typeface.MONOSPACE
+                textSize = 12f
+                setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
+                setPadding(0, (10 * density).toInt(), 0, (10 * density).toInt())
+            }
+            binding.containerHypotheses.addView(rowView)
+        }
+    }
+
+    /** Creates a new hypothesis, then refreshes the Hypotheses tab to
+     * show it. The create step and the refresh step are handled with
+     * SEPARATE try/catch blocks deliberately: if create_hypothesis_json
+     * itself fails, the error message correctly says so and the
+     * refresh is skipped entirely (return@launch); if create succeeds
+     * but the FOLLOW-UP refresh fails for some unrelated reason, that
+     * is reported as a refresh failure instead, not misattributed back
+     * to the (already-successful) creation. Calls loadAndShowSuspend()
+     * directly rather than the loadAndShow() wrapper, since this
+     * function is already inside its own coroutine with its own
+     * setLoading(true)/finally{setLoading(false)} -- calling the
+     * wrapper here would launch a SECOND, independent coroutine whose
+     * own loading-toggle would race this one's. */
+    private fun submitHypothesis(grandProjectId: String, statement: String) {
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr("create_hypothesis_json", offlineDataRoot, grandProjectId, statement)
+                        .toString()
+                }
+                Toast.makeText(this@GrandProjectActivity, "Hypothesis stated.", Toast.LENGTH_SHORT).show()
+            } catch (e: PyException) {
+                Toast.makeText(
+                    this@GrandProjectActivity,
+                    "Failed to state hypothesis: ${cleanErrorMessage(e.message)}",
+                    Toast.LENGTH_LONG
+                ).show()
+                setLoading(false)
+                return@launch
+            }
+            try {
+                loadAndShowSuspend(ListKind.HYPOTHESES)
+            } catch (e: PyException) {
+                binding.containerCandidateRows.visibility = View.GONE
+                binding.containerHypotheses.visibility = View.GONE
+                binding.textGrandProjectResults.visibility = View.VISIBLE
+                binding.textGrandProjectResults.text = "Hypothesis stated, but failed to refresh the list: ${cleanErrorMessage(e.message)}"
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
     /** Fetches ONE candidate's combined detail (its own confidence
      * history trajectory + full evidence chain + parent-investigation
      * context, per the user's own explicit "extra information for
@@ -204,7 +401,7 @@ class GrandProjectActivity : AppCompatActivity() {
                     // own documented {"error": "..."} convention.
                     Toast.makeText(this@GrandProjectActivity, detail.optString("error"), Toast.LENGTH_SHORT).show()
                 } else {
-                    showDetailDialog(formatCandidateDetail(detail))
+                    showDetailDialog(candidateId, formatCandidateDetail(detail))
                 }
             } catch (e: PyException) {
                 Toast.makeText(
@@ -258,6 +455,20 @@ class GrandProjectActivity : AppCompatActivity() {
                     sb.append(String.format(" (%.2f)", candidate.optDouble("confidence_numeric")))
                 }
                 sb.append("\n")
+            }
+            sb.append("\n")
+        }
+
+        // ADDED for Phase 2's Hypothesis UI (linking pass). Null here
+        // is the ORDINARY case for a candidate never linked to one --
+        // see get_candidate_detail_json()'s own docstring note on this.
+        val hypothesis = detail.optJSONObject("hypothesis")
+        if (hypothesis != null) {
+            sb.append("Linked Hypothesis\n")
+            sb.append("  statement: ").append(hypothesis.optString("statement")).append("\n")
+            sb.append("  status: ").append(hypothesis.optString("current_status", "UNKNOWN")).append("\n")
+            if (!hypothesis.isNull("current_confidence")) {
+                sb.append(String.format("  confidence: %.2f\n", hypothesis.optDouble("current_confidence")))
             }
             sb.append("\n")
         }
@@ -321,8 +532,17 @@ class GrandProjectActivity : AppCompatActivity() {
      * (ScrollView + monospace, selectable TextView -- same visual
      * style as textGrandProjectResults/textResults elsewhere in this
      * app) rather than a new XML layout file, per this class's own doc
-     * note on why drill-down avoided new XML surfaces this time. */
-    private fun showDetailDialog(text: String) {
+     * note on why drill-down avoided new XML surfaces this time. ADDED
+     * for the Hypothesis UI linking pass: a Neutral "Link to
+     * Hypothesis" button alongside the existing Positive "Close"
+     * button, opening showHypothesisPicker() for this candidate. Note
+     * that tapping either button dismisses this AlertDialog by default
+     * (standard Android behavior, not overridden) -- if the user wants
+     * to see the newly linked hypothesis reflected in THIS candidate's
+     * own detail view, they simply tap the same candidate row again
+     * afterward; this is a deliberately simple flow for a first pass,
+     * not an attempt to keep the dialog open and refresh it in place. */
+    private fun showDetailDialog(candidateId: String, text: String) {
         val density = resources.displayMetrics.density
         val textView = TextView(this).apply {
             this.text = text
@@ -340,7 +560,87 @@ class GrandProjectActivity : AppCompatActivity() {
             .setTitle("Candidate Detail")
             .setView(scrollView)
             .setPositiveButton("Close", null)
+            .setNeutralButton("Link to Hypothesis") { _, _ -> showHypothesisPicker(candidateId) }
             .show()
+    }
+
+    /** Fetches the real list of existing hypotheses for this project
+     * and shows them as a native picker (AlertDialog.Builder().setItems(),
+     * the simplest possible list-choice dialog, no new layout needed)
+     * so the user can pick which one to link this candidate to. ADDED
+     * for the Hypothesis UI linking pass, called from the "Link to
+     * Hypothesis" button in showDetailDialog() above. Handles the
+     * empty case explicitly (no hypotheses stated yet) with a plain
+     * Toast pointing at the Hypotheses tab, rather than showing a
+     * confusing empty picker. */
+    private fun showHypothesisPicker(candidateId: String) {
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val grandProjectId = getGrandProjectId()
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr("list_hypotheses_json", offlineDataRoot, grandProjectId)
+                        .toString()
+                }
+                val array = JSONArray(jsonText)
+                if (array.length() == 0) {
+                    Toast.makeText(
+                        this@GrandProjectActivity,
+                        "No hypotheses stated yet -- state one on the Hypotheses tab first.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@launch
+                }
+                val statements: Array<CharSequence> = Array(array.length()) { i -> array.getJSONObject(i).optString("statement") }
+                val hypothesisIds = Array(array.length()) { i -> array.getJSONObject(i).optString("id") }
+                AlertDialog.Builder(this@GrandProjectActivity)
+                    .setTitle("Link to which hypothesis?")
+                    .setItems(statements) { _, which ->
+                        linkCandidateToHypothesis(candidateId, hypothesisIds[which], statements[which].toString())
+                    }
+                    .show()
+            } catch (e: PyException) {
+                Toast.makeText(
+                    this@GrandProjectActivity,
+                    "Failed to load hypotheses: ${cleanErrorMessage(e.message)}",
+                    Toast.LENGTH_LONG
+                ).show()
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    /** Links one candidate to one hypothesis via
+     * link_candidate_to_hypothesis_json(). ADDED for the Hypothesis UI
+     * linking pass. Deliberately does NOT try to re-open or refresh the
+     * Candidate Detail dialog afterward -- the dialog is already closed
+     * by this point (picking an item in showHypothesisPicker()'s
+     * AlertDialog dismisses it, and the Candidate Detail dialog itself
+     * was already dismissed when its own Neutral button was tapped) --
+     * a confirmation Toast is enough; re-tapping the same candidate row
+     * shows the update, same as the note on showDetailDialog() above. */
+    private fun linkCandidateToHypothesis(candidateId: String, hypothesisId: String, statement: String) {
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr("link_candidate_to_hypothesis_json", offlineDataRoot, candidateId, hypothesisId)
+                        .toString()
+                }
+                Toast.makeText(this@GrandProjectActivity, "Linked to hypothesis: $statement", Toast.LENGTH_LONG).show()
+            } catch (e: PyException) {
+                Toast.makeText(
+                    this@GrandProjectActivity,
+                    "Failed to link: ${cleanErrorMessage(e.message)}",
+                    Toast.LENGTH_LONG
+                ).show()
+            } finally {
+                setLoading(false)
+            }
+        }
     }
 
     /** Same "first line only" convention MainActivity.kt's own
@@ -360,8 +660,11 @@ class GrandProjectActivity : AppCompatActivity() {
      * docstrings) -- nothing fabricated, nothing renamed. NOTE:
      * ListKind.CANDIDATES is no longer routed through this function as
      * of the 2026-09-17 drill-down change -- see renderCandidateRows()
-     * above instead. Kept here only for INVESTIGATIONS/TIMELINE, which
-     * remain deliberately flat text blocks. */
+     * above instead. ListKind.HYPOTHESES is likewise never routed
+     * through here (ADDED same day, Hypothesis UI pass) -- see
+     * renderHypotheses() instead. Kept here only for
+     * INVESTIGATIONS/TIMELINE, which remain deliberately flat text
+     * blocks. */
     private fun formatList(kind: ListKind, jsonText: String): String {
         val array = try {
             JSONArray(jsonText)
@@ -404,6 +707,10 @@ class GrandProjectActivity : AppCompatActivity() {
             ListKind.CANDIDATES -> {
                 // No longer reached -- see NOTE in this function's own
                 // doc comment above.
+            }
+            ListKind.HYPOTHESES -> {
+                // Never reached -- see renderHypotheses() instead,
+                // same reason as the CANDIDATES case directly above.
             }
         }
         return sb.toString()
