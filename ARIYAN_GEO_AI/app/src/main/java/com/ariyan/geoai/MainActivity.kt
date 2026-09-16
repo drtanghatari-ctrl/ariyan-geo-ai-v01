@@ -140,6 +140,15 @@ import java.io.File
  * above it: a persistence failure must never hide the investigation/
  * debate results already rendered on screen.
  *
+ * GRAND PROJECT BROWSE SCREEN (ADDED 2026-09-16, Phase 2): a new
+ * "Grand Project" button navigates to GrandProjectActivity, a
+ * read-only, deliberately flat (no drill-down yet) browse screen over
+ * the same Grand Project database this Activity has been writing to
+ * since Phase 1 -- three separate lists (Investigations / Candidates /
+ * Timeline), see that Activity's own class doc for full detail. Pure
+ * navigation, same plain-Intent pattern buttonOfflineData already uses
+ * -- no new logic here.
+ *
  * LIVE PROGRESS REPORTING (a prior session): a real on-device
  * airplane-mode test showed a multi-candidate NDVI-correlation run
  * could take several minutes with zero on-screen indication of what
@@ -206,8 +215,7 @@ class MainActivity : AppCompatActivity() {
 
         // Real-data-first redesign: load any previously-saved credentials
         // back into the input fields, so the user doesn't have to retype
-        // them every session -- see SecureCredentialStore.kt and this
-        // class's own doc comment.
+        // them every session -- see SecureCredentialStore.kt.
         credentialStore = SecureCredentialStore(this)
         if (credentialStore.openTopographyApiKey.isNotEmpty()) {
             binding.inputApiKey.setText(credentialStore.openTopographyApiKey)
@@ -241,6 +249,13 @@ class MainActivity : AppCompatActivity() {
         binding.buttonUseLocation.setOnClickListener { onUseLocationClicked() }
         binding.buttonOfflineData.setOnClickListener {
             startActivity(Intent(this, OfflineDataActivity::class.java))
+        }
+        // Phase 2 (ADDED 2026-09-16): pure navigation to the new,
+        // read-only Grand Project browse screen -- see this class's own
+        // doc comment, GRAND PROJECT BROWSE SCREEN, and
+        // GrandProjectActivity.kt's own class doc for what it shows.
+        binding.buttonGrandProject.setOnClickListener {
+            startActivity(Intent(this, GrandProjectActivity::class.java))
         }
     }
 
