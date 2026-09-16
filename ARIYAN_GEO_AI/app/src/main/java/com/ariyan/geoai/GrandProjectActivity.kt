@@ -230,6 +230,7 @@ class GrandProjectActivity : AppCompatActivity() {
         }
     }
 
+
     /** Builds the entire Hypotheses tab in code: a "state a new
      * hypothesis" EditText + submit button at the top, then one plain
      * row per existing hypothesis below. ADDED for Phase 2's
