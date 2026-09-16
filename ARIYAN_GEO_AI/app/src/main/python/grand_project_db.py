@@ -751,6 +751,46 @@ def get_grand_project(db_root: str, grand_project_id: str) -> Optional[Dict[str,
         conn.close()
 
 
+# =========================== CANDIDATE (single-row READ, ADDED for Phase 2 drill-down) ===========================
+
+def get_candidate(db_root: str, candidate_id: str) -> Optional[Dict[str, Any]]:
+    """Returns one candidate row by id, or None if it doesn't exist.
+    ADDED for Phase 2 drill-down: list_candidates_for_project() has
+    existed since Phase 0/1, but nothing has ever fetched a single
+    candidate by its own id -- a genuine gap, same category as
+    list_investigations_for_project() found earlier this project.
+    Mirrors get_grand_project()'s exact pattern."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        row = conn.execute(
+            "SELECT * FROM candidate WHERE id = ?", (candidate_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+# =========================== INVESTIGATION (single-row READ, ADDED for Phase 2 drill-down) ===========================
+
+def get_investigation(db_root: str, investigation_id: str) -> Optional[Dict[str, Any]]:
+    """Returns one investigation row by id, or None if it doesn't exist.
+    ADDED for Phase 2 drill-down, same real gap as get_candidate()
+    above -- needed so a candidate's detail view can show its parent
+    investigation's objective/status/summary for orientation, per the
+    user's own explicit request this session. Mirrors
+    get_grand_project()'s exact pattern."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        row = conn.execute(
+            "SELECT * FROM investigation WHERE id = ?", (investigation_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
 def list_candidates_for_project(db_root: str, grand_project_id: str) -> List[Dict[str, Any]]:
     conn = get_connection(db_root)
     try:
