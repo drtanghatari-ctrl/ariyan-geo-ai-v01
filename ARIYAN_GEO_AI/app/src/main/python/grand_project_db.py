@@ -764,6 +764,28 @@ def list_candidates_for_project(db_root: str, grand_project_id: str) -> List[Dic
         conn.close()
 
 
+# =========================== INVESTIGATION (READ, ADDED 2026-09-16, Phase 2) ===========================
+
+def list_investigations_for_project(db_root: str, grand_project_id: str) -> List[Dict[str, Any]]:
+    """Returns every investigation row for a project, oldest first.
+    ADDED for Phase 2 (Confidence History + Evidence Graph +
+    Hypothesis objects UI): create_investigation()/complete_investigation()
+    have existed since Phase 0, but nothing ever read them back as a
+    list -- a genuine gap discovered while scoping Phase 2's
+    "Investigations" flat list, not something worked around. Mirrors
+    list_candidates_for_project()'s own pattern exactly."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        rows = conn.execute(
+            "SELECT * FROM investigation WHERE grand_project_id = ? ORDER BY created_at ASC",
+            (grand_project_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 # =========================== HISTORICAL FINDING (ADDED 2026-09-16, Phase 2.5 Item 3) ===========================
 
 def create_historical_finding(
