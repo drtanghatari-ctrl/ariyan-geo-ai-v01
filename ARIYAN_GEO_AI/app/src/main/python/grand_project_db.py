@@ -408,6 +408,45 @@ def update_hypothesis_confidence(
         conn.close()
 
 
+def get_hypothesis(db_root: str, hypothesis_id: str) -> Optional[Dict[str, Any]]:
+    """Returns one hypothesis row by id, or None if it doesn't exist.
+    ADDED for Phase 2's Hypothesis UI: needed so a candidate's own
+    detail view can show which hypothesis (if any) it's linked to, by
+    its real statement text rather than just a bare id. Same genuine
+    single-row-read gap category as get_candidate()/get_investigation()
+    (both added earlier this same session) -- mirrors their exact
+    pattern, which itself mirrors get_grand_project()'s."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        row = conn.execute(
+            "SELECT * FROM hypothesis WHERE id = ?", (hypothesis_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def list_hypotheses_for_project(db_root: str, grand_project_id: str) -> List[Dict[str, Any]]:
+    """Returns every hypothesis row for a project, oldest first. ADDED
+    for Phase 2's third and final scoped item (Hypothesis objects):
+    create_hypothesis()/update_hypothesis_confidence()/
+    link_candidate_to_hypothesis() have all existed since Phase 0, but
+    nothing has ever read hypotheses back as a list -- the same genuine
+    gap category as list_investigations_for_project() (added earlier
+    this same session). Mirrors that function's own pattern exactly."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        rows = conn.execute(
+            "SELECT * FROM hypothesis WHERE grand_project_id = ? ORDER BY created_at ASC",
+            (grand_project_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 # =========================== INVESTIGATION ===========================
 
 def create_investigation(
