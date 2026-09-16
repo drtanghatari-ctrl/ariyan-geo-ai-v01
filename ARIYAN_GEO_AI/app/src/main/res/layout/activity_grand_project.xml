@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    activity_grand_project.xml
+
+    Phase 2's FIRST, deliberately flat browse screen for the Grand
+    Project database (grand_project_db.py) -- three separate lists
+    (Investigations / Candidates / Timeline), switched between via the
+    three buttons below, no drill-down between them yet (a later,
+    separate step -- see GrandProjectActivity.kt's own class doc).
+
+    Mirrors activity_main.xml's own established visual conventions
+    exactly: ScrollView + vertical LinearLayout, real existing colors
+    (ariyan_bg/ariyan_text_primary/ariyan_text_secondary/ariyan_accent),
+    the same MaterialButton full-width stacking pattern used throughout
+    the rest of the app (no new multi-column layout invented), and the
+    same monospace/selectable TextView style textResults already uses
+    for displaying variable-length structured text.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/ariyan_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Grand Project"
+            android:textColor="@color/ariyan_text_primary"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:paddingBottom="4dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Read-only browse of the persisted Grand Project database. Flat lists only for now -- tap-through between Investigations/Candidates/Evidence is a later step, not built yet."
+            android:textColor="@color/ariyan_text_secondary"
+            android:textSize="12sp"
+            android:paddingBottom="16dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonShowInvestigations"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Investigations"
+            app:backgroundTint="@color/ariyan_accent" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonShowCandidates"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Candidates"
+            app:backgroundTint="@color/ariyan_accent" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonShowTimeline"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Timeline"
+            app:backgroundTint="@color/ariyan_accent" />
+
+        <ProgressBar
+            android:id="@+id/progressBarGrandProject"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginTop="16dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/textGrandProjectResults"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:fontFamily="monospace"
+            android:textColor="@color/ariyan_text_secondary"
+            android:textSize="12sp"
+            android:textIsSelectable="true" />
+
+    </LinearLayout>
+</ScrollView>
