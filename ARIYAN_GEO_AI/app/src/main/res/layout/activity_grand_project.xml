@@ -87,5 +87,25 @@
             android:textSize="12sp"
             android:textIsSelectable="true" />
 
+        <!-- Phase 2 drill-down (ADDED 2026-09-17): tappable per-candidate
+             rows are built programmatically in Kotlin and added into this
+             empty container, see GrandProjectActivity.kt's own
+             renderCandidateRows(). Hidden by default; shown only when
+             the Candidates button is tapped, in place of
+             textGrandProjectResults above (which continues to handle
+             Investigations and Timeline exactly as before, completely
+             unchanged). Kept as a plain empty LinearLayout here
+             deliberately, no row layout, styling, or content is
+             defined in XML, so this container itself can never
+             reintroduce the earlier double-hyphen-in-XML-comment class
+             of bug; every row's real content is built in code. -->
+        <LinearLayout
+            android:id="@+id/containerCandidateRows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical"
+            android:visibility="gone" />
+
     </LinearLayout>
 </ScrollView>
