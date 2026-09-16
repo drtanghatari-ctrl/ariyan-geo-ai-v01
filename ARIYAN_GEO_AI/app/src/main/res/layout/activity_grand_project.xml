@@ -69,6 +69,22 @@
             android:text="Timeline"
             app:backgroundTint="@color/ariyan_accent" />
 
+        <!-- Phase 2 Hypothesis UI (ADDED 2026-09-17): 4th flat-list
+             button, matching the three above exactly. Its own content
+             (a "state a new hypothesis" input + submit button, plus the
+             list of existing hypotheses) is built entirely in Kotlin
+             code into containerHypotheses below, same as
+             containerCandidateRows's own tappable candidate rows,
+             deliberately no new form-specific XML here, for the same
+             reason given for that container. -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonShowHypotheses"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Hypotheses"
+            app:backgroundTint="@color/ariyan_accent" />
+
         <ProgressBar
             android:id="@+id/progressBarGrandProject"
             android:layout_width="wrap_content"
@@ -101,6 +117,21 @@
              of bug; every row's real content is built in code. -->
         <LinearLayout
             android:id="@+id/containerCandidateRows"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical"
+            android:visibility="gone" />
+
+        <!-- Phase 2 Hypothesis UI (ADDED 2026-09-17): same empty-
+             container-built-in-code pattern as containerCandidateRows
+             directly above, see GrandProjectActivity.kt's own
+             renderHypotheses(). Holds the "state a new hypothesis"
+             text input and submit button, plus a plain row per
+             existing hypothesis. Hidden by default; shown only when
+             the Hypotheses button is tapped. -->
+        <LinearLayout
+            android:id="@+id/containerHypotheses"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
