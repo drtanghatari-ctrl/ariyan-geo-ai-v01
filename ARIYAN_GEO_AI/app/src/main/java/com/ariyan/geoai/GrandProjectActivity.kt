@@ -410,3 +410,10 @@ class GrandProjectActivity : AppCompatActivity() {
     }
 
     private fun setLoading(loading
+private fun setLoading(loading: Boolean) {
+        binding.progressBarGrandProject.visibility = if (loading) View.VISIBLE else View.GONE
+        binding.buttonShowInvestigations.isEnabled = !loading
+        binding.buttonShowCandidates.isEnabled = !loading
+        binding.buttonShowTimeline.isEnabled = !loading
+    }
+}
