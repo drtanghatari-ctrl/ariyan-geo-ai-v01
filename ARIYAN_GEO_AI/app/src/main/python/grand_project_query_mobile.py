@@ -4,24 +4,31 @@ grand_project_query_mobile.py
 Part of ARIYAN GEO AI's GRAND PROJECT FRAMEWORK -- Phase 2 (Confidence
 History + Evidence Graph + explicit Hypothesis objects), added
 2026-09-16. This module is the Kotlin-facing read boundary for Phase
-2's browse screen: three flat lists (Investigations / Candidates /
-Timeline), plus, as of 2026-09-17, one combined per-candidate detail
-call for drill-down (confidence history trajectory + full evidence
-chain + parent-investigation context, per the user's own explicit
-"extra information for orientation" request).
+2's FIRST, flat version of the Grand Project browse screen (user's own
+decision: three separate flat lists -- Investigations / Candidates /
+Timeline -- no drill-down yet, that is a deliberately separate later
+step).
 
 THIS MODULE ADDS NO NEW LOGIC. Exactly like investigation_mobile.py's
 run_investigation_json() and debate_mobile.py's run_debate_json(), it
-is a thin JSON-string wrapper: each function here calls one or more
-existing, already-tested grand_project_db.py read functions and
-json.dumps() the real result, unchanged. This mirrors the SAME real
-convention this project has used at every other Kotlin<->Python
-boundary -- Chaquopy can pass Python lists/dicts across directly, but
-every other call site in this app deliberately returns a JSON string
-instead and lets Kotlin parse it with org.json.JSONObject/JSONArray
-(see MainActivity.kt's own renderResult()) for a consistent, single
-parsing convention across the whole app, rather than mixing raw
-Chaquopy object access in some places and JSON parsing in others.
+is a thin JSON-string wrapper: each function here calls one existing,
+already-tested grand_project_db.py read function and json.dumps() the
+real result, unchanged. This mirrors the SAME real convention this
+project has used at every other Kotlin<->Python boundary -- Chaquopy
+can pass Python lists/dicts across directly, but every other call site
+in this app deliberately returns a JSON string instead and lets Kotlin
+parse it with org.json.JSONObject/JSONArray (see MainActivity.kt's own
+renderResult()) for a consistent, single parsing convention across the
+whole app, rather than mixing raw Chaquopy object access in some places
+and JSON parsing in others.
+
+NOT YET WIRED TO ANY UI. No Kotlin call site exists yet -- this module
+is delivered ahead of GrandProjectActivity.kt (which needs
+AndroidManifest.xml and activity_main.xml content to build correctly,
+not yet supplied) so the Python side can be sandbox-verified
+independently first, matching this project's "prove one piece before
+wiring" discipline used throughout (Wikipedia module before the
+combiner, geocoding before claim extraction, etc.).
 """
 
 from __future__ import annotations
@@ -63,24 +70,68 @@ def list_timeline_json(db_root: str, grand_project_id: str) -> str:
     return json.dumps(rows)
 
 
+def list_hypotheses_json(db_root: str, grand_project_id: str) -> str:
+    """ADDED for Phase 2's Hypothesis UI. Returns every hypothesis row
+    for a project as a JSON array string, oldest first -- the real
+    dicts grand_project_db.list_hypotheses_for_project() already
+    returns, unchanged. Real fields per row: id, grand_project_id,
+    statement, created_at, current_status, current_confidence."""
+    rows = db.list_hypotheses_for_project(db_root, grand_project_id)
+    return json.dumps(rows)
+
+
+def create_hypothesis_json(db_root: str, grand_project_id: str, statement: str) -> str:
+    """ADDED for Phase 2's Hypothesis UI (user's own explicit request
+    this session, including candidate-linking in the same pass).
+    Creates a new, EXPLICIT, user-stated Hypothesis -- `statement` must
+    be the user's own words; ARIYAN never generates this text itself
+    (Phase 0's own design decision, unchanged here, just finally given
+    a real UI path to reach it). Thin wrapper over
+    grand_project_db.create_hypothesis(); returns
+    {"hypothesis_id": "..."} as JSON so the caller can confirm creation
+    succeeded and knows the new id, e.g. to immediately link a
+    candidate to it afterward if it chooses to."""
+    hypothesis_id = db.create_hypothesis(db_root, grand_project_id, statement)
+    return json.dumps({"hypothesis_id": hypothesis_id})
+
+
+def link_candidate_to_hypothesis_json(db_root: str, candidate_id: str, hypothesis_id: str) -> str:
+    """ADDED for Phase 2's Hypothesis UI (linking pass, user's own
+    explicit request this session). Thin wrapper over
+    grand_project_db.link_candidate_to_hypothesis() -- a plain UPDATE,
+    not append-only: re-linking a candidate to a different hypothesis
+    later is a normal, supported operation here, not a correction that
+    needs its own history trail. (The candidate's own confidence
+    trajectory remains separately, independently tracked via
+    confidence_history regardless of which hypothesis it is linked to
+    at any given moment -- linking does not touch that table at all.)
+    Returns {"status": "ok"} as JSON; the caller should re-fetch
+    get_candidate_detail_json() if it wants to see the newly linked
+    hypothesis reflected in that candidate's own detail view."""
+    db.link_candidate_to_hypothesis(db_root, candidate_id, hypothesis_id)
+    return json.dumps({"status": "ok"})
+
+
 def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
     """ADDED for Phase 2 drill-down (user's own explicit request this
     session): returns ONE candidate's full detail as a single combined
     JSON object -- {"candidate": {...}, "investigation": {...} | null,
-    "confidence_history": [...], "evidence": [...]} -- in a single
-    Kotlin<->Python round-trip, rather than requiring the caller to make
-    four separate calls. This is the actual "Evidence Graph (backward
-    traceability)" part of Phase 2's own name: from one candidate, walk
-    back to its parent investigation (for on-screen orientation, per the
-    user's own explicit request -- "extra information for better
-    orientation"), its full confidence trajectory, and its full
-    evidence chain, all at once.
+    "confidence_history": [...], "evidence": [...], "hypothesis":
+    {...} | null} -- in a single Kotlin<->Python round-trip, rather
+    than requiring the caller to make several separate calls. This is
+    the actual "Evidence Graph (backward traceability)" part of Phase
+    2's own name: from one candidate, walk back to its parent
+    investigation (for on-screen orientation, per the user's own
+    explicit request -- "extra information for better orientation"),
+    its full confidence trajectory, its full evidence chain, and
+    (ADDED for the Hypothesis UI pass) whichever hypothesis it is
+    CURRENTLY linked to, if any -- all at once.
 
-    ADDS NO NEW LOGIC -- purely composes four already-tested
+    ADDS NO NEW LOGIC -- purely composes five already-tested
     grand_project_db.py functions (get_candidate, get_investigation,
-    get_confidence_history, get_candidate_evidence), each returning its
-    own real, unmodified rows. The only new thing here is the
-    packaging, not the data.
+    get_confidence_history, get_candidate_evidence, get_hypothesis),
+    each returning its own real, unmodified rows. The only new thing
+    here is the packaging, not the data.
 
     Returns {"error": "candidate not found"} (as a JSON string, not a
     raised exception) if candidate_id doesn't exist -- this is treated
@@ -96,7 +147,15 @@ def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
     with a foreign key to investigation.id), but handled explicitly
     rather than assumed impossible, consistent with this project's own
     "never silently assume a join always succeeds" convention elsewhere
-    (e.g. grand_project_historical_sync.py's own LINKING CAVEAT note)."""
+    (e.g. grand_project_historical_sync.py's own LINKING CAVEAT note).
+
+    "hypothesis" is null in the ORDINARY case where the candidate has
+    never been linked to one at all (candidate.hypothesis_id is
+    nullable and starts NULL for every candidate) -- this is the
+    expected, common state for most candidates, not an error. It is
+    ALSO null (same "never assume a join succeeds" principle as
+    investigation above) in the defensive edge case where
+    hypothesis_id is set but doesn't resolve to a real row."""
     candidate = db.get_candidate(db_root, candidate_id)
     if candidate is None:
         return json.dumps({"error": "candidate not found"})
@@ -105,9 +164,14 @@ def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
     confidence_history = db.get_confidence_history(db_root, candidate_id)
     evidence = db.get_candidate_evidence(db_root, candidate_id)
 
+    hypothesis = None
+    if candidate.get("hypothesis_id"):
+        hypothesis = db.get_hypothesis(db_root, candidate["hypothesis_id"])
+
     return json.dumps({
         "candidate": candidate,
         "investigation": investigation,
         "confidence_history": confidence_history,
         "evidence": evidence,
+        "hypothesis": hypothesis,
     })
