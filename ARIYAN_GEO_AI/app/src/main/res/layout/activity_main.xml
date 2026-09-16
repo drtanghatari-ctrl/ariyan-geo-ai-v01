@@ -31,6 +31,22 @@
             android:text="@string/open_offline_data"
             android:textColor="@color/ariyan_accent" />
 
+        <!-- Phase 2 (ADDED 2026-09-16): nav button to
+             GrandProjectActivity's read-only browse screen. Same style
+             and placement pattern as buttonOfflineData directly above
+             it (its own separate MaterialButton, not sharing a row,
+             LinearLayout stacks it below, same as every other element
+             here). -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonGrandProject"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginBottom="8dp"
+            android:text="Grand Project"
+            android:textColor="@color/ariyan_accent" />
+
         <TextView
             android:id="@+id/textRealDataNotice"
             android:layout_width="match_parent"
