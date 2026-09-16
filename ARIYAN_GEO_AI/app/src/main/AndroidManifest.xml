@@ -69,14 +69,21 @@
             android:exported="true"
             android:windowSoftInputMode="adjustResize" />
 
+        <!-- Phase 2 (ADDED 2026-09-16): read-only browse screen for the
+             Grand Project database (grand_project_db.py), see
+             GrandProjectActivity.kt's own class doc. Same exported and
+             windowSoftInputMode pattern as OfflineDataActivity above,
+             since it is launched the same way (a plain Intent from
+             MainActivity, never from another app). -->
+        <activity
+            android:name=".GrandProjectActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- Foreground service redesign (2026-09-04); see
              OfflineDownloadService.kt's class doc. exported="false"
              because it's only ever started from within this app
              (OfflineDataActivity.kt), never by another app. -->
-<activity
-    android:name=".GrandProjectActivity"
-    android:exported="true"
-    android:windowSoftInputMode="adjustResize" />
         <service
             android:name=".OfflineDownloadService"
             android:exported="false"
