@@ -39,21 +39,17 @@ was queued from):
       min_lat/max_lat/min_lon/max_lon directly; no Python-side lookup
       at all.
   (c) a reviewed geographic_suggestion row (from the Historical
-      Research & Probable-Area Engine, Phase 2.5) -- NOT wired in this
-      module yet (see NOT YET BUILT below); a PAIRED_SUGGESTION row
-      already carries real lat/lon/bounding_box/radius fields
-      (grand_project_db.add_geographic_suggestion()'s own docstring),
-      so building this mechanism is expected to be a thin caller-side
-      step once the UI exists to pick a suggestion, not a new geocoding
-      or geometry capability.
+      Research & Probable-Area Engine, Phase 2.5) -- WIRED 2026-09-17,
+      see create_wide_area_search_job_from_suggestion_json() below. A
+      PAIRED_SUGGESTION row's own real anchor lat/lon + radius (per
+      grand_project_db.add_geographic_suggestion()'s own docstring)
+      is turned into a bbox via the SAME real offset_point() geodesy
+      generate_tile_grid() itself already uses -- no new geocoding or
+      geometry capability was needed, exactly as this docstring
+      originally expected.
 
 NOT YET BUILT (deliberately out of this module's own first-pass scope,
 matching this project's "prove one piece before wiring" discipline):
-  - Mechanism (c) above (geographic_suggestion -> bbox) is not wired
-    here yet -- callers can pass the suggestion's own real bbox/radius
-    fields as a MANUAL_BBOX-equivalent job today; a dedicated
-    convenience wrapper can be added once the picker UI exists to
-    exercise it for real.
   - Kotlin/Service/Activity/XML wiring (WideAreaSearchService.kt,
     WideAreaSearchActivity.kt, activity_wide_area_search.xml,
     MainActivity.kt's own navigation button, AndroidManifest.xml's
@@ -318,6 +314,84 @@ def list_tiles_for_job_json(db_root: str, job_id: str) -> str:
     investigation_id) the wide-area search screen shows."""
     rows = db.list_tiles_for_job(db_root, job_id)
     return json.dumps(rows)
+
+
+# ============== AOI MECHANISM (c): GEOGRAPHIC_SUGGESTION -> JOB (ADDED 2026-09-17) ==============
+
+def create_wide_area_search_job_from_suggestion_json(
+    db_root: str,
+    grand_project_id: str,
+    title: str,
+    center_lat: float,
+    center_lon: float,
+    radius_km: float,
+    tile_size_m: float = DEFAULT_TILE_SIZE_M,
+    hypothesis_id: Optional[str] = None,
+    geographic_suggestion_id: Optional[str] = None,
+    max_tiles: int = DEFAULT_MAX_TILES,
+) -> str:
+    """AOI input mechanism (c): turns ONE reviewed
+    grand_project_db.geographic_suggestion row (a real anchor
+    lat/lon + radius, already produced by
+    historical_claim_extraction_mobile.suggest_probable_areas() and
+    persisted by grand_project_historical_sync.record_historical_research_results())
+    directly into a wide-area search job -- the deferred piece this
+    module's own docstring flagged as "expected to be a thin addition
+    once the UI exists", now that it does.
+
+    Computes a real bounding box centered on (center_lat, center_lon)
+    with radius_km on every side, using the SAME real
+    coordinate.py.offset_point() geodesy generate_tile_grid() itself
+    uses (north/south/east/west offsets from the center point) --
+    no new geometry, no approximation beyond what a "radius" claim
+    already is. The resulting bbox is then handed to
+    generate_tile_grid() exactly as create_wide_area_search_job_json()
+    does for mechanisms (a)/(b) -- same honest max_tiles cap, same
+    "raise rather than silently truncate" behavior for a suggestion
+    whose real radius/tile_size_m combination would produce too many
+    tiles.
+
+    `title` is caller-supplied (Kotlin) rather than derived from the
+    suggestion's own source_item title here, so the caller can let the
+    user review/edit it first -- consistent with mechanisms (a)/(b),
+    where the job title is always a deliberate human-entered value,
+    never auto-generated silently.
+
+    Stores `input_kind="GEOGRAPHIC_SUGGESTION"` and the real
+    `geographic_suggestion_id` on the job row (both already existing
+    grand_project_db.create_wide_area_search_job() parameters, unused
+    by mechanisms (a)/(b) until now) so the job's real provenance --
+    which suggestion it came from -- is preserved, not just its
+    resulting geometry.
+
+    Returns {"job_id": "...", "n_tiles": int} as JSON on success, or
+    {"error": "..."} (never raises) on an invalid radius/tile_size_m
+    combination -- same convention as create_wide_area_search_job_json().
+    """
+    if radius_km <= 0:
+        return json.dumps({"error": f"radius_km must be positive, got {radius_km}."})
+
+    center = GeoPoint(center_lat, center_lon)
+    radius_m = radius_km * 1000.0
+    north = offset_point(center, radius_m, 0.0)
+    south = offset_point(center, -radius_m, 0.0)
+    east = offset_point(center, 0.0, radius_m)
+    west = offset_point(center, 0.0, -radius_m)
+    min_lat, max_lat = south.lat, north.lat
+    min_lon, max_lon = west.lon, east.lon
+
+    try:
+        tiles = generate_tile_grid(min_lat, max_lat, min_lon, max_lon, tile_size_m, max_tiles)
+    except WideAreaSearchError as exc:
+        return json.dumps({"error": str(exc)})
+
+    job_id = db.create_wide_area_search_job(
+        db_root, grand_project_id, title, "GEOGRAPHIC_SUGGESTION",
+        min_lat, max_lat, min_lon, max_lon, tile_size_m, tiles,
+        hypothesis_id=hypothesis_id,
+        geographic_suggestion_id=geographic_suggestion_id,
+    )
+    return json.dumps({"job_id": job_id, "n_tiles": len(tiles)})
 
 
 # =========================== JOB RUNNER (resumable, checkpointed) ===========================
