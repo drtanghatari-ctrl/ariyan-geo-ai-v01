@@ -216,3 +216,4 @@ class WideAreaSearchService : Service() {
             .build()
     }
 }
+
