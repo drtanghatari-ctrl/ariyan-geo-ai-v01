@@ -1,67 +1,73 @@
 """
-historical_source_mobile_archive.py
+historical_source_mobile_wikipedia.py
 
 ARIYAN GEO AI - Phase 2.5 (Historical Research & Probable-Area Engine)
 
-Second of two independent, self-contained keyless historical-evidence
+RECREATED 2026-09-17: this module's real content was missing from the
+repo -- the file at this exact path had been silently overwritten with
+historical_source_mobile_archive.py's own content (confirmed via a
+repo-wide grep and a real Python import test: this file previously
+defined fetch_historical_evidence_archive_safe, not
+fetch_historical_evidence_wikipedia_safe, which is why
+historical_source_mobile_combined.py could not actually run end-to-end
+despite being described elsewhere as complete). This is the same
+"wrong-filename commit" failure mode this project has hit once before
+(grand_project_sync.py/historical sync, Phase 2 session) -- recurring
+silently rather than caught immediately, since nothing had ever
+exercised this import path on a real device (no Kotlin UI called into
+Phase 2.5 yet). Rebuilt here from scratch, live-tested against the real
+Wikipedia API before delivery -- not restored from a backup that may not
+exist, and not guessed from memory of what it "should" contain.
+
+First of three independent, self-contained keyless historical-evidence
 source modules (Option C). Mirrors the existing *_source_mobile.py
 convention: own error class, own hard-deadline HTTP wrapper, returns
 structured real evidence items with genuine provenance.
 
-Data source: Internet Archive's advancedsearch.php (the "General Metadata
-Search" -- item title/creator/description/subject/year), scoped by
-default to mediatype:texts. No API key, no account, no signup required.
+Data source: Wikipedia Search API -- the SAME MediaWiki Action API as
+historical_source_mobile_wikisource.py, just pointed at
+en.wikipedia.org instead of en.wikisource.org. No API key, no account,
+no signup required.
 
-IMPORTANT SCOPE CORRECTION (found by live-testing during development,
-2026-09-15): archive.org's advancedsearch.php only searches item
-METADATA. It does NOT search the actual OCR'd text inside scanned books
--- that is a separate "Full-Text Search" feature backed by an internal,
-undocumented endpoint (fulltext/inside.php) that (a) requires already
-knowing a specific item to search inside, i.e. it is not corpus-wide, and
-(b) was observed failing in a live public bug report. Building a real
-evidence source on that endpoint would mean depending on something
-neither stable nor genuinely corpus-searchable, so this module
-deliberately does NOT attempt full-text-inside search.
-
-Honest scope of what this module actually does: DISCOVERS real, citable
-books/publications/media relevant to a query (e.g. surfaces an actual
-book like "Gold Warriors: America's Secret Recovery of Yamashita's Gold"
-by Seagrave & Seagrave) -- it does not search inside their pages. This
-complements historical_source_mobile_wikisource.py, which DOES return
-real historical-text CONTENT (primary-source chronicles/encyclopedia
-entries), and historical_source_mobile_wikipedia.py, which covers
-grounded/established facts. None of the three fakes coverage the others
-provide -- same "no single source fakes independence" philosophy as the
-app's satellite evidence-independence weighting.
-
-Defaults to mediatype:texts (real books/publications) rather than every
-media type IA hosts, to stay aligned with the "old chronicles /
-out-of-copyright histories" intent that motivated this module. Callers
-that want audio/video/other media discovered too can pass
-media_types=None or a custom list.
+Why this exists alongside the other two: Wikipedia covers grounded,
+established, encyclopedic facts about a topic -- not primary-source
+historical text content (that's Wikisource) and not book DISCOVERY
+without content (that's historical_source_mobile_archive.py, metadata-
+only, see its own module docstring for why). This module deliberately
+duplicates historical_source_mobile_wikisource.py's structure rather
+than sharing code with it, matching this project's existing convention
+of fully independent, self-contained source modules (so a bug in one
+never ripples into another).
 """
 
 import json
 import time
+import re
 import urllib.request
 import urllib.parse
 import urllib.error
 
 
-ARCHIVE_ORG_SEARCH_BASE = "https://archive.org/advancedsearch.php"
+WIKIPEDIA_API_BASE = "https://en.wikipedia.org/w/api.php"
 USER_AGENT = "ARIYAN-GEO-AI/1.0 (historical-evidence-source; contact: repo owner)"
 
 # Hard deadline for the whole HTTP round-trip -- same discipline as the
-# Wikipedia source module. Fail loudly with a real error rather than hang
-# the calling investigation run.
+# other two historical source modules.
 _HTTP_TIMEOUT_SECONDS = 15
 
-_FIELDS = ["identifier", "title", "mediatype", "year", "creator", "description"]
+_TAG_RE = re.compile(r"<[^>]+>")
+_ENTITY_MAP = {
+    "&#039;": "'",
+    "&quot;": '"',
+    "&amp;": "&",
+    "&lt;": "<",
+    "&gt;": ">",
+}
 
 
-class ArchiveOrgSourceError(Exception):
-    """Raised on any real failure to fetch or parse Internet Archive
-    metadata search results.
+class WikipediaSourceError(Exception):
+    """Raised on any real failure to fetch or parse Wikipedia search
+    results.
 
     Never swallow this silently -- let it surface to the calling
     investigation code so the real error reaches the on-screen UI text,
@@ -70,52 +76,42 @@ class ArchiveOrgSourceError(Exception):
     pass
 
 
-def _normalize_text_field(value):
-    """archive.org's advancedsearch.php returns some fields (notably
-    creator and description) as EITHER a single string OR a list of
-    strings, depending on the item -- confirmed by live testing, not
-    assumed. Normalize both shapes to a single clean string so downstream
-    code never has to special-case it.
-    """
-    if value is None:
-        return None
-    if isinstance(value, list):
-        parts = [str(v).strip() for v in value if v is not None and str(v).strip()]
-        return " | ".join(parts) if parts else None
-    text = str(value).strip()
-    return text if text else None
+def _clean_snippet(raw_snippet):
+    """Strip HTML tags and un-escape the common entities Wikipedia emits
+    in its search snippets (identical behavior to the Wikisource module --
+    same underlying MediaWiki search engine)."""
+    if not raw_snippet:
+        return ""
+    text = _TAG_RE.sub("", raw_snippet)
+    for entity, replacement in _ENTITY_MAP.items():
+        text = text.replace(entity, replacement)
+    return text.strip()
 
 
-def _identifier_to_url(identifier):
-    """Build the canonical Internet Archive item page URL from its
-    identifier. This is IA's own stable, documented URL convention.
-    """
-    return "https://archive.org/details/" + urllib.parse.quote(identifier, safe="")
+def _title_to_url(title):
+    """Build the canonical Wikipedia page URL from its title, using the
+    same underscore + percent-encode convention as Wikisource (both run
+    the same MediaWiki software)."""
+    underscored = title.replace(" ", "_")
+    return "https://en.wikipedia.org/wiki/" + urllib.parse.quote(underscored, safe="_():,/")
 
 
-def _fetch_raw(query, max_results, media_types, timeout_seconds):
-    """Hard-deadline HTTP wrapper around the real Internet Archive
-    advancedsearch.php call. Raises ArchiveOrgSourceError on any network,
-    HTTP-status, or JSON-shape failure. Never returns fabricated data.
-    """
+def _fetch_raw(query, max_results, timeout_seconds):
+    """Hard-deadline HTTP wrapper around the real Wikipedia Search API
+    call. Raises WikipediaSourceError on any network, HTTP-status, or
+    JSON-shape failure. Never returns fabricated data."""
     if not query or not query.strip():
-        raise ArchiveOrgSourceError("Empty query passed to Internet Archive historical source.")
-
-    solr_query = query.strip()
-    if media_types:
-        media_clause = " OR ".join("mediatype:%s" % mt for mt in media_types)
-        solr_query = "(%s) AND (%s)" % (solr_query, media_clause)
+        raise WikipediaSourceError("Empty query passed to Wikipedia historical source.")
 
     params = {
-        "q": solr_query,
-        "fl[]": _FIELDS,
-        "rows": str(max(1, min(int(max_results), 50))),
-        "output": "json",
+        "action": "query",
+        "format": "json",
+        "list": "search",
+        "utf8": "1",
+        "srlimit": str(max(1, min(int(max_results), 50))),
+        "srsearch": query.strip(),
     }
-    # doseq=True is required here -- confirmed by live testing during
-    # development that omitting it silently produces malformed fl[]
-    # params and every result field comes back empty.
-    url = ARCHIVE_ORG_SEARCH_BASE + "?" + urllib.parse.urlencode(params, doseq=True)
+    url = WIKIPEDIA_API_BASE + "?" + urllib.parse.urlencode(params)
 
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
 
@@ -123,107 +119,97 @@ def _fetch_raw(query, max_results, media_types, timeout_seconds):
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             status = getattr(response, "status", 200)
             if status != 200:
-                raise ArchiveOrgSourceError(
-                    "Internet Archive returned HTTP %s for query %r" % (status, query)
+                raise WikipediaSourceError(
+                    "Wikipedia API returned HTTP %s for query %r" % (status, query)
                 )
             raw_body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        raise ArchiveOrgSourceError(
-            "Internet Archive HTTP error %s for query %r: %s" % (exc.code, query, exc.reason)
+        raise WikipediaSourceError(
+            "Wikipedia API HTTP error %s for query %r: %s" % (exc.code, query, exc.reason)
         )
     except urllib.error.URLError as exc:
-        raise ArchiveOrgSourceError(
-            "Internet Archive network error for query %r: %s" % (query, exc.reason)
+        raise WikipediaSourceError(
+            "Wikipedia API network error for query %r: %s" % (query, exc.reason)
         )
     except Exception as exc:
         # Includes socket.timeout on the hard deadline above.
-        raise ArchiveOrgSourceError(
-            "Internet Archive request failed for query %r: %s" % (query, exc)
+        raise WikipediaSourceError(
+            "Wikipedia API request failed for query %r: %s" % (query, exc)
         )
 
     try:
         data = json.loads(raw_body)
     except (ValueError, TypeError) as exc:
-        raise ArchiveOrgSourceError(
-            "Internet Archive returned non-JSON body for query %r: %s" % (query, exc)
+        raise WikipediaSourceError(
+            "Wikipedia API returned non-JSON body for query %r: %s" % (query, exc)
         )
 
     return data
 
 
-def fetch_historical_evidence_archive(query, max_results=10, media_types=("texts",),
-                                       timeout_seconds=_HTTP_TIMEOUT_SECONDS):
+def fetch_historical_evidence_wikipedia(query, max_results=10, timeout_seconds=_HTTP_TIMEOUT_SECONDS):
     """Take a free-text scientific/historical question, call the real
-    Internet Archive metadata search, and return a list of structured
-    real DISCOVERY items -- real books/publications relevant to the
-    query, NOT full-text content matches (see module docstring for why).
-
-    media_types defaults to ("texts",) to stay aligned with the "old
-    chronicles / out-of-copyright histories" intent. Pass None to search
-    across every media type IA hosts (movies, audio, etc.), or a custom
-    tuple/list to scope differently.
+    Wikipedia Search API, and return a list of structured real
+    grounded/established-fact evidence items, each with genuine
+    provenance.
 
     Each item:
         {
-            "source": "internet_archive",
-            "identifier": str,           # IA's own stable item identifier
-            "title": str,
-            "url": str,                  # canonical archive.org/details/ URL
-            "mediatype": str or None,
-            "year": int/str or None,     # as IA returns it, not normalized further
-            "creator": str or None,      # normalized from string-or-list
-            "description": str or None,  # normalized from string-or-list
+            "source": "wikipedia",
+            "title": str,               # real page title
+            "url": str,                 # canonical page URL, built from title
+            "snippet": str,              # cleaned excerpt of real article text
+            "pageid": int,               # Wikipedia's own page id
+            "wordcount": int,            # real page length in words
+            "last_edited": str or None,  # ISO 8601 timestamp of last edit, from the API
             "retrieval_date": str,       # ISO 8601 UTC, generated at call time
         }
 
-    Raises ArchiveOrgSourceError on any failure -- never returns
+    Raises WikipediaSourceError on any failure -- never returns
     fabricated or partial-but-unlabeled results.
     """
-    data = _fetch_raw(query, max_results, media_types, timeout_seconds)
+    data = _fetch_raw(query, max_results, timeout_seconds)
 
     try:
-        docs = data["response"]["docs"]
+        search_results = data["query"]["search"]
     except (KeyError, TypeError) as exc:
-        raise ArchiveOrgSourceError(
-            "Unexpected Internet Archive response shape for query %r "
-            "(missing response.docs): %s. Raw keys: %s"
+        raise WikipediaSourceError(
+            "Unexpected Wikipedia API response shape for query %r "
+            "(missing query.search): %s. Raw keys: %s"
             % (query, exc, list(data.keys()) if isinstance(data, dict) else type(data))
         )
 
     retrieval_date = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     items = []
-    for doc in docs:
-        identifier = doc.get("identifier")
-        if not identifier:
+    for result in search_results:
+        title = result.get("title")
+        if not title:
             # Real API returned a malformed entry -- skip it, don't fabricate
-            # an identifier, but don't crash the whole batch over one bad entry.
+            # a title, but don't crash the whole batch over one bad entry.
             continue
         items.append({
-            "source": "internet_archive",
-            "identifier": identifier,
-            "title": doc.get("title") or identifier,
-            "url": _identifier_to_url(identifier),
-            "mediatype": doc.get("mediatype"),
-            "year": doc.get("year"),
-            "creator": _normalize_text_field(doc.get("creator")),
-            "description": _normalize_text_field(doc.get("description")),
+            "source": "wikipedia",
+            "title": title,
+            "url": _title_to_url(title),
+            "snippet": _clean_snippet(result.get("snippet", "")),
+            "pageid": result.get("pageid"),
+            "wordcount": result.get("wordcount"),
+            "last_edited": result.get("timestamp"),
             "retrieval_date": retrieval_date,
         })
 
     return items
 
 
-def fetch_historical_evidence_archive_safe(query, max_results=10, media_types=("texts",),
-                                            timeout_seconds=_HTTP_TIMEOUT_SECONDS):
+def fetch_historical_evidence_wikipedia_safe(query, max_results=10, timeout_seconds=_HTTP_TIMEOUT_SECONDS):
     """Defensive wrapper for call sites that must never crash the visible
     investigation run over a historical-source failure. Returns an empty
     list and lets the caller decide how/whether to surface the error
-    text, instead of raising. See fetch_historical_evidence_archive() for
-    the raising version, and historical_source_mobile_wikipedia.py's
-    equivalent _safe wrapper for the pattern this mirrors.
+    text, instead of raising. Mirrors the equivalent _safe wrappers in
+    the Wikisource and Internet Archive source modules.
     """
     try:
-        return fetch_historical_evidence_archive(query, max_results, media_types, timeout_seconds), None
-    except ArchiveOrgSourceError as exc:
+        return fetch_historical_evidence_wikipedia(query, max_results, timeout_seconds), None
+    except WikipediaSourceError as exc:
         return [], str(exc)
