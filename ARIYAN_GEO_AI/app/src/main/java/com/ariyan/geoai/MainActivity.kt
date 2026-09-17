@@ -257,6 +257,15 @@ class MainActivity : AppCompatActivity() {
         binding.buttonGrandProject.setOnClickListener {
             startActivity(Intent(this, GrandProjectActivity::class.java))
         }
+        // WIDE-AREA SEARCH (ADDED 2026-09-17): per the user's own explicit
+        // architectural instruction, this is a NEW KIND of investigation
+        // (province-wide, tiled, potentially long-running) the user
+        // launches -- deliberately its own separate screen, never folded
+        // into GrandProjectActivity's retrospective browse screen above.
+        // See WideAreaSearchActivity.kt's own class doc for what it shows.
+        binding.buttonWideAreaSearch.setOnClickListener {
+            startActivity(Intent(this, WideAreaSearchActivity::class.java))
+        }
     }
 
     /** Shows/hides the NDVI credential fields and their explanatory notes
