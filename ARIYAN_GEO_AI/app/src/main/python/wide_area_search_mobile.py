@@ -479,3 +479,4 @@ def run_wide_area_search_job(
     _write_wide_area_status(data_root, job_id, progress["total"], progress["total"], "done")
 
     return json.dumps(progress)
+
