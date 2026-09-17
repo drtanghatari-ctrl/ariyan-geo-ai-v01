@@ -267,6 +267,86 @@ _SCHEMA_STATEMENTS = [
     )
     """,
     # ================== END ADDED 2026-09-16, Phase 2.5 Item 3 ==================
+    # ==================== ADDED 2026-09-17, WIDE-AREA SEARCH ====================
+    # wide_area_search_job / wide_area_search_tile are the schema foundation
+    # for the "next up" item on the roadmap agreed at the end of the Phase 2
+    # session: searching a whole province/country for a target, rather than
+    # one point at a time. Per the user's own explicit architectural
+    # instruction, wide-area search is a NEW KIND of investigation the user
+    # launches (province-wide, tiled, potentially long-running) -- it does
+    # NOT live inside the existing browse screen (investigation/candidate/
+    # timeline/hypothesis), which is retrospective ("review what already
+    # happened"). These two tables are therefore intentionally separate from
+    # investigation/candidate, not a reuse of either.
+    #
+    # A wide_area_search_job represents ONE real bounding-box tile search the
+    # user configured (from a geocoded place name, a manually typed bbox, or
+    # a reviewed geographic_suggestion row -- see input_kind below). A
+    # wide_area_search_tile represents ONE real tile center within that job's
+    # bbox; each tile, once processed, becomes an ORDINARY investigation row
+    # (created via the SAME, already-proven-correct
+    # grand_project_sync.record_investigation_results() path Phase 1 used for
+    # single-point runs) -- wide_area_search_tile.investigation_id is simply
+    # a pointer to that real row, not a duplicate of anything it stores.
+    # Once a job's tiles are processed, their resulting candidates show up in
+    # the existing browse screen's Candidates tab like any other
+    # investigation -- wide-area search's own screen is only responsible for
+    # configuring/launching/monitoring the batch job, never for
+    # re-displaying results, so the "separate section" instruction is honored
+    # without duplicating the browse screen's own UI.
+    #
+    # CHECKPOINTING, NOT A SIMPLE LOOP (real design constraint, not
+    # over-engineering): running the full evidence stack (DEM + NDVI +
+    # Thermal + Optical + SAR + Steward) per tile means dozens to hundreds of
+    # real HTTP calls for a realistic province-scale job -- far too long to
+    # run synchronously inside one Activity call, and this project has no
+    # working ADB/logcat path if something silently stalls partway through
+    # (see this project's own standing notes on its network environment).
+    # wide_area_search_tile.status is therefore the actual resumability
+    # mechanism: if the app/process is killed mid-run, re-invoking the job
+    # runner (see wide_area_search_mobile.py) only processes tiles still
+    # 'PENDING' -- tiles already 'DONE' or 'FAILED' are never silently
+    # re-run, and no tile is ever silently skipped either.
+    """
+    CREATE TABLE IF NOT EXISTS wide_area_search_job (
+        id                         TEXT PRIMARY KEY,
+        grand_project_id           TEXT NOT NULL,
+        hypothesis_id              TEXT,
+        title                      TEXT NOT NULL,
+        input_kind                 TEXT NOT NULL,
+        place_name                 TEXT,
+        geographic_suggestion_id   TEXT,
+        min_lat                    REAL NOT NULL,
+        max_lat                    REAL NOT NULL,
+        min_lon                    REAL NOT NULL,
+        max_lon                    REAL NOT NULL,
+        tile_size_m                REAL NOT NULL,
+        n_tiles                    INTEGER NOT NULL,
+        status                     TEXT NOT NULL DEFAULT 'PENDING',
+        created_at                 TEXT NOT NULL,
+        last_updated_at            TEXT NOT NULL,
+        FOREIGN KEY (grand_project_id) REFERENCES grand_project(id),
+        FOREIGN KEY (hypothesis_id) REFERENCES hypothesis(id),
+        FOREIGN KEY (geographic_suggestion_id) REFERENCES geographic_suggestion(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS wide_area_search_tile (
+        id                TEXT PRIMARY KEY,
+        job_id            TEXT NOT NULL,
+        tile_index        INTEGER NOT NULL,
+        center_lat        REAL NOT NULL,
+        center_lon        REAL NOT NULL,
+        status            TEXT NOT NULL DEFAULT 'PENDING',
+        investigation_id  TEXT,
+        error_message     TEXT,
+        started_at        TEXT,
+        completed_at      TEXT,
+        FOREIGN KEY (job_id) REFERENCES wide_area_search_job(id),
+        FOREIGN KEY (investigation_id) REFERENCES investigation(id)
+    )
+    """,
+    # ================== END ADDED 2026-09-17, WIDE-AREA SEARCH ==================
 ]
 
 
@@ -1069,5 +1149,263 @@ def get_geographic_suggestions_for_project(db_root: str, grand_project_id: str) 
             (grand_project_id,),
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# =========================== WIDE-AREA SEARCH JOB (ADDED 2026-09-17) ===========================
+
+def create_wide_area_search_job(
+    db_root: str,
+    grand_project_id: str,
+    title: str,
+    input_kind: str,
+    min_lat: float,
+    max_lat: float,
+    min_lon: float,
+    max_lon: float,
+    tile_size_m: float,
+    tile_centers: List[Dict[str, float]],
+    hypothesis_id: Optional[str] = None,
+    place_name: Optional[str] = None,
+    geographic_suggestion_id: Optional[str] = None,
+) -> str:
+    """Creates ONE wide-area search job row plus its full set of tile rows,
+    in a single transaction -- either all of it commits or none of it does,
+    so a job never ends up with a partial/inconsistent tile set. Returns the
+    new job's id.
+
+    `input_kind` MUST be one of 'PLACE_NAME' / 'MANUAL_BBOX' /
+    'GEOGRAPHIC_SUGGESTION' (not DB-enforced, matching this module's own
+    existing convention of leaving free-text columns unconstrained for
+    forward compatibility -- see add_evidence_link()'s `relation` note and
+    add_geographic_suggestion()'s `kind` note above). `place_name` is only
+    meaningful for 'PLACE_NAME'; `geographic_suggestion_id` only for
+    'GEOGRAPHIC_SUGGESTION'; both are simply NULL otherwise -- no fabricated
+    placeholder values.
+
+    `tile_centers` MUST be the real list of {"tile_index", "center_lat",
+    "center_lon"} dicts wide_area_search_mobile.generate_tile_grid() already
+    produces -- this function does not compute tile geometry itself, only
+    persists what it's given, mirroring how add_geographic_suggestion()
+    persists suggest_probable_areas()'s own output rather than recomputing
+    it.
+    """
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        job_id = _new_id()
+        now = _now_iso()
+        n_tiles = len(tile_centers)
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO wide_area_search_job
+                    (id, grand_project_id, hypothesis_id, title, input_kind,
+                     place_name, geographic_suggestion_id, min_lat, max_lat,
+                     min_lon, max_lon, tile_size_m, n_tiles, status,
+                     created_at, last_updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                """,
+                (
+                    job_id, grand_project_id, hypothesis_id, title, input_kind,
+                    place_name, geographic_suggestion_id, min_lat, max_lat,
+                    min_lon, max_lon, tile_size_m, n_tiles, now, now,
+                ),
+            )
+            for tile in tile_centers:
+                conn.execute(
+                    """
+                    INSERT INTO wide_area_search_tile
+                        (id, job_id, tile_index, center_lat, center_lon, status)
+                    VALUES (?, ?, ?, ?, ?, 'PENDING')
+                    """,
+                    (_new_id(), job_id, tile["tile_index"], tile["center_lat"], tile["center_lon"]),
+                )
+        log_timeline_event(
+            db_root, grand_project_id, "WIDE_AREA_SEARCH_JOB_CREATED",
+            related_entity_type="wide_area_search_job", related_entity_id=job_id,
+            description=f"Wide-area search job '{title}' created with {n_tiles} tiles.",
+        )
+        return job_id
+    finally:
+        conn.close()
+
+
+def get_wide_area_search_job(db_root: str, job_id: str) -> Optional[Dict[str, Any]]:
+    """Returns one wide-area search job row by id, or None if it doesn't
+    exist. Mirrors get_grand_project()'s/get_candidate()'s exact pattern."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        row = conn.execute(
+            "SELECT * FROM wide_area_search_job WHERE id = ?", (job_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def list_wide_area_search_jobs_for_project(db_root: str, grand_project_id: str) -> List[Dict[str, Any]]:
+    """Returns every wide-area search job row for a project, newest first
+    (unlike this module's other list_*_for_project() functions, which are
+    oldest-first for a historical-record read -- newest-first here because
+    a wide-area search job is an ongoing/recent task the user is actively
+    monitoring, not a historical record being reviewed)."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        rows = conn.execute(
+            "SELECT * FROM wide_area_search_job WHERE grand_project_id = ? ORDER BY created_at DESC",
+            (grand_project_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_wide_area_search_job_status(
+    db_root: str, grand_project_id: str, job_id: str, new_status: str
+) -> None:
+    """Updates a job's lifecycle status (PENDING/RUNNING/PAUSED/COMPLETE/
+    COMPLETE_WITH_ERRORS/FAILED). Mirrors update_grand_project_status()'s
+    own pattern -- every transition is logged to timeline_event too."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        now = _now_iso()
+        with conn:
+            conn.execute(
+                "UPDATE wide_area_search_job SET status = ?, last_updated_at = ? WHERE id = ?",
+                (new_status, now, job_id),
+            )
+        log_timeline_event(
+            db_root, grand_project_id, "WIDE_AREA_SEARCH_JOB_STATUS_CHANGED",
+            related_entity_type="wide_area_search_job", related_entity_id=job_id,
+            description=f"Wide-area search job status changed to {new_status}.",
+        )
+    finally:
+        conn.close()
+
+
+# =========================== WIDE-AREA SEARCH TILE (ADDED 2026-09-17) ===========================
+
+def list_tiles_for_job(db_root: str, job_id: str) -> List[Dict[str, Any]]:
+    """Returns EVERY tile row for a job (any status), ordered by
+    tile_index -- the raw material for a progress display (X/Y done) and
+    for the per-tile status list the wide-area search screen shows."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        rows = conn.execute(
+            "SELECT * FROM wide_area_search_tile WHERE job_id = ? ORDER BY tile_index ASC",
+            (job_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def list_pending_tiles_for_job(db_root: str, job_id: str) -> List[Dict[str, Any]]:
+    """Returns only tiles still awaiting processing, ordered by tile_index.
+    THIS is the actual resumability mechanism (see the WIDE-AREA SEARCH
+    schema comment above) -- the job runner (wide_area_search_mobile.py)
+    calls this, never list_tiles_for_job(), to decide what to work on next,
+    so a re-invoked run never repeats a tile already DONE or FAILED."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        rows = conn.execute(
+            "SELECT * FROM wide_area_search_tile WHERE job_id = ? AND status = 'PENDING' ORDER BY tile_index ASC",
+            (job_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def mark_tile_started(db_root: str, tile_id: str) -> None:
+    """Records that processing has begun for one tile. Does NOT change
+    status (stays 'PENDING' until it actually finishes) -- started_at is
+    purely informational (e.g. to detect a tile that started but never
+    finished, if a future diagnostic wants that), not part of the
+    resumability logic itself, which relies solely on the status column."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        now = _now_iso()
+        with conn:
+            conn.execute(
+                "UPDATE wide_area_search_tile SET started_at = ? WHERE id = ?",
+                (now, tile_id),
+            )
+    finally:
+        conn.close()
+
+
+def mark_tile_done(db_root: str, tile_id: str, investigation_id: str) -> None:
+    """Marks one tile DONE and records the real investigation_id its
+    evidence run was persisted under (via the SAME
+    grand_project_sync.record_investigation_results() path used for
+    single-point runs) -- this is the pointer a future UI follows to show
+    that tile's actual results, not a duplicate of anything investigation/
+    candidate already store."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        now = _now_iso()
+        with conn:
+            conn.execute(
+                "UPDATE wide_area_search_tile SET status = 'DONE', investigation_id = ?, completed_at = ? WHERE id = ?",
+                (investigation_id, now, tile_id),
+            )
+    finally:
+        conn.close()
+
+
+def mark_tile_failed(db_root: str, tile_id: str, error_message: str) -> None:
+    """Marks one tile FAILED with the real, honest reason it failed
+    (e.g. a genuinely failed DEM fetch at that location, exactly like
+    investigation_multi_mobile.py's own OpenTopographyFetchError) --
+    never silently retried by the resumability logic (only 'PENDING'
+    tiles are re-attempted, see list_pending_tiles_for_job() above); a
+    failed tile stays FAILED until a human explicitly asks for it to be
+    retried, following this module's existing 'dead ends are retained
+    evidence, not discarded data' rule for candidate/geographic_suggestion
+    status changes above."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        now = _now_iso()
+        with conn:
+            conn.execute(
+                "UPDATE wide_area_search_tile SET status = 'FAILED', error_message = ?, completed_at = ? WHERE id = ?",
+                (error_message, now, tile_id),
+            )
+    finally:
+        conn.close()
+
+
+def get_wide_area_search_job_progress(db_root: str, job_id: str) -> Dict[str, int]:
+    """Returns real tile-status counts for one job: {"total", "pending",
+    "done", "failed"} -- the raw material for both the progress bar/label
+    the wide-area search screen shows while a job runs, and the runner's
+    own decision of whether a job finished COMPLETE vs
+    COMPLETE_WITH_ERRORS (see wide_area_search_mobile.py)."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        rows = conn.execute(
+            "SELECT status, COUNT(*) as n FROM wide_area_search_tile WHERE job_id = ? GROUP BY status",
+            (job_id,),
+        ).fetchall()
+        counts = {"total": 0, "pending": 0, "done": 0, "failed": 0}
+        for r in rows:
+            n = r["n"]
+            counts["total"] += n
+            status_key = str(r["status"]).lower()
+            if status_key in counts:
+                counts[status_key] = n
+        return counts
     finally:
         conn.close()
