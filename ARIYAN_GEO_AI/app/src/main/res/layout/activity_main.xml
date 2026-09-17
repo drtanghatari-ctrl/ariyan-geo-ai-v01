@@ -64,6 +64,19 @@
             android:text="Wide-Area Search"
             android:textColor="@color/ariyan_accent" />
 
+        <!-- ADDED 2026-09-17: nav button to HistoricalResearchActivity,
+             another own separate section, same reasoning as
+             buttonWideAreaSearch directly above it. -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonHistoricalResearch"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginBottom="8dp"
+            android:text="Historical Research"
+            android:textColor="@color/ariyan_accent" />
+
         <TextView
             android:id="@+id/textRealDataNotice"
             android:layout_width="match_parent"
