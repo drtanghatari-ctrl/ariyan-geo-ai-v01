@@ -47,6 +47,23 @@
             android:text="Grand Project"
             android:textColor="@color/ariyan_accent" />
 
+        <!-- ADDED 2026-09-17: nav button to WideAreaSearchActivity, a
+             NEW KIND of investigation the user launches (province-
+             wide, tiled), per the user's own explicit architectural
+             instruction that this stays a SEPARATE section, never
+             folded into buttonGrandProject's own retrospective browse
+             screen above. Same style and placement pattern as
+             buttonGrandProject directly above it. -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonWideAreaSearch"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginBottom="8dp"
+            android:text="Wide-Area Search"
+            android:textColor="@color/ariyan_accent" />
+
         <TextView
             android:id="@+id/textRealDataNotice"
             android:layout_width="match_parent"
