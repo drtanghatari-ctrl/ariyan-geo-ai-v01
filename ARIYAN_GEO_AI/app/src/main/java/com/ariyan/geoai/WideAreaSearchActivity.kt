@@ -225,6 +225,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
         val buttonLookUp = MaterialButton(this).apply {
             text = "Look Up Place"
             setBackgroundColor(ContextCompat.getColor(this@WideAreaSearchActivity, R.color.ariyan_surface))
+            setTextColor(ContextCompat.getColor(this@WideAreaSearchActivity, R.color.ariyan_text_primary))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = (4 * density).toInt() }
@@ -617,4 +618,3 @@ class WideAreaSearchActivity : AppCompatActivity() {
         binding.buttonShowJobs.isEnabled = !loading
     }
 }
-
