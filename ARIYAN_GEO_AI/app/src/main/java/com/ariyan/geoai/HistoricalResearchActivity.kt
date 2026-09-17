@@ -461,3 +461,4 @@ class HistoricalResearchActivity : AppCompatActivity() {
         binding.buttonShowSaved.isEnabled = !loading
     }
 }
+
