@@ -116,6 +116,15 @@
             android:name=".WideAreaSearchService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- HISTORICAL RESEARCH (ADDED 2026-09-17): another own
+             separate section, same reasoning and same registration
+             pattern as WideAreaSearchActivity above. See
+             HistoricalResearchActivity.kt's own class doc. -->
+        <activity
+            android:name=".HistoricalResearchActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize" />
     </application>
 
 </manifest>
