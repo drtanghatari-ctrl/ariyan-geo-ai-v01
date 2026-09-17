@@ -88,6 +88,34 @@
             android:name=".OfflineDownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- WIDE-AREA SEARCH (ADDED 2026-09-17): its own separate
+             section per the user's own explicit architectural
+             instruction, never folded into GrandProjectActivity's own
+             retrospective browse screen. See
+             WideAreaSearchActivity.kt's own class doc. Same exported
+             and windowSoftInputMode pattern as GrandProjectActivity
+             above, since it is launched the same way (a plain Intent
+             from MainActivity, never from another app). -->
+        <activity
+            android:name=".WideAreaSearchActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- Runs wide_area_search_mobile.run_wide_area_search_job() as a
+             real, checkpointed foreground service, same real reason
+             and same real shape as OfflineDownloadService above (see
+             WideAreaSearchService.kt's own class doc): a real job can
+             mean dozens to hundreds of real HTTP calls across many
+             tiles, easily a multi-hour run, and Doze/App Standby would
+             otherwise cut its network access once the screen locks.
+             exported="false" for the same reason as OfflineDownloadService
+             - only ever started from within this app
+             (WideAreaSearchActivity.kt), never by another app. -->
+        <service
+            android:name=".WideAreaSearchService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>
