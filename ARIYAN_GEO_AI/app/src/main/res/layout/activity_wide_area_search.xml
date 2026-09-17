@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    activity_wide_area_search.xml
+
+    Per the user's own explicit architectural instruction (given before
+    any of this was built): wide-area search is a NEW KIND of
+    investigation the user launches (province-wide, tiled, potentially
+    long-running) - deliberately its own separate section, never
+    folded into activity_grand_project.xml's retrospective browse
+    screen.
+
+    Mirrors activity_grand_project.xml's own established conventions
+    exactly: ScrollView + vertical LinearLayout, the same real existing
+    colors (ariyan_bg/ariyan_text_primary/ariyan_text_secondary/
+    ariyan_accent), the same two-button tab-switch pattern (here: New
+    Search / Jobs), and the SAME "keep XML minimal, build the actual
+    content in Kotlin code into empty containers" discipline that
+    screen's own class doc explains was adopted specifically to avoid
+    repeating the double-hyphen-in-XML-comment class of bug hit twice
+    on that screen's first version. Only static, always-present
+    elements (title, description, the two tab buttons, a shared
+    progress bar) are defined here; everything else - the New Search
+    form's fields, the Jobs list's rows, any job detail dialog - is
+    built entirely in WideAreaSearchActivity.kt.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/ariyan_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Wide-Area Search"
+            android:textColor="@color/ariyan_text_primary"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:paddingBottom="4dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Search a whole province or region for a target, one tile at a time. Set up a job below, then start it from the Jobs tab -- it runs as a background service, so it keeps going if you leave this screen."
+            android:textColor="@color/ariyan_text_secondary"
+            android:textSize="12sp"
+            android:paddingBottom="16dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonShowNewSearch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="New Search"
+            app:backgroundTint="@color/ariyan_accent" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonShowJobs"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Jobs"
+            app:backgroundTint="@color/ariyan_accent" />
+
+        <ProgressBar
+            android:id="@+id/progressBarWideAreaSearch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginTop="16dp"
+            android:visibility="gone" />
+
+        <!-- New Search form (title, place-name lookup, manual bbox
+             fields, tile size, create button) is built entirely in
+             code by renderNewSearchForm() - see
+             WideAreaSearchActivity.kt's own class doc for why, same
+             reasoning as activity_grand_project.xml's own
+             containerHypotheses. -->
+        <LinearLayout
+            android:id="@+id/containerNewSearch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical"
+            android:visibility="gone" />
+
+        <!-- Job list rows are built entirely in code by
+             renderJobRows() - tapping a row opens a detail dialog
+             (also built in code) with live progress and a
+             Start/Resume button. Same empty-container pattern as
+             containerNewSearch above. -->
+        <LinearLayout
+            android:id="@+id/containerJobs"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical"
+            android:visibility="gone" />
+
+    </LinearLayout>
+</ScrollView>
