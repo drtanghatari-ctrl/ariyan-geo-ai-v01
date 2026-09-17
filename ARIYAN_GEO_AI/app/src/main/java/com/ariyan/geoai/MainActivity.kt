@@ -266,6 +266,12 @@ class MainActivity : AppCompatActivity() {
         binding.buttonWideAreaSearch.setOnClickListener {
             startActivity(Intent(this, WideAreaSearchActivity::class.java))
         }
+        // HISTORICAL RESEARCH (ADDED 2026-09-17): another own separate
+        // section, same reasoning as Wide-Area Search's own button
+        // above -- see HistoricalResearchActivity.kt's own class doc.
+        binding.buttonHistoricalResearch.setOnClickListener {
+            startActivity(Intent(this, HistoricalResearchActivity::class.java))
+        }
     }
 
     /** Shows/hides the NDVI credential fields and their explanatory notes
