@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    activity_historical_research.xml
+
+    New screen for Phase 2.5's Historical Research & Probable-Area
+    Engine, ADDED 2026-09-17 - until now none of that real Python had
+    any Kotlin call path at all (see historical_research_mobile.py's
+    own module doc for why that mattered). Own separate section on the
+    main screen, same reasoning as Wide-Area Search's own screen: this
+    is a distinct kind of activity the user launches (ask a historical
+    question, review real suggestions), not part of the Grand Project
+    browse screen's retrospective review.
+
+    Same minimal-static-XML discipline as every screen built this
+    session: only always-present elements (title, description, the two
+    tab buttons, a shared progress bar) are defined here; everything
+    else (the search form, result rows, saved-suggestion rows) is built
+    entirely in HistoricalResearchActivity.kt into the two empty
+    containers below - avoids repeating the double-hyphen-in-comment
+    class of bug this project has hit multiple times, and matches
+    activity_grand_project.xml/activity_wide_area_search.xml's own
+    established pattern exactly.
+-->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/ariyan_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Historical Research"
+            android:textColor="@color/ariyan_text_primary"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:paddingBottom="4dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Ask a free-text historical question. Real search across Wikipedia, Internet Archive, and Wikisource looks for a place plus a distance mentioned together in the same real source -- every result here is a suggestion for you to review, never a committed search area."
+            android:textColor="@color/ariyan_text_secondary"
+            android:textSize="12sp"
+            android:paddingBottom="16dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonShowSearch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Search"
+            app:backgroundTint="@color/ariyan_accent" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonShowSaved"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Saved Suggestions"
+            app:backgroundTint="@color/ariyan_accent" />
+
+        <ProgressBar
+            android:id="@+id/progressBarHistoricalResearch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginTop="16dp"
+            android:visibility="gone" />
+
+        <!-- Search form (question field, Search button) plus the
+             current unsaved result preview + Save button are all
+             built entirely in code by renderSearchForm() /
+             renderSearchResults(). -->
+        <LinearLayout
+            android:id="@+id/containerSearch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical"
+            android:visibility="gone" />
+
+        <!-- Every saved geographic_suggestion row for this project,
+             built entirely in code by renderSavedSuggestions() - a
+             PAIRED_SUGGESTION row gets a "Start Wide-Area Search"
+             button (AOI mechanism (c)); DISTANCE_ONLY/UNGROUNDED_PLACE
+             rows are shown read-only, since they carry no real
+             coordinates to act on. -->
+        <LinearLayout
+            android:id="@+id/containerSaved"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:orientation="vertical"
+            android:visibility="gone" />
+
+    </LinearLayout>
+</ScrollView>
