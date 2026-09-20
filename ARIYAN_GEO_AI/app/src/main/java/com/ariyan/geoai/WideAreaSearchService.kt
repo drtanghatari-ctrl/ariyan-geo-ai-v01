@@ -93,11 +93,15 @@ class WideAreaSearchService : Service() {
 
         // 0.0 (the default) means "derive the analysis radius from this job's own
         // tile size" -- wide_area_search_mobile.run_wide_area_search_job() treats
-        // any radius <= 0 that way (radius = tile_size_m / 2, floored at 500 m).
+        // any radius <= 0 that way (see derive_analysis_window()).
         // Nothing in the UI passes EXTRA_RADIUS_M today; a positive value
         // would override it.
         val radiusM = intent.getDoubleExtra(EXTRA_RADIUS_M, 0.0)
-        val gridSize = intent.getIntExtra(EXTRA_GRID_SIZE, 96)
+        // 0 (the default) means "derive the DEM grid from this job's own tile size" --
+        // wide_area_search_mobile.derive_analysis_window() sizes radius and grid together
+        // so the detector's usable interior covers each whole tile. Nothing in the UI
+        // passes EXTRA_GRID_SIZE today; a positive value would override it.
+        val gridSize = intent.getIntExtra(EXTRA_GRID_SIZE, 0)
         val apiKey = intent.getStringExtra(EXTRA_API_KEY) ?: ""
         val demType = intent.getStringExtra(EXTRA_DEMTYPE) ?: "SRTMGL1"
         val ndviClientId = intent.getStringExtra(EXTRA_NDVI_CLIENT_ID) ?: ""
