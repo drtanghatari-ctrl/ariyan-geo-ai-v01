@@ -78,7 +78,10 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import os
+import re
+import threading
 import time
+from typing import Optional
 
 import numpy as np
 
@@ -93,6 +96,59 @@ class OpenTopographyFetchError(RuntimeError):
     DEM. Always carries a human-readable message suitable for showing
     directly in the Android UI -- MainActivity.kt displays this
     message as-is rather than a generic "something went wrong"."""
+
+
+class OpenTopographyRateLimitError(OpenTopographyFetchError):
+    """OpenTopography's daily/rate quota is used up. Observed on real
+    hardware: OpenTopography reports the free-key daily cap (currently
+    "50 API calls/24hrs") with HTTP status 401, NOT 429, and a body of
+    "Error: API maximum rate limit reached...". Classifying it here, from
+    the BODY, fixes a real misdiagnosis: the app used to tell the user
+    the key was mistyped when it was merely out of quota."""
+
+
+class OpenTopographyAuthError(OpenTopographyFetchError):
+    """OpenTopography did not accept the API key (a 401 that is NOT the
+    quota message)."""
+
+
+# ---- LIVE-DEM QUOTA BREAKER (armed only by a wide-area job) --------------
+# Every investigation tries the live OpenTopography fetch FIRST and falls
+# back to the offline library if it fails -- that policy is unchanged and
+# stays the default everywhere. A wide-area job, though, can run hundreds
+# of tiles, each making several live DEM requests (primary, stability
+# re-fetches, cross-check), so once the daily quota is spent every further
+# live attempt is a guaranteed failure that only wastes time. While ARMED
+# (thread-locally, by wide_area_search_mobile.run_wide_area_search_job(),
+# and disarmed in a `finally`), a quota/key rejection suspends live
+# attempts for LIVE_DEM_RETRY_INTERVAL_S; suspended fetches fail at once,
+# WITHOUT touching the network, with an OpenTopographyFetchError -- which
+# every existing caller already turns into the offline fallback (or, for
+# the cross-check, into its honest "unavailable" record). After the
+# interval one live attempt is made again; success clears the suspension.
+# A thread that has not armed it is completely unaffected.
+LIVE_DEM_RETRY_INTERVAL_S = 1800.0
+_now = time.monotonic  # test hook
+_tl = threading.local()
+
+
+def arm_live_dem_quota_breaker() -> None:
+    _tl.breaker = {"suspended_until": 0.0, "reason": "", "trips": 0,
+                   "skipped": 0, "live_ok": 0}
+
+
+def disarm_live_dem_quota_breaker() -> Optional[dict]:
+    """Returns the final counters (or None if not armed) and disarms."""
+    breaker = getattr(_tl, "breaker", None)
+    _tl.breaker = None
+    if breaker is None:
+        return None
+    return {"live_fetches_ok": breaker["live_ok"], "suspensions": breaker["trips"],
+            "live_attempts_skipped": breaker["skipped"]}
+
+
+def _strip_tags(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", text or "")).strip()
 
 
 RESOLUTION_BY_DEMTYPE_M = {
@@ -209,6 +265,30 @@ class OpenTopographyAAIGridSource:
             executor.shutdown(wait=False)
 
     def fetch(self, aoi: AreaOfInterest) -> DEM:
+        breaker = getattr(_tl, "breaker", None)
+        if breaker is not None and breaker["suspended_until"] > _now():
+            breaker["skipped"] += 1
+            minutes = max(1, int(round((breaker["suspended_until"] - _now()) / 60.0)))
+            raise OpenTopographyFetchError(
+                "Live OpenTopography fetch skipped because it already failed "
+                f"earlier in this run: {breaker['reason']} Live fetching is "
+                f"retried automatically in about {minutes} min; offline data "
+                "is used in the meantime."
+            )
+        try:
+            dem = self._fetch_live(aoi)
+        except (OpenTopographyRateLimitError, OpenTopographyAuthError) as exc:
+            if breaker is not None:
+                breaker["suspended_until"] = _now() + LIVE_DEM_RETRY_INTERVAL_S
+                breaker["reason"] = str(exc)
+                breaker["trips"] += 1
+            raise
+        if breaker is not None:
+            breaker["suspended_until"] = 0.0
+            breaker["live_ok"] += 1
+        return dem
+
+    def _fetch_live(self, aoi: AreaOfInterest) -> DEM:
         params = {
             "demtype": self.demtype,
             "south": aoi.min_lat,
@@ -220,15 +300,23 @@ class OpenTopographyAAIGridSource:
         }
         resp = self._get_with_hard_deadline(params)
 
-        if resp.status_code == 401:
-            raise OpenTopographyFetchError(
+        if resp.status_code in (401, 429):
+            body_text = _strip_tags(resp.text)
+            lowered = body_text.lower()
+            if resp.status_code == 429:
+                raise OpenTopographyRateLimitError(
+                    "OpenTopography rate limit exceeded (429). Free API keys "
+                    "are limited to a fixed number of requests per 24 hours."
+                )
+            if "rate limit" in lowered or "api calls" in lowered:
+                raise OpenTopographyRateLimitError(
+                    "OpenTopography daily API limit reached -- the server "
+                    f"reported: '{body_text[:200]}'. The key itself is fine; "
+                    "live DEM fetching is unavailable until the limit resets."
+                )
+            raise OpenTopographyAuthError(
                 "OpenTopography rejected the API key (401 Unauthorized). "
                 "Check that it was typed correctly."
-            )
-        if resp.status_code == 429:
-            raise OpenTopographyFetchError(
-                "OpenTopography rate limit exceeded (429). Free API keys "
-                "are limited to a fixed number of requests per 24 hours."
             )
         if resp.status_code != 200:
             snippet = (resp.text or "")[:300] or "(empty response body)"
