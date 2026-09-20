@@ -62,6 +62,7 @@ matching this project's "prove one piece before wiring" discipline):
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict, List, Optional
 
 from coordinate import GeoPoint, offset_point
@@ -72,33 +73,56 @@ import investigation_multi_mobile
 import debate_mobile
 import grand_project_sync
 
-DEFAULT_TILE_SIZE_M = 1000.0  # 1km tiles -- matches this project's own
-                              # existing single-point investigation
-                              # radius_m default of 500m (a 1km tile is
-                              # therefore roughly one default-radius
-                              # investigation per tile, not an arbitrary
-                              # new sampling scheme). Since the
-                              # ANALYSIS-RADIUS FIX (see
-                              # run_wide_area_search_job()), the radius a
-                              # tile is analysed at now FOLLOWS the job's
-                              # own tile size (radius = tile_size_m / 2,
-                              # never below MIN_ANALYSIS_RADIUS_M) instead
-                              # of being a fixed 500 m regardless of tile
-                              # size.
+DEFAULT_TILE_SIZE_M = 1000.0  # 1 km tiles: a sensible default survey grain.
+                              # How much ground each tile's DEM analysis
+                              # window must span to actually COVER that
+                              # tile is NOT simply "tile / 2" -- see
+                              # derive_analysis_window() below.
 
-MIN_ANALYSIS_RADIUS_M = 500.0  # Floor on the derived analysis radius. 500 m
-                               # is the radius this project's DEM analysis
-                               # was built and proven on-device at; a
-                               # smaller window (e.g. 100 m from a 200 m
-                               # tile) is untested territory and, over
-                               # 30 m-native SRTM/COP30 data, may simply
-                               # not contain enough context to detect
-                               # anything. Tiles under 1 km therefore keep
-                               # the proven 500 m window (neighbouring
-                               # windows then overlap, so near-duplicate
-                               # candidates are possible -- a known,
-                               # accepted tradeoff, see the docstring of
-                               # run_wide_area_search_job()).
+# ---- ANALYSIS-WINDOW SIZING (COVERAGE FIX) -------------------------------
+# Found on real hardware by measuring candidate positions against tile
+# centres: anomaly_detection.detect_anomalies() ignores a border of
+# `edge_margin_cells` (default 2 x kernel sigma) on EVERY side of its grid,
+# because Gaussian detrending is unreliable near a raster's edge. On the
+# 96-cell grid this project always used, that leaves only the central 48
+# cells -- HALF the window's width, a QUARTER of its area -- in which a
+# candidate can ever be reported. Sizing the window as "radius = tile / 2"
+# therefore examined only the central quarter of every tile; the real
+# fixed 500 m radius examined only a 500 m square per tile no matter how
+# big the tile was. derive_analysis_window() sizes the window so that the
+# detector's usable INTERIOR equals the tile.
+TESTED_CELL_SIZE_M = 2 * 500.0 / 96   # 10.4167 m: the DEM cell size at the
+                                      # radius/grid this project's analysis
+                                      # was built and proven on (500 m, 96
+                                      # cells). Kept constant wherever
+                                      # possible so what the detector
+                                      # "sees" stays what was tested.
+DEM_KERNEL_SIGMA_CELLS = 12.0         # Passed EXPLICITLY to every tile's
+                                      # investigation (never left to a
+                                      # default), so the margin below can
+                                      # never silently drift from what the
+                                      # detector actually uses.
+DETECTOR_EDGE_MARGIN_CELLS = int(round(2 * DEM_KERNEL_SIGMA_CELLS))  # 24 --
+                                      # detect_anomalies()' own default rule
+                                      # (2 x sigma), verified empirically
+                                      # against the real detector.
+MIN_TILE_INTERIOR_M = 500.0           # Tiles smaller than this are analysed
+                                      # as if they were 500 m: the proven
+                                      # 96-cell/500 m configuration. Its
+                                      # interior is 500 m wide, so
+                                      # neighbouring windows overlap and
+                                      # near-duplicate candidates are
+                                      # possible for tiles under 500 m --
+                                      # use tiles of 1 km or more for real
+                                      # surveys.
+MAX_AUTO_GRID_SIZE = 384              # Upper bound on the derived grid. Past
+                                      # a ~3.5 km tile the cell size grows
+                                      # instead of the grid (a 10 km tile
+                                      # gets ~30 m cells, which is
+                                      # SRTM/COP30's own native resolution),
+                                      # trading fine detail for reach. An
+                                      # unmeasured-on-phone compute guard --
+                                      # lower it if large tiles prove slow.
 
 DEFAULT_MAX_TILES = 500  # A real, deliberate cap, not an arbitrary
                           # round number: at ~8-10 real HTTP calls per
@@ -439,11 +463,53 @@ def _write_wide_area_status(
         pass
 
 
+def derive_analysis_window(tile_size_m: float) -> Dict[str, Any]:
+    """Sizes one tile's DEM analysis window so the detector's usable
+    interior EXACTLY covers the tile (see the COVERAGE FIX note above the
+    constants).
+
+    Returns {"radius_m", "grid_size", "cell_size_m", "interior_m"}, where
+    radius_m is the half-width of the fetched window, grid_size its cell
+    count per side, cell_size_m the ground size of one cell, and
+    interior_m the width of the square in which candidates can be
+    reported (== max(tile_size_m, MIN_TILE_INTERIOR_M)).
+
+    Keeps the tested 10.4 m cell size (so detector kernel scales, in
+    metres, match what was proven on-device) until the grid would exceed
+    MAX_AUTO_GRID_SIZE; beyond that the cell grows. Worked values:
+    tile 500 m or less -> radius 500 m, 96 cells (exactly the original
+    configuration); 1 km -> 750 m, 144 cells; 2 km -> 1250 m, 240 cells;
+    10 km -> ~5714 m, 384 cells (~30 m cells).
+
+    Scientific note: the detector z-scores each cell against the whole
+    interior's own relief statistics, so a bigger tile means that
+    reference population covers more, and more varied, terrain. Detail
+    and sensitivity to subtle features on flat sub-areas therefore fall
+    as tile size rises; 1-2 km tiles are the recommended survey grain.
+    """
+    if tile_size_m is None or tile_size_m <= 0:
+        raise WideAreaSearchError(f"tile_size_m must be positive, got {tile_size_m}.")
+
+    margin = DETECTOR_EDGE_MARGIN_CELLS
+    interior_m = max(float(tile_size_m), MIN_TILE_INTERIOR_M)
+    wanted_cells = int(math.ceil(interior_m / TESTED_CELL_SIZE_M - 1e-9))
+    interior_cells = max(1, min(wanted_cells, MAX_AUTO_GRID_SIZE - 2 * margin))
+    grid_size = interior_cells + 2 * margin
+    cell_size_m = interior_m / interior_cells
+    radius_m = grid_size * cell_size_m / 2.0
+    return {
+        "radius_m": radius_m,
+        "grid_size": grid_size,
+        "cell_size_m": cell_size_m,
+        "interior_m": interior_m,
+    }
+
+
 def run_wide_area_search_job(
     data_root: str,
     job_id: str,
     radius_m: float = 0.0,
-    grid_size: int = 96,
+    grid_size: int = 0,
     api_key: str = "",
     demtype: str = "SRTMGL1",
     ndvi_client_id: str = "",
@@ -451,29 +517,30 @@ def run_wide_area_search_job(
 ) -> str:
     """Runs (or RESUMES) one wide-area search job.
 
-    ANALYSIS-RADIUS FIX (a prior session): `radius_m` <= 0 (the default)
-    now means "derive it from this job's own tile size" -- each tile is
-    analysed over a window of radius tile_size_m / 2, so for tiles of
-    1 km or larger the analysis windows exactly tile the search area with
-    no gaps and no overlap. For tiles SMALLER than 1 km the derived
-    radius is floored at MIN_ANALYSIS_RADIUS_M (500 m, the radius this
-    project's DEM analysis was built and proven at) rather than shrinking
-    to an untested tiny window; neighbouring windows then overlap, so
-    near-duplicate candidates a few metres apart can occur -- use tiles
-    of 1 km or more for real surveys.
-    Before this fix the radius was a fixed 500 m no matter what tile size
-    the job was created with (WideAreaSearchService.kt never passed one),
-    which had two real consequences observed on-device: a 2000 m tile
-    was only analysed over its central 1 km square (about 25% of the
-    tile, so ~75% of the search area was never examined), and a 200 m
-    tile was analysed over a 1 km window (about 25x overlap between
-    neighbouring tiles, producing near-duplicate candidates a couple of
-    metres apart plus a great deal of redundant API work). Only the
-    first of those is fixed for small tiles -- see the floor above.
+    ANALYSIS-WINDOW / COVERAGE FIX: `radius_m` <= 0 and `grid_size` <= 0
+    (the defaults) now mean "size this tile's analysis window from the
+    job's own tile size" via derive_analysis_window(), so that the DEM
+    detector's usable interior -- the central half of its window's width,
+    because detect_anomalies() ignores a 2 x sigma border on every side --
+    exactly covers the tile. Before this, every tile was analysed at a
+    fixed 500 m radius / 96 cells regardless of its size (WideAreaSearch
+    Service.kt never passed either), and an intermediate version that set
+    radius = tile / 2 still covered only a quarter of each tile. Measured
+    on real hardware: candidates were never found farther than ~250 m
+    from a tile centre on any 500 m-radius job, and never farther than
+    ~480 m on a 1000 m-radius job. Consequently every wide-area job run
+    before this fix (including the 10 km-tile Tehran, Golestan and
+    Marvdasht jobs) examined only a small square at each tile's centre
+    (~0.25% of a 10 km tile), i.e. behaved as a sparse point sample, not a
+    search of the whole area. Tiles under 500 m keep the original proven
+    500 m / 96-cell window (neighbouring windows then overlap).
 
-    A caller may still pass an explicit positive `radius_m` to override;
-    the radius actually used is recorded in each tile's investigation
-    objective.
+    A caller may still pass an explicit positive `radius_m` and/or
+    `grid_size` to override. An explicit radius with an automatic grid
+    keeps the tested 10.4 m cell size; an explicit grid with an automatic
+    radius uses the derived radius as-is. Any override voids the coverage
+    guarantee. The window actually used is recorded in each tile's
+    investigation objective.
 
     NOTE ON `data_root`: this is the SAME directory grand_project_db.py
     calls `db_root` and investigation_multi_mobile.py/MainActivity.kt
@@ -538,8 +605,24 @@ def run_wide_area_search_job(
 
     grand_project_id = job["grand_project_id"]
 
-    if radius_m is None or radius_m <= 0:
-        radius_m = max(float(job["tile_size_m"]) / 2.0, MIN_ANALYSIS_RADIUS_M)
+    window = derive_analysis_window(job["tile_size_m"])
+    radius_auto = radius_m is None or radius_m <= 0
+    grid_auto = grid_size is None or grid_size <= 0
+    if radius_auto:
+        radius_m = window["radius_m"]
+    if grid_auto:
+        if radius_auto:
+            grid_size = int(window["grid_size"])
+        else:
+            # Explicit radius, automatic grid: keep the tested cell size.
+            grid_size = int(min(
+                MAX_AUTO_GRID_SIZE,
+                max(
+                    2 * DETECTOR_EDGE_MARGIN_CELLS + 8,
+                    math.ceil(2.0 * radius_m / TESTED_CELL_SIZE_M - 1e-9),
+                ),
+            ))
+    cell_size_m = 2.0 * radius_m / grid_size
 
     db.update_wide_area_search_job_status(data_root, grand_project_id, job_id, "RUNNING")
 
@@ -561,6 +644,7 @@ def run_wide_area_search_job(
         try:
             investigation_json = investigation_multi_mobile.run_investigation_multi_json(
                 lat, lon, radius_m, grid_size,
+                dem_kernel_sigma_cells=DEM_KERNEL_SIGMA_CELLS,
                 api_key=api_key,
                 demtype=demtype,
                 ndvi_client_id=ndvi_client_id,
@@ -584,7 +668,8 @@ def run_wide_area_search_job(
                 objective=(
                     f"Wide-area search '{job['title']}' -- "
                     f"tile {tile_index + 1}/{total} "
-                    f"(analysis radius {radius_m:g} m)"
+                    f"(analysis radius {radius_m:.0f} m, "
+                    f"{grid_size}x{grid_size} grid, {cell_size_m:.1f} m cells)"
                 ),
             )
             db.mark_tile_done(data_root, tile_id, result["investigation_id"])
