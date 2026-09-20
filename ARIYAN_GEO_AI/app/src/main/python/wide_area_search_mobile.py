@@ -63,6 +63,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import re
+import threading
 from typing import Any, Dict, List, Optional
 
 from coordinate import GeoPoint, offset_point
@@ -443,26 +446,342 @@ def create_wide_area_search_job_from_suggestion_json(
 
 # =========================== JOB RUNNER (resumable, checkpointed) ===========================
 
+def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
+    """Writes via a temp file + os.replace so the Activity, which polls this
+    file every second, never reads a half-written file (which it would show
+    as a blank/fallback screen). Falls back to a direct write if replace is
+    not possible on this filesystem. May raise; callers are best-effort."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except Exception:
+        with open(path, "w") as f:
+            json.dump(payload, f)
+
+
+def _status_path(data_root: str, job_id: str) -> str:
+    return os.path.join(data_root, f"wide_area_search_status_{job_id}.json")
+
+
 def _write_wide_area_status(
-    data_root: str, job_id: str, done: int, total: int, detail: str = ""
+    data_root: str, job_id: str, done: int, total: int, detail: str = "",
+    phase: str = "running", health: str = "",
 ) -> None:
     """Best-effort progress status write, polled by
     WideAreaSearchActivity.kt while a job runs in
     WideAreaSearchService.kt -- mirrors investigation_multi_mobile.py's
-    own _write_investigation_status() convention exactly (same JSON
-    shape: phase/done/total/detail), one file PER JOB (named by job_id)
-    rather than a single shared file, since a future job could in
-    principle be queued behind a currently-running one and this keeps
-    each job's own progress file unambiguous. Never raises: a failure to
-    write progress must never fail the actual job, exactly like the
-    single-point investigation's own status-write philosophy."""
+    own _write_investigation_status() convention (same JSON shape:
+    phase/done/total/detail), one file PER JOB (named by job_id) rather
+    than a single shared file. `health` is an optional human-readable
+    run-health report (see _render_run_health()) that the Activity shows
+    under the progress lines. Never raises: a failure to write progress
+    must never fail the actual job."""
     try:
-        import os
-        path = os.path.join(data_root, f"wide_area_search_status_{job_id}.json")
-        with open(path, "w") as f:
-            json.dump({"phase": "running", "done": done, "total": total, "detail": detail}, f)
+        payload: Dict[str, Any] = {
+            "phase": phase, "done": done, "total": total, "detail": detail,
+        }
+        if health:
+            payload["health"] = health
+        _atomic_write_json(_status_path(data_root, job_id), payload)
     except Exception:
         pass
+
+
+def _mark_status_phase(data_root: str, job_id: str, phase: str, detail: str) -> None:
+    """Best-effort: updates only phase/detail of an existing status file
+    (keeps done/total/health), e.g. to record that a job stopped with an
+    error instead of leaving a stale "running". Never raises."""
+    try:
+        if not data_root or not os.path.isdir(data_root):
+            return
+        path = _status_path(data_root, job_id)
+        try:
+            with open(path) as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                payload = {}
+        except Exception:
+            payload = {}
+        payload["phase"] = phase
+        payload["detail"] = detail
+        payload.setdefault("done", 0)
+        payload.setdefault("total", 0)
+        _atomic_write_json(path, payload)
+    except Exception:
+        pass
+
+
+# ============================ RUN HEALTH REPORT ============================
+# WHY THIS EXISTS: a job quietly falls back to the offline DEM library when
+# live OpenTopography fails, and quietly records satellite checks as
+# "unavailable" when Copernicus rate-limits. Both are correct, honest
+# behaviours -- but each tile's reason lived only inside that tile's own
+# record (Limitations), so nothing told you, while the job ran, that (for
+# example) every tile was using the offline DEM and why. This section reads
+# the reasons the investigation ALREADY records in each tile's own
+# `limitations`, tallies them across the run, adds the live throttle /
+# quota-breaker state, and renders one short report into the status file
+# for the screen to show. It only READS and REPORTS: it never changes what
+# an investigation does or records.
+#
+# HONEST LIMITS: it parses the wording of investigation_multi_mobile.py's
+# limitation notes, so if that wording is ever reworded the affected line
+# degrades to "no problems recorded" rather than raising (unparseable notes
+# are simply not counted). Tiles that had no candidates have nothing to
+# check and appear in no per-source count. Counts cover THIS RUN only (a
+# resumed job does not re-count tiles finished in an earlier session).
+
+_HEALTH_SOURCES = ("NDVI", "Thermal", "Optical", "SAR")
+_DEM_OFFLINE_PREFIX = "This run used the offline DEM library"
+_DEM_REASON_RE = re.compile(
+    r"the live OpenTopography attempt failed with: (.*?)\. If you expected", re.S)
+_NDVI_ALL_PREFIX = "Live per-candidate NDVI checks were unavailable for every candidate this run"
+_SAT_ALL_RES = {
+    n: re.compile(
+        rf"Real {n} checks were unavailable for every candidate this run: (.*?)\. {n} contributed no",
+        re.S)
+    for n in ("Thermal", "Optical", "SAR")
+}
+_SAT_SOME_RES = {
+    n: re.compile(rf"\d+ of \d+ candidate\(s\) had a real {n} check unavailable")
+    for n in _HEALTH_SOURCES
+}
+
+# Per-thread hand-off from the job impl to the public wrapper (which owns
+# the arm/disarm) so the wrapper can put the final one-line summary in the
+# result JSON without changing the impl's signature or return value.
+_run_state = threading.local()
+
+
+def _short_dem_reason(text: str) -> str:
+    low = (text or "").lower()
+    if "daily api limit" in low:
+        return "OpenTopography daily API limit reached"
+    if "rate limit exceeded (429)" in low:
+        return "OpenTopography rate limit (429)"
+    if "rejected the api key" in low:
+        return "OpenTopography rejected the API key"
+    if "no opentopography api key" in low:
+        return "no OpenTopography API key set"
+    if any(w in low for w in (
+            "timed out", "timeout", "name or service", "getaddrinfo",
+            "network", "connection", "unreachable")):
+        return "network problem reaching OpenTopography"
+    cleaned = " ".join((text or "unknown reason").split())
+    return cleaned[:90]
+
+
+def _short_sat_reason(text: str) -> str:
+    low = (text or "").lower()
+    if "429" in low or "rate limit" in low or "too many requests" in low:
+        return "Copernicus rate limit (429)"
+    if any(w in low for w in ("401", "403", "credential", "unauthor")):
+        return "Copernicus credentials rejected"
+    if "cloud" in low:
+        return "cloud cover / no usable pass"
+    if any(w in low for w in ("timed out", "timeout", "network", "connection")):
+        return "network problem"
+    cleaned = " ".join((text or "unknown reason").split())
+    return cleaned[:70]
+
+
+def parse_tile_health(investigation_json: str) -> Optional[Dict[str, Any]]:
+    """Reads one tile's own recorded `limitations` and returns
+    {"dem_offline": bool, "dem_reason": str|None,
+     "sources": {name: "all"|"some"}, "reasons": {name: str},
+     "ndvi_offline_composite": bool, "ndvi_no_data": bool}
+    or None if the JSON can't be read. Never raises."""
+    try:
+        payload = json.loads(investigation_json)
+        notes = payload.get("limitations") if isinstance(payload, dict) else None
+        if not isinstance(notes, list):
+            return None
+        out: Dict[str, Any] = {
+            "dem_offline": False, "dem_reason": None, "sources": {}, "reasons": {},
+            "ndvi_offline_composite": False, "ndvi_no_data": False,
+        }
+        for note in notes:
+            if not isinstance(note, str):
+                continue
+            if note.startswith(_DEM_OFFLINE_PREFIX):
+                out["dem_offline"] = True
+                m = _DEM_REASON_RE.search(note)
+                out["dem_reason"] = _short_dem_reason(m.group(1) if m else note)
+            if note.startswith(_NDVI_ALL_PREFIX):
+                out["sources"]["NDVI"] = "all"
+                if "no offline NDVI data" in note:
+                    out["ndvi_no_data"] = True
+                else:
+                    out["ndvi_offline_composite"] = True
+            for name, rx in _SAT_ALL_RES.items():
+                m = rx.search(note)
+                if m:
+                    out["sources"][name] = "all"
+                    out["reasons"][name] = _short_sat_reason(m.group(1))
+            for name, rx in _SAT_SOME_RES.items():
+                if rx.search(note) and name not in out["sources"]:
+                    out["sources"][name] = "some"
+        return out
+    except Exception:
+        return None
+
+
+class _RunHealth:
+    """Running tally of what happened across the tiles processed in THIS run."""
+
+    def __init__(self) -> None:
+        self.tiles = 0          # tiles processed this run (finished or failed)
+        self.failed = 0
+        self.checked = 0        # finished tiles whose limitations could be read
+        self.dem_offline = 0
+        self.dem_reasons: Dict[str, int] = {}
+        self.sat_all = {n: 0 for n in _HEALTH_SOURCES}
+        self.sat_some = {n: 0 for n in _HEALTH_SOURCES}
+        self.sat_reason: Dict[str, str] = {}
+        self.ndvi_offline_composite = 0
+        self.ndvi_no_data = 0
+
+    def add(self, tile_health: Optional[Dict[str, Any]]) -> None:
+        """Never raises (it is called right after a tile is marked done)."""
+        try:
+            self.tiles += 1
+            if not tile_health:
+                return
+            self.checked += 1
+            if tile_health.get("dem_offline"):
+                self.dem_offline += 1
+                reason = tile_health.get("dem_reason") or "reason not recorded"
+                self.dem_reasons[reason] = self.dem_reasons.get(reason, 0) + 1
+            for name, kind in (tile_health.get("sources") or {}).items():
+                if name not in self.sat_all:
+                    continue
+                if kind == "all":
+                    self.sat_all[name] += 1
+                else:
+                    self.sat_some[name] += 1
+            for name, reason in (tile_health.get("reasons") or {}).items():
+                self.sat_reason[name] = reason
+            if tile_health.get("ndvi_offline_composite"):
+                self.ndvi_offline_composite += 1
+            if tile_health.get("ndvi_no_data"):
+                self.ndvi_no_data += 1
+        except Exception:
+            pass
+
+    def add_failed(self) -> None:
+        try:
+            self.tiles += 1
+            self.failed += 1
+        except Exception:
+            pass
+
+    def top_dem_reason(self) -> str:
+        if not self.dem_reasons:
+            return ""
+        return max(self.dem_reasons.items(), key=lambda kv: kv[1])[0]
+
+
+def _minutes(seconds: float) -> int:
+    return max(1, int(round(float(seconds) / 60.0)))
+
+
+def _render_run_health(tally: "_RunHealth") -> str:
+    """The multi-line report shown on the job screen. Reads the live
+    throttle / quota-breaker state too (only present on the armed job
+    thread; simply omitted otherwise, e.g. in tests). Never raises."""
+    try:
+        lines = ["RUN HEALTH (tiles processed this run)"]
+        lines.append(f"tiles: {tally.tiles} processed, {tally.failed} failed")
+        lines.append("")
+        lines.append("DEM elevation")
+        if tally.checked == 0:
+            lines.append("  no tile finished yet")
+        else:
+            live = tally.checked - tally.dem_offline
+            lines.append(f"  live: {live} tiles, offline library: {tally.dem_offline} tiles")
+            for reason, count in sorted(tally.dem_reasons.items(), key=lambda kv: -kv[1]):
+                lines.append(f"  why offline: {reason} ({count})")
+        dem = dem_source_mobile.live_dem_quota_status()
+        if dem is not None:
+            if dem["suspended_now"]:
+                lines.append(
+                    f"  live DEM paused, next try in ~{_minutes(dem['retry_in_s'])} min")
+            if dem["live_attempts_skipped"]:
+                lines.append(
+                    f"  live attempts skipped (no network call): {dem['live_attempts_skipped']}")
+
+        lines.append("")
+        lines.append("Satellite checks (tiles with a problem)")
+        for name in _HEALTH_SOURCES:
+            a, some = tally.sat_all[name], tally.sat_some[name]
+            if a == 0 and some == 0:
+                lines.append(f"  {name}: no problems recorded")
+                continue
+            lines.append(f"  {name}: {a} fully unavailable, {some} partly")
+            reason = tally.sat_reason.get(name)
+            if reason:
+                lines.append(f"    last reason: {reason}")
+        if tally.ndvi_offline_composite:
+            lines.append(
+                f"  NDVI failed for every candidate on {tally.ndvi_offline_composite} "
+                "tile(s): offline NDVI was used there, and thermal/optical/SAR were "
+                "recorded but NOT combined into that tile's correlation")
+        if tally.ndvi_no_data:
+            lines.append(
+                f"  NDVI failed for every candidate on {tally.ndvi_no_data} tile(s) "
+                "with no offline NDVI either")
+
+        cop = sh_backoff.status()
+        if cop is not None:
+            lines.append("")
+            lines.append("Copernicus 429 handling")
+            lines.append(
+                f"  calls: {cop['calls']}, retried: {cop['retries']} "
+                f"(waited {cop['retry_wait_s']:.0f} s)")
+            if cop["trips"] or cop["skipped_while_paused"]:
+                lines.append(
+                    f"  pauses: {cop['trips']}, calls skipped while paused: "
+                    f"{cop['skipped_while_paused']}")
+            if cop["paused_now"]:
+                lines.append(
+                    f"  PAUSED now, next probe in ~{_minutes(cop['resume_in_s'])} min")
+
+        lines.append("")
+        lines.append("Tiles with no candidates have nothing to check, so they are not counted above.")
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _summarise_run_health(tally: "_RunHealth") -> Optional[str]:
+    """One line for the finish notice / result JSON. None if no tile ran."""
+    try:
+        if tally.tiles == 0:
+            return None
+        parts: List[str] = []
+        n = tally.checked
+        if n:
+            if tally.dem_offline == 0:
+                parts.append(f"DEM live on all {n} tiles")
+            else:
+                scope = (f"all {n} tiles" if tally.dem_offline == n
+                         else f"{tally.dem_offline} of {n} tiles")
+                why = tally.top_dem_reason()
+                parts.append(f"DEM from offline library on {scope}" + (f" ({why})" if why else ""))
+        missing = [f"{name} {tally.sat_all[name] + tally.sat_some[name]}"
+                   for name in _HEALTH_SOURCES
+                   if tally.sat_all[name] + tally.sat_some[name] > 0]
+        if missing:
+            parts.append("tiles with missing checks: " + ", ".join(missing))
+        if tally.ndvi_offline_composite:
+            parts.append(f"NDVI offline fallback on {tally.ndvi_offline_composite} tiles")
+        if tally.failed:
+            parts.append(f"{tally.failed} tile(s) failed")
+        return "; ".join(parts) if parts else None
+    except Exception:
+        return None
 
 
 def derive_analysis_window(tile_size_m: float) -> Dict[str, Any]:
@@ -507,7 +826,9 @@ def derive_analysis_window(tile_size_m: float) -> Dict[str, Any]:
     }
 
 
-def _attach_throttle_report(result: str, copernicus: Any, live_dem: Any) -> str:
+def _attach_throttle_report(
+    result: str, copernicus: Any, live_dem: Any, health_summary: Optional[str] = None,
+) -> str:
     """Adds what the throttle handling actually did to the job's result
     JSON. Purely additive; if the result is not a JSON object it is
     returned untouched."""
@@ -519,6 +840,8 @@ def _attach_throttle_report(result: str, copernicus: Any, live_dem: Any) -> str:
         return result
     payload["copernicus_throttle"] = copernicus
     payload["opentopography_live_dem"] = live_dem
+    if health_summary:
+        payload["health_summary"] = health_summary
     return json.dumps(payload)
 
 
@@ -547,8 +870,12 @@ def run_wide_area_search_job(
         attempts suspended (and re-tried after LIVE_DEM_RETRY_INTERVAL_S)
         instead of each tile wasting a failed request.
     What each actually did is added to the result JSON under
-    "copernicus_throttle" and "opentopography_live_dem".
+    "copernicus_throttle" and "opentopography_live_dem", plus a one-line
+    "health_summary" of why tiles used the offline DEM / which satellite
+    checks were missing (also shown live on the job screen via the status
+    file's "health" text -- see _render_run_health()).
     """
+    _run_state.summary = None
     sh_backoff.arm()
     dem_source_mobile.arm_live_dem_quota_breaker()
     try:
@@ -556,10 +883,17 @@ def run_wide_area_search_job(
             data_root, job_id, radius_m, grid_size, api_key, demtype,
             ndvi_client_id, ndvi_client_secret,
         )
+    except BaseException as exc:
+        # Leave an honest "stopped" in the status file instead of a stale
+        # "running" (best-effort; never masks the real exception).
+        _mark_status_phase(data_root, job_id, "stopped",
+                           f"{type(exc).__name__}: {exc}"[:300])
+        raise
     finally:
         copernicus = sh_backoff.disarm()
         live_dem = dem_source_mobile.disarm_live_dem_quota_breaker()
-    return _attach_throttle_report(result, copernicus, live_dem)
+    return _attach_throttle_report(
+        result, copernicus, live_dem, getattr(_run_state, "summary", None))
 
 
 def _run_wide_area_search_job_impl(
@@ -690,11 +1024,22 @@ def _run_wide_area_search_job_impl(
 
     _write_wide_area_status(data_root, job_id, already_done, total, "starting")
 
+    tally = _RunHealth()
+
     for i, tile in enumerate(pending_tiles):
         tile_id = tile["id"]
         tile_index = tile["tile_index"]
         lat = tile["center_lat"]
         lon = tile["center_lon"]
+
+        # Written BEFORE the tile so a slow tile (retry waits can add
+        # minutes) is visibly "running", with the live pause state, rather
+        # than looking frozen on the previous tile's numbers.
+        _write_wide_area_status(
+            data_root, job_id, already_done + i, total,
+            f"tile {tile_index + 1}/{total}: running",
+            health=_render_run_health(tally),
+        )
 
         db.mark_tile_started(data_root, tile_id)
 
@@ -730,18 +1075,26 @@ def _run_wide_area_search_job_impl(
                 ),
             )
             db.mark_tile_done(data_root, tile_id, result["investigation_id"])
+            tally.add(parse_tile_health(investigation_json))  # never raises
 
         except Exception as exc:
             db.mark_tile_failed(data_root, tile_id, f"{type(exc).__name__}: {exc}")
+            tally.add_failed()
 
         _write_wide_area_status(
             data_root, job_id, already_done + i + 1, total,
             f"tile {tile_index + 1}/{total}",
+            health=_render_run_health(tally),
         )
 
     progress = db.get_wide_area_search_job_progress(data_root, job_id)
     final_status = "COMPLETE" if progress["failed"] == 0 else "COMPLETE_WITH_ERRORS"
     db.update_wide_area_search_job_status(data_root, grand_project_id, job_id, final_status)
-    _write_wide_area_status(data_root, job_id, progress["total"], progress["total"], "done")
+    _run_state.summary = _summarise_run_health(tally)
+    _write_wide_area_status(
+        data_root, job_id, progress["total"], progress["total"],
+        "done" if progress["failed"] == 0 else f"done, {progress['failed']} tile(s) failed",
+        phase="complete", health=_render_run_health(tally),
+    )
 
     return json.dumps(progress)
