@@ -77,7 +77,28 @@ DEFAULT_TILE_SIZE_M = 1000.0  # 1km tiles -- matches this project's own
                               # radius_m default of 500m (a 1km tile is
                               # therefore roughly one default-radius
                               # investigation per tile, not an arbitrary
-                              # new sampling scheme).
+                              # new sampling scheme). Since the
+                              # ANALYSIS-RADIUS FIX (see
+                              # run_wide_area_search_job()), the radius a
+                              # tile is analysed at now FOLLOWS the job's
+                              # own tile size (radius = tile_size_m / 2,
+                              # never below MIN_ANALYSIS_RADIUS_M) instead
+                              # of being a fixed 500 m regardless of tile
+                              # size.
+
+MIN_ANALYSIS_RADIUS_M = 500.0  # Floor on the derived analysis radius. 500 m
+                               # is the radius this project's DEM analysis
+                               # was built and proven on-device at; a
+                               # smaller window (e.g. 100 m from a 200 m
+                               # tile) is untested territory and, over
+                               # 30 m-native SRTM/COP30 data, may simply
+                               # not contain enough context to detect
+                               # anything. Tiles under 1 km therefore keep
+                               # the proven 500 m window (neighbouring
+                               # windows then overlap, so near-duplicate
+                               # candidates are possible -- a known,
+                               # accepted tradeoff, see the docstring of
+                               # run_wide_area_search_job()).
 
 DEFAULT_MAX_TILES = 500  # A real, deliberate cap, not an arbitrary
                           # round number: at ~8-10 real HTTP calls per
@@ -421,7 +442,7 @@ def _write_wide_area_status(
 def run_wide_area_search_job(
     data_root: str,
     job_id: str,
-    radius_m: float = 500.0,
+    radius_m: float = 0.0,
     grid_size: int = 96,
     api_key: str = "",
     demtype: str = "SRTMGL1",
@@ -429,6 +450,30 @@ def run_wide_area_search_job(
     ndvi_client_secret: str = "",
 ) -> str:
     """Runs (or RESUMES) one wide-area search job.
+
+    ANALYSIS-RADIUS FIX (a prior session): `radius_m` <= 0 (the default)
+    now means "derive it from this job's own tile size" -- each tile is
+    analysed over a window of radius tile_size_m / 2, so for tiles of
+    1 km or larger the analysis windows exactly tile the search area with
+    no gaps and no overlap. For tiles SMALLER than 1 km the derived
+    radius is floored at MIN_ANALYSIS_RADIUS_M (500 m, the radius this
+    project's DEM analysis was built and proven at) rather than shrinking
+    to an untested tiny window; neighbouring windows then overlap, so
+    near-duplicate candidates a few metres apart can occur -- use tiles
+    of 1 km or more for real surveys.
+    Before this fix the radius was a fixed 500 m no matter what tile size
+    the job was created with (WideAreaSearchService.kt never passed one),
+    which had two real consequences observed on-device: a 2000 m tile
+    was only analysed over its central 1 km square (about 25% of the
+    tile, so ~75% of the search area was never examined), and a 200 m
+    tile was analysed over a 1 km window (about 25x overlap between
+    neighbouring tiles, producing near-duplicate candidates a couple of
+    metres apart plus a great deal of redundant API work). Only the
+    first of those is fixed for small tiles -- see the floor above.
+
+    A caller may still pass an explicit positive `radius_m` to override;
+    the radius actually used is recorded in each tile's investigation
+    objective.
 
     NOTE ON `data_root`: this is the SAME directory grand_project_db.py
     calls `db_root` and investigation_multi_mobile.py/MainActivity.kt
@@ -492,6 +537,10 @@ def run_wide_area_search_job(
         raise WideAreaSearchError(f"No wide-area search job with id {job_id!r} was found.")
 
     grand_project_id = job["grand_project_id"]
+
+    if radius_m is None or radius_m <= 0:
+        radius_m = max(float(job["tile_size_m"]) / 2.0, MIN_ANALYSIS_RADIUS_M)
+
     db.update_wide_area_search_job_status(data_root, grand_project_id, job_id, "RUNNING")
 
     all_tiles = db.list_tiles_for_job(data_root, job_id)
@@ -534,7 +583,8 @@ def run_wide_area_search_job(
                 hypothesis_id=job.get("hypothesis_id"),
                 objective=(
                     f"Wide-area search '{job['title']}' -- "
-                    f"tile {tile_index + 1}/{total}"
+                    f"tile {tile_index + 1}/{total} "
+                    f"(analysis radius {radius_m:g} m)"
                 ),
             )
             db.mark_tile_done(data_root, tile_id, result["investigation_id"])
