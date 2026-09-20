@@ -196,6 +196,30 @@ def get_access_token(client_id: str, client_secret: str, timeout: int = 8) -> st
     return token
 
 
+def _resolution_degrees(bbox: list, metres: float) -> tuple:
+    """Converts a ground resolution in METRES into the (resx, resy) pair,
+    in DEGREES, that the Sentinel Hub Statistical API expects for a
+    request whose bounds are in CRS84 (lon/lat).
+
+    WHY THIS EXISTS (fixed a prior session): the Statistical API reads
+    resx/resy in the units of the request's own CRS. Every request in
+    this module uses CRS84, whose units are degrees -- so passing a bare
+    10 or 30 asked for pixels 10 or 30 DEGREES wide, collapsing every
+    core and halo bbox to a single pixel per time interval (real on-device
+    symptom: core_sample_count == halo_sample_count == 3 in every stored
+    row, and a halo standard deviation of exactly 0.0 every time). This
+    helper restores the intended metre-scale pixel size using the same
+    equirectangular approximation (111,320 m per degree of latitude,
+    scaled by cos(latitude) for longitude) as _bbox_from_point() above,
+    so pixel size and bbox size are computed on a consistent basis.
+
+    Returns (resx_degrees, resy_degrees).
+    """
+    center_lat = (bbox[1] + bbox[3]) / 2.0
+    cos_lat = max(0.1, abs(math.cos(math.radians(center_lat))))
+    return metres / (111_320.0 * cos_lat), metres / 111_320.0
+
+
 def _bbox_from_point(lat: float, lon: float, radius_m: float) -> list:
     """Same equirectangular-approximation bbox helper used by
     ndvi_source_mobile.py -- kept as its own copy (small, deliberate
@@ -272,8 +296,9 @@ def _stats_for_bbox(
             "timeRange": {"from": time_from, "to": time_to},
             "aggregationInterval": {"of": "P30D"},
             "evalscript": SAR_EVALSCRIPT,
-            "resx": 10,
-            "resy": 10,
+            # resx/resy are DEGREES here (CRS84 bounds) -- see _resolution_degrees().
+            "resx": _resolution_degrees(bbox, 10)[0],
+            "resy": _resolution_degrees(bbox, 10)[1],
         },
     }
 
