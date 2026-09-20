@@ -71,7 +71,9 @@ import grand_project_db as db
 import geocoding_source_mobile_nominatim as geocoding
 import investigation_multi_mobile
 import debate_mobile
+import dem_source_mobile
 import grand_project_sync
+import sh_backoff
 
 DEFAULT_TILE_SIZE_M = 1000.0  # 1 km tiles: a sensible default survey grain.
                               # How much ground each tile's DEM analysis
@@ -505,7 +507,62 @@ def derive_analysis_window(tile_size_m: float) -> Dict[str, Any]:
     }
 
 
+def _attach_throttle_report(result: str, copernicus: Any, live_dem: Any) -> str:
+    """Adds what the throttle handling actually did to the job's result
+    JSON. Purely additive; if the result is not a JSON object it is
+    returned untouched."""
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return result
+    if not isinstance(payload, dict):
+        return result
+    payload["copernicus_throttle"] = copernicus
+    payload["opentopography_live_dem"] = live_dem
+    return json.dumps(payload)
+
+
 def run_wide_area_search_job(
+    data_root: str,
+    job_id: str,
+    radius_m: float = 0.0,
+    grid_size: int = 0,
+    api_key: str = "",
+    demtype: str = "SRTMGL1",
+    ndvi_client_id: str = "",
+    ndvi_client_secret: str = "",
+) -> str:
+    """Runs (or RESUMES) one wide-area search job -- the full behavioural
+    description is on _run_wide_area_search_job_impl() below.
+
+    THROTTLE HANDLING. For the duration of this call, on this thread only,
+    two protections are armed and then ALWAYS disarmed in a `finally`
+    block, so the app is back in its original state afterwards however
+    the job ends:
+      * sh_backoff: retry/backoff/pacing/circuit-breaker for HTTP 429 from
+        the four Copernicus sources (NDVI/Thermal/Optical/SAR).
+      * dem_source_mobile's live-DEM quota breaker: the live OpenTopography
+        fetch is STILL tried first, as always, with the offline library as
+        the fallback; only after a quota/key rejection are further live
+        attempts suspended (and re-tried after LIVE_DEM_RETRY_INTERVAL_S)
+        instead of each tile wasting a failed request.
+    What each actually did is added to the result JSON under
+    "copernicus_throttle" and "opentopography_live_dem".
+    """
+    sh_backoff.arm()
+    dem_source_mobile.arm_live_dem_quota_breaker()
+    try:
+        result = _run_wide_area_search_job_impl(
+            data_root, job_id, radius_m, grid_size, api_key, demtype,
+            ndvi_client_id, ndvi_client_secret,
+        )
+    finally:
+        copernicus = sh_backoff.disarm()
+        live_dem = dem_source_mobile.disarm_live_dem_quota_breaker()
+    return _attach_throttle_report(result, copernicus, live_dem)
+
+
+def _run_wide_area_search_job_impl(
     data_root: str,
     job_id: str,
     radius_m: float = 0.0,
