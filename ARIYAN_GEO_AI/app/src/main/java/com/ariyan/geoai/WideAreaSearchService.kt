@@ -91,7 +91,12 @@ class WideAreaSearchService : Service() {
             return START_NOT_STICKY
         }
 
-        val radiusM = intent.getDoubleExtra(EXTRA_RADIUS_M, 500.0)
+        // 0.0 (the default) means "derive the analysis radius from this job's own
+        // tile size" -- wide_area_search_mobile.run_wide_area_search_job() treats
+        // any radius <= 0 that way (radius = tile_size_m / 2, floored at 500 m).
+        // Nothing in the UI passes EXTRA_RADIUS_M today; a positive value
+        // would override it.
+        val radiusM = intent.getDoubleExtra(EXTRA_RADIUS_M, 0.0)
         val gridSize = intent.getIntExtra(EXTRA_GRID_SIZE, 96)
         val apiKey = intent.getStringExtra(EXTRA_API_KEY) ?: ""
         val demType = intent.getStringExtra(EXTRA_DEMTYPE) ?: "SRTMGL1"
