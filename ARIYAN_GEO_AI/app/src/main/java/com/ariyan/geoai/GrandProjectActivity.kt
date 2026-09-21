@@ -171,7 +171,16 @@ class GrandProjectActivity : AppCompatActivity() {
      * Falls back to the plain textGrandProjectResults view (same as
      * Investigations/Timeline) for the empty-list and
      * malformed-JSON cases, so those messages look consistent with
-     * the rest of this screen rather than needing their own styling. */
+     * the rest of this screen rather than needing their own styling.
+     *
+     * ORDER (changed 2026-09-21): rows are no longer oldest-first.
+     * Highest confidence first, then largest absolute DEM z-score
+     * (the same abs(score) ranking Pass 2 itself uses), and the sort
+     * is stable so exact ties keep their oldest-first order. The #N
+     * in each row is therefore the RANK in this list, not the order
+     * the candidate was created. Each row also shows its stored DEM
+     * z-score so the ordering can be checked by eye. Nothing about
+     * the data changes, only the order the rows are shown in. */
     private fun renderCandidateRows(jsonText: String) {
         val array = try {
             JSONArray(jsonText)
@@ -199,12 +208,27 @@ class GrandProjectActivity : AppCompatActivity() {
         theme.resolveAttribute(android.R.attr.selectableItemBackground, tapBackground, true)
         val density = resources.displayMetrics.density
 
-        for (i in 0 until array.length()) {
-            val row = array.getJSONObject(i)
+        val sortedRows = ArrayList<JSONObject>(array.length())
+        for (k in 0 until array.length()) {
+            sortedRows.add(array.getJSONObject(k))
+        }
+        sortedRows.sortWith(
+            compareByDescending<JSONObject> { c ->
+                if (c.isNull("confidence_numeric")) -1.0 else c.optDouble("confidence_numeric", -1.0)
+            }.thenByDescending { c ->
+                if (c.isNull("score")) -1.0 else Math.abs(c.optDouble("score", 0.0))
+            }
+        )
+
+        for (i in 0 until sortedRows.size) {
+            val row = sortedRows[i]
             val candidateId = row.optString("id")
             val rowText = buildString {
                 append("#").append(i + 1).append("  ").append(row.optString("created_at")).append("\n")
                 append(String.format("lat=%.6f  lon=%.6f\n", row.optDouble("lat"), row.optDouble("lon")))
+                if (!row.isNull("score")) {
+                    append(String.format("DEM z-score: %+.2f\n", row.optDouble("score")))
+                }
                 append("status: ").append(row.optString("status"))
                 val band = row.optString("confidence_band", "")
                 if (band.isNotEmpty()) {
