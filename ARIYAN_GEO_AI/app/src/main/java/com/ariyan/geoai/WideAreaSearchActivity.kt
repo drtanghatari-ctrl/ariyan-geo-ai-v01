@@ -104,6 +104,19 @@ import java.io.File
  * shows whichever of the two status files was written most recently, with
  * a heading when it is the refinement's.
  *
+ * LAND-COVER FILTER (Pass 2): the raw top candidates of a DEM sweep are
+ * mostly palm groves and buildings, because the public terrain data is a
+ * surface model. Before the preview, "Refine top N" therefore first makes
+ * sure the job's candidates have been land-cover checked
+ * (land_cover_flags.ensure_job_land_cover_json: a small public download
+ * the first time, nothing after that, needs internet). Candidates flagged
+ * as trees / buildings / open water are left out of Pass 2's selection.
+ * NOTHING is deleted: the confirmation dialog says how many were skipped,
+ * and its middle button ("Include flagged" / "Use filter") switches the
+ * filter off or on for that run. If the check cannot run (offline), the
+ * dialog says so and nothing is filtered. See land_cover_flags.py for the
+ * rule and its honest limits.
+ *
  * PROJECT SCOPE: uses the SAME interim stopgap MainActivity.kt's and
  * GrandProjectActivity.kt's own Grand Project persistence already use --
  * grand_project_sync.get_or_create_default_grand_project() -- since no
@@ -819,25 +832,57 @@ class WideAreaSearchActivity : AppCompatActivity() {
         )
         AlertDialog.Builder(this)
             .setTitle("Refine how many top candidates?")
-            .setItems(labels) { _, which -> previewRefinement(jobId, counts[which]) }
+            .setItems(labels) { _, which -> previewRefinement(jobId, counts[which], true) }
             .setNegativeButton("Cancel", null)
             .show()
     }
 
-    /** Second step: a read-only preview (no network, no writes) of exactly
-     * which candidates a Pass 2 of this size would refine, so the user
-     * confirms real API spend against real candidates rather than a
-     * number. */
-    private fun previewRefinement(jobId: String, n: Int) {
+    /** Second step: the preview of exactly which candidates a Pass 2 of
+     * this size would refine, so the user confirms real API spend against
+     * real candidates rather than a number.
+     *
+     * LAND-COVER FILTER: when skipFlagged is true (the normal path), this
+     * FIRST makes sure every candidate of the job has been land-cover
+     * checked (land_cover_flags.ensure_job_land_cover_json: one small
+     * public download the first time, nothing after that; it writes only
+     * the app's own candidate_land_cover table). A problem there (offline,
+     * no tile) never blocks the refinement: it is shown in the
+     * confirmation and the unchecked candidates are simply not filtered.
+     * The preview itself is then read-only. */
+    private fun previewRefinement(jobId: String, n: Int, skipFlagged: Boolean) {
         setLoading(true)
         lifecycleScope.launch {
             try {
+                var landCoverNote: String? = null
+                if (skipFlagged) {
+                    Toast.makeText(
+                        this@WideAreaSearchActivity,
+                        "Checking land cover (needs internet, can take a little while)…",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    landCoverNote = withContext(Dispatchers.Default) {
+                        try {
+                            val lc = JSONObject(
+                                python.getModule("land_cover_flags")
+                                    .callAttr("ensure_job_land_cover_json", offlineDataRoot, jobId)
+                                    .toString()
+                            )
+                            // "problem" is ABSENT (not null) when all went well.
+                            if (lc.has("problem")) lc.getString("problem") else null
+                        } catch (e: Exception) {
+                            "The land-cover check failed: ${cleanErrorMessage(e.message)}"
+                        }
+                    }
+                }
                 val jsonText = withContext(Dispatchers.Default) {
                     python.getModule("grand_project_refinement")
-                        .callAttr("preview_refinement_selection_json", offlineDataRoot, jobId, n)
+                        .callAttr(
+                            "preview_refinement_selection_json", offlineDataRoot, jobId, n,
+                            Kwarg("skip_flagged", skipFlagged)
+                        )
                         .toString()
                 }
-                showRefinementConfirmation(jobId, n, JSONObject(jsonText))
+                showRefinementConfirmation(jobId, n, JSONObject(jsonText), skipFlagged, landCoverNote)
             } catch (e: PyException) {
                 Toast.makeText(this@WideAreaSearchActivity, "Could not preview the refinement: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
             } catch (e: org.json.JSONException) {
@@ -849,21 +894,36 @@ class WideAreaSearchActivity : AppCompatActivity() {
     }
 
     /** Third step: the confirmation. Lists the real selected candidates,
-     * the real cost, and -- only when they apply -- the two
-     * missing-credential consequences (both real: no OpenTopography key
-     * means the live DEM path cannot run; no Copernicus credentials means
-     * the satellite checks are recorded as "not run", never fabricated). */
-    private fun showRefinementConfirmation(jobId: String, n: Int, preview: JSONObject) {
+     * the real cost, what the land-cover filter skipped, and -- only when
+     * they apply -- the two missing-credential consequences (both real: no
+     * OpenTopography key means the live DEM path cannot run; no Copernicus
+     * credentials means the satellite checks are recorded as "not run",
+     * never fabricated). The middle button flips the land-cover filter for
+     * this run and re-previews. */
+    private fun showRefinementConfirmation(
+        jobId: String, n: Int, preview: JSONObject,
+        skipFlagged: Boolean, landCoverNote: String?
+    ) {
         val selected = preview.optJSONArray("selected") ?: JSONArray()
         val jobCandidates = preview.optInt("job_candidates", 0)
         val alreadyRefined = preview.optInt("already_refined", 0)
         val skippedDuplicates = preview.optInt("skipped_near_duplicates", 0)
+        val skippedFlagged = preview.optInt("skipped_flagged", 0)
+        val landCoverUnchecked = preview.optInt("land_cover_unchecked", 0)
+        val byReason = preview.optJSONObject("skipped_flagged_by_reason")
+        val flaggedTreesOrBuildings = byReason?.optInt("tree_or_built", 0) ?: 0
+        val flaggedWater = byReason?.optInt("water", 0) ?: 0
 
         if (selected.length() == 0) {
+            val flaggedText = if (skipFlagged && skippedFlagged > 0) {
+                " $skippedFlagged skipped by the land-cover filter."
+            } else {
+                ""
+            }
             Toast.makeText(
                 this,
                 "Nothing to refine: this job has $jobCandidates candidates, " +
-                    "$alreadyRefined already refined, $skippedDuplicates skipped as near-duplicates.",
+                    "$alreadyRefined already refined, $skippedDuplicates skipped as near-duplicates.$flaggedText",
                 Toast.LENGTH_LONG
             ).show()
             return
@@ -877,6 +937,20 @@ class WideAreaSearchActivity : AppCompatActivity() {
             }
             if (alreadyRefined > 0) append(alreadyRefined).append(" already refined earlier.\n")
             if (skippedDuplicates > 0) append(skippedDuplicates).append(" skipped as near-duplicates of another candidate.\n")
+            if (skipFlagged && skippedFlagged > 0) {
+                append(skippedFlagged).append(" skipped by the land-cover filter (trees or buildings: ")
+                append(flaggedTreesOrBuildings).append(", open water: ").append(flaggedWater)
+                append("). They stay in the database; nothing is deleted.\n")
+            }
+            if (skipFlagged && landCoverUnchecked > 0) {
+                append(landCoverUnchecked).append(" candidates could not be land-cover checked, so they are NOT filtered.\n")
+            }
+            if (skipFlagged && !landCoverNote.isNullOrBlank()) {
+                append("Land-cover note: ").append(landCoverNote).append("\n")
+            }
+            if (!skipFlagged) {
+                append("The land-cover filter is OFF for this run: trees, buildings and water candidates can be included.\n")
+            }
             append("\n")
             for (i in 0 until selected.length()) {
                 val c = selected.getJSONObject(i)
@@ -899,19 +973,26 @@ class WideAreaSearchActivity : AppCompatActivity() {
             }
         }
 
-        AlertDialog.Builder(this)
+        val builder = AlertDialog.Builder(this)
             .setTitle("Refine ${selected.length()} candidate(s)?")
             .setMessage(message)
-            .setPositiveButton("Start refinement") { _, _ -> startRefinement(jobId, selected.length()) }
+            .setPositiveButton("Start refinement") { _, _ -> startRefinement(jobId, selected.length(), skipFlagged) }
             .setNegativeButton("Cancel", null)
-            .show()
+        if (skipFlagged) {
+            builder.setNeutralButton("Include flagged") { _, _ -> previewRefinement(jobId, n, false) }
+        } else {
+            builder.setNeutralButton("Use filter") { _, _ -> previewRefinement(jobId, n, true) }
+        }
+        builder.show()
     }
 
     /** Starts WideAreaSearchService in Pass 2 mode (EXTRA_REFINE_TOP_N)
      * with this device's real saved credentials, same as startJob(). Safe to
      * run again: refined candidates carry a marker row and are skipped;
-     * failed ones stay eligible. */
-    private fun startRefinement(jobId: String, n: Int) {
+     * failed ones stay eligible. skipFlagged is passed through as
+     * EXTRA_REFINE_SKIP_FLAGGED so the run selects exactly what the
+     * confirmation showed. */
+    private fun startRefinement(jobId: String, n: Int, skipFlagged: Boolean) {
         if (WideAreaSearchService.isRunning) {
             Toast.makeText(this, "A wide-area search job is already running -- let it finish first.", Toast.LENGTH_LONG).show()
             return
@@ -924,6 +1005,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
             putExtra(WideAreaSearchService.EXTRA_NDVI_CLIENT_ID, credentialStore.copernicusClientId)
             putExtra(WideAreaSearchService.EXTRA_NDVI_CLIENT_SECRET, credentialStore.copernicusClientSecret)
             putExtra(WideAreaSearchService.EXTRA_REFINE_TOP_N, n)
+            putExtra(WideAreaSearchService.EXTRA_REFINE_SKIP_FLAGGED, skipFlagged)
         }
         ContextCompat.startForegroundService(this, serviceIntent)
         Toast.makeText(this, "Pass 2 refinement of $n candidate(s) started in the background.", Toast.LENGTH_LONG).show()
