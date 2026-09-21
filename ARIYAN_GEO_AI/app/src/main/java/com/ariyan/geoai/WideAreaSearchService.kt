@@ -160,10 +160,10 @@ class WideAreaSearchService : Service() {
             startForeground(
                 NOTIFICATION_ID,
                 buildNotification(
-                    if (isRefinement) "Starting Pass 2 refinement of the top $refineTopN candidatesâ€¦"
-                    else if (demOfflineFirst) "Starting wide-area search (DEM-only sweep, offline library first)â€¦"
-                    else if (demOnly) "Starting wide-area search (DEM-only sweep)â€¦"
-                    else "Starting wide-area searchâ€¦"
+                    if (isRefinement) "Starting Pass 2 refinement of the top $refineTopN candidates…"
+                    else if (demOfflineFirst) "Starting wide-area search (DEM-only sweep, offline library first)…"
+                    else if (demOnly) "Starting wide-area search (DEM-only sweep)…"
+                    else "Starting wide-area search…"
                 )
             )
             acquireWakeLock()
@@ -281,7 +281,7 @@ class WideAreaSearchService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("ARIYAN GEO AI â€” wide-area search")
+            .setContentTitle("ARIYAN GEO AI — wide-area search")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setOngoing(true)
