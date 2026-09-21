@@ -147,6 +147,23 @@ def disarm_live_dem_quota_breaker() -> Optional[dict]:
             "live_attempts_skipped": breaker["skipped"]}
 
 
+def live_dem_quota_status() -> Optional[dict]:
+    """Counters PLUS the live suspension state for the calling thread's
+    armed breaker, for progress reporting. Read-only. None if not armed."""
+    breaker = getattr(_tl, "breaker", None)
+    if breaker is None:
+        return None
+    remaining = breaker["suspended_until"] - _now()
+    return {
+        "live_fetches_ok": breaker["live_ok"],
+        "suspensions": breaker["trips"],
+        "live_attempts_skipped": breaker["skipped"],
+        "suspended_now": remaining > 0,
+        "retry_in_s": round(max(0.0, remaining), 0),
+        "reason": breaker["reason"] if remaining > 0 else "",
+    }
+
+
 def _strip_tags(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", text or "")).strip()
 
@@ -271,16 +288,16 @@ class OpenTopographyAAIGridSource:
             minutes = max(1, int(round((breaker["suspended_until"] - _now()) / 60.0)))
             raise OpenTopographyFetchError(
                 "Live OpenTopography fetch skipped because it already failed "
-                f"earlier in this run: {breaker['reason']} Live fetching is "
+                f"earlier in this run: {breaker['reason']}. Live fetching is "
                 f"retried automatically in about {minutes} min; offline data "
-                "is used in the meantime."
+                "is used in the meantime"
             )
         try:
             dem = self._fetch_live(aoi)
         except (OpenTopographyRateLimitError, OpenTopographyAuthError) as exc:
             if breaker is not None:
                 breaker["suspended_until"] = _now() + LIVE_DEM_RETRY_INTERVAL_S
-                breaker["reason"] = str(exc)
+                breaker["reason"] = str(exc).rstrip(". ")
                 breaker["trips"] += 1
             raise
         if breaker is not None:
@@ -312,7 +329,7 @@ class OpenTopographyAAIGridSource:
                 raise OpenTopographyRateLimitError(
                     "OpenTopography daily API limit reached -- the server "
                     f"reported: '{body_text[:200]}'. The key itself is fine; "
-                    "live DEM fetching is unavailable until the limit resets."
+                    "live DEM fetching is unavailable until the limit resets"
                 )
             raise OpenTopographyAuthError(
                 "OpenTopography rejected the API key (401 Unauthorized). "
