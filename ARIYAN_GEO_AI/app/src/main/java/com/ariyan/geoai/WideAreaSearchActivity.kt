@@ -91,6 +91,16 @@ import java.io.File
  * tile now running); otherwise the stage line is hidden rather than risk
  * showing a stale stage from some earlier run.
  *
+ * PASS 2 (REFINEMENT): the job-detail dialog also has a "Refine top N"
+ * button. It asks how many (3 / 5 / 10), shows a read-only preview of
+ * exactly which candidates would be refined (grand_project_refinement.
+ * preview_refinement_selection_json -- no network, no writes) with the
+ * real API cost and any missing-credential warning, and only then starts
+ * WideAreaSearchService with EXTRA_REFINE_TOP_N. The refinement writes its
+ * own progress file (wide_area_refine_status_<job_id>.json); the dialog
+ * shows whichever of the two status files was written most recently, with
+ * a heading when it is the refinement's.
+ *
  * PROJECT SCOPE: uses the SAME interim stopgap MainActivity.kt's and
  * GrandProjectActivity.kt's own Grand Project persistence already use --
  * grand_project_sync.get_or_create_default_grand_project() -- since no
@@ -139,29 +149,47 @@ class WideAreaSearchActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 WideAreaSearchService.ACTION_JOB_FINISHED -> {
-                    // The job's result JSON carries a one-line "health_summary"
-                    // (e.g. why tiles used the offline DEM library) -- see
-                    // wide_area_search_mobile.py. Best-effort: an absent or
-                    // unreadable summary just gives the plain message.
-                    val healthSummary = try {
+                    val isRefinement = intent.getBooleanExtra(WideAreaSearchService.EXTRA_IS_REFINEMENT, false)
+                    val resultObj = try {
                         JSONObject(intent.getStringExtra(WideAreaSearchService.EXTRA_RESULT_JSON) ?: "{}")
-                            .optString("health_summary", "")
                     } catch (e: Exception) {
-                        ""
+                        JSONObject()
                     }
-                    val finishedMessage = if (healthSummary.isNotEmpty()) {
-                        "Wide-area search job finished. $healthSummary"
+                    val finishedMessage = if (isRefinement) {
+                        // Pass 2 result: counts straight from
+                        // run_refinement_pass() -- "not reproduced" is a
+                        // finding about the candidate, not a failure.
+                        val failed = resultObj.optInt("failed", 0)
+                        "Pass 2 refinement finished: ${resultObj.optInt("refined")} of " +
+                            "${resultObj.optInt("attempted")} candidates refined " +
+                            "(${resultObj.optInt("reproduced")} reproduced the DEM anomaly, " +
+                            "${resultObj.optInt("not_reproduced")} did not)" +
+                            (if (failed > 0) ", $failed failed and stay eligible for a retry." else ".")
                     } else {
-                        "Wide-area search job finished."
+                        // The job's result JSON carries a one-line "health_summary"
+                        // (e.g. why tiles used the offline DEM library) -- see
+                        // wide_area_search_mobile.py. Best-effort: an absent or
+                        // unreadable summary just gives the plain message.
+                        val healthSummary = resultObj.optString("health_summary", "")
+                        if (healthSummary.isNotEmpty()) {
+                            "Wide-area search job finished. $healthSummary"
+                        } else {
+                            "Wide-area search job finished."
+                        }
                     }
                     Toast.makeText(this@WideAreaSearchActivity, finishedMessage, Toast.LENGTH_LONG).show()
                     if (binding.containerJobs.visibility == View.VISIBLE) loadJobsTab()
                 }
                 WideAreaSearchService.ACTION_JOB_FAILED -> {
                     val err = intent.getStringExtra(WideAreaSearchService.EXTRA_ERROR_MESSAGE) ?: "Unknown error"
+                    val failedWhat = if (intent.getBooleanExtra(WideAreaSearchService.EXTRA_IS_REFINEMENT, false)) {
+                        "Pass 2 refinement"
+                    } else {
+                        "Wide-area search job"
+                    }
                     Toast.makeText(
                         this@WideAreaSearchActivity,
-                        "Wide-area search job failed: ${cleanErrorMessage(err)}",
+                        "$failedWhat failed: ${cleanErrorMessage(err)}",
                         Toast.LENGTH_LONG
                     ).show()
                     if (binding.containerJobs.visibility == View.VISIBLE) loadJobsTab()
@@ -475,7 +503,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 append("  ").append(row.optString("input_kind")).append("   ").append(row.optInt("n_tiles")).append(" tiles\n")
                 append("  status: ").append(row.optString("status")).append("\n")
                 append("  created: ").append(row.optString("created_at")).append("\n")
-                append("(tap to view progress / start)")
+                append("(tap to view progress / start / refine)")
             }
             val rowView = TextView(this).apply {
                 text = rowText
@@ -544,15 +572,25 @@ class WideAreaSearchActivity : AppCompatActivity() {
             .setView(scrollView)
             .setPositiveButton("Close", null)
             .setNeutralButton("Start / Resume") { _, _ -> chooseRunMode(jobId) }
+            .setNegativeButton("Refine top N…") { _, _ -> chooseRefineCount(jobId) }
             .create()
 
         val statusFile = File(offlineDataRoot, "wide_area_search_status_$jobId.json")
+        // Pass 2 writes its own file (see grand_project_refinement.py); show
+        // whichever of the two was written most recently, so a refinement in
+        // progress -- or the last one that finished -- is visible here.
+        val refineStatusFile = File(offlineDataRoot, "wide_area_refine_status_$jobId.json")
         val pollingJob: Job = lifecycleScope.launch {
             while (isActive) {
-                val stageLine = readCurrentTileStageText(statusFile) ?: ""
+                val showRefine = refineStatusFile.exists() &&
+                    (!statusFile.exists() || refineStatusFile.lastModified() >= statusFile.lastModified())
+                val activeFile = if (showRefine) refineStatusFile else statusFile
+                val stageLine = readCurrentTileStageText(activeFile, if (showRefine) "candidate" else "tile") ?: ""
                 if (stageText.text.toString() != stageLine) stageText.text = stageLine
                 stageText.visibility = if (stageLine.isEmpty()) View.GONE else View.VISIBLE
-                val liveText = readWideAreaStatusText(statusFile)
+                val liveText = readWideAreaStatusText(
+                    activeFile, if (showRefine) "Pass 2 (refinement of the top candidates)" else null
+                )
                 if (liveText != null) {
                     // Only assign when changed: re-assigning identical text every
                     // second would clear any text the user is selecting/copying.
@@ -612,13 +650,14 @@ class WideAreaSearchActivity : AppCompatActivity() {
      * state) -- and, while running, the time of the last update, so a
      * slow tile (rate-limit retry waits can take minutes) is
      * distinguishable from a job that has stopped. */
-    private fun readWideAreaStatusText(file: File): String? {
+    private fun readWideAreaStatusText(file: File, heading: String? = null): String? {
         if (!file.exists()) return null
         return try {
             val obj = JSONObject(file.readText())
             val phase = obj.optString("phase", "?")
             val health = obj.optString("health", "")
             buildString {
+                if (heading != null) append(heading).append("\n")
                 append("phase: ").append(phase).append("\n")
                 append("done: ").append(obj.optInt("done", 0))
                 append(" / ").append(obj.optInt("total", 0)).append("\n")
@@ -654,7 +693,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
      * Any read/parse problem also gives null. The candidate counts are only
      * meaningful for the per-candidate stages; the DEM stage is shown
      * without a count. */
-    private fun readCurrentTileStageText(jobStatusFile: File): String? {
+    private fun readCurrentTileStageText(jobStatusFile: File, unit: String = "tile"): String? {
         try {
             if (!jobStatusFile.exists()) return null
             val jobObj = JSONObject(jobStatusFile.readText())
@@ -684,9 +723,9 @@ class WideAreaSearchActivity : AppCompatActivity() {
             val updated = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
                 .format(java.util.Date(stageFile.lastModified()))
             return if (phase == "dem") {
-                "in this tile: $label (updated $updated)"
+                "in this $unit: $label (updated $updated)"
             } else {
-                "in this tile: $label, $done of $total candidates done (updated $updated)"
+                "in this $unit: $label, $done of $total candidates done (updated $updated)"
             }
         } catch (e: Exception) {
             return null
@@ -747,6 +786,136 @@ class WideAreaSearchActivity : AppCompatActivity() {
             else "Wide-area search started in the background.",
             Toast.LENGTH_LONG
         ).show()
+    }
+
+    // =========================== PASS 2 (REFINEMENT) ===========================
+
+    /** First step of "Refine top N": how many candidates. Refuses up front
+     * if a job is already running (the service allows one at a time, and
+     * a refinement shares the same OpenTopography quota and Copernicus
+     * token). The counts are deliberately small: each refinement is a full
+     * multi-source investigation, not a cheap DEM read. */
+    private fun chooseRefineCount(jobId: String) {
+        if (WideAreaSearchService.isRunning) {
+            Toast.makeText(this, "A wide-area search job is already running -- let it finish first.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val counts = intArrayOf(3, 5, 10)
+        val labels = arrayOf(
+            "Top 3 (a good first try)",
+            "Top 5",
+            "Top 10 (uses the most API budget)",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Refine how many top candidates?")
+            .setItems(labels) { _, which -> previewRefinement(jobId, counts[which]) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Second step: a read-only preview (no network, no writes) of exactly
+     * which candidates a Pass 2 of this size would refine, so the user
+     * confirms real API spend against real candidates rather than a
+     * number. */
+    private fun previewRefinement(jobId: String, n: Int) {
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_refinement")
+                        .callAttr("preview_refinement_selection_json", offlineDataRoot, jobId, n)
+                        .toString()
+                }
+                showRefinementConfirmation(jobId, n, JSONObject(jsonText))
+            } catch (e: PyException) {
+                Toast.makeText(this@WideAreaSearchActivity, "Could not preview the refinement: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            } catch (e: org.json.JSONException) {
+                Toast.makeText(this@WideAreaSearchActivity, "Could not read the refinement preview: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    /** Third step: the confirmation. Lists the real selected candidates,
+     * the real cost, and -- only when they apply -- the two
+     * missing-credential consequences (both real: no OpenTopography key
+     * means the live DEM path cannot run; no Copernicus credentials means
+     * the satellite checks are recorded as "not run", never fabricated). */
+    private fun showRefinementConfirmation(jobId: String, n: Int, preview: JSONObject) {
+        val selected = preview.optJSONArray("selected") ?: JSONArray()
+        val jobCandidates = preview.optInt("job_candidates", 0)
+        val alreadyRefined = preview.optInt("already_refined", 0)
+        val skippedDuplicates = preview.optInt("skipped_near_duplicates", 0)
+
+        if (selected.length() == 0) {
+            Toast.makeText(
+                this,
+                "Nothing to refine: this job has $jobCandidates candidates, " +
+                    "$alreadyRefined already refined, $skippedDuplicates skipped as near-duplicates.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        val message = buildString {
+            append("Pass 2 will refine ").append(selected.length())
+            append(" of this job's ").append(jobCandidates).append(" Pass 1 candidates, highest DEM z-score first.\n")
+            if (selected.length() < n) {
+                append("(You asked for ").append(n).append("; only ").append(selected.length()).append(" are eligible.)\n")
+            }
+            if (alreadyRefined > 0) append(alreadyRefined).append(" already refined earlier.\n")
+            if (skippedDuplicates > 0) append(skippedDuplicates).append(" skipped as near-duplicates of another candidate.\n")
+            append("\n")
+            for (i in 0 until selected.length()) {
+                val c = selected.getJSONObject(i)
+                val scoreText = if (c.isNull("score")) "n/a"
+                else String.format(java.util.Locale.US, "%+.2f", c.optDouble("score"))
+                append(i + 1).append(".  ")
+                append(String.format(java.util.Locale.US, "%.5f, %.5f", c.optDouble("lat"), c.optDouble("lon")))
+                append("   z=").append(scoreText).append("\n")
+            }
+            append("\nEach refinement makes about 2 live OpenTopography calls, up to about 8 ")
+            append("stability re-fetches, and Copernicus calls -- not cheap while the daily ")
+            append("OpenTopography cap applies.")
+            if (credentialStore.openTopographyApiKey.isNullOrBlank()) {
+                append("\n\nNo OpenTopography API key is saved on this device: refinements ")
+                append("outside the offline DEM library's coverage will fail.")
+            }
+            if (credentialStore.copernicusClientId.isNullOrBlank() || credentialStore.copernicusClientSecret.isNullOrBlank()) {
+                append("\n\nNo Copernicus credentials are saved: satellite checks will be ")
+                append("recorded as not run.")
+            }
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Refine ${selected.length()} candidate(s)?")
+            .setMessage(message)
+            .setPositiveButton("Start refinement") { _, _ -> startRefinement(jobId, selected.length()) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Starts WideAreaSearchService in Pass 2 mode (EXTRA_REFINE_TOP_N)
+     * with this device's real saved credentials, same as startJob(). Safe to
+     * run again: refined candidates carry a marker row and are skipped;
+     * failed ones stay eligible. */
+    private fun startRefinement(jobId: String, n: Int) {
+        if (WideAreaSearchService.isRunning) {
+            Toast.makeText(this, "A wide-area search job is already running -- let it finish first.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val serviceIntent = Intent(this, WideAreaSearchService::class.java).apply {
+            putExtra(WideAreaSearchService.EXTRA_JOB_ID, jobId)
+            putExtra(WideAreaSearchService.EXTRA_DATA_ROOT, offlineDataRoot)
+            putExtra(WideAreaSearchService.EXTRA_API_KEY, credentialStore.openTopographyApiKey)
+            putExtra(WideAreaSearchService.EXTRA_DEMTYPE, credentialStore.demType.ifEmpty { "SRTMGL1" })
+            putExtra(WideAreaSearchService.EXTRA_NDVI_CLIENT_ID, credentialStore.copernicusClientId)
+            putExtra(WideAreaSearchService.EXTRA_NDVI_CLIENT_SECRET, credentialStore.copernicusClientSecret)
+            putExtra(WideAreaSearchService.EXTRA_REFINE_TOP_N, n)
+        }
+        ContextCompat.startForegroundService(this, serviceIntent)
+        Toast.makeText(this, "Pass 2 refinement of $n candidate(s) started in the background.", Toast.LENGTH_LONG).show()
     }
 
     // =========================== SHARED ===========================
