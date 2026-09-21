@@ -543,7 +543,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
     private fun showJobDetail(jobId: String, title: String) {
         val density = resources.displayMetrics.density
         val progressText = TextView(this).apply {
-            text = "Loadingâ€¦"
+            text = "Loading…"
             typeface = Typeface.MONOSPACE
             textSize = 12f
             setTextIsSelectable(true)
@@ -575,7 +575,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
             .setView(scrollView)
             .setPositiveButton("Close", null)
             .setNeutralButton("Start / Resume") { _, _ -> chooseRunMode(jobId) }
-            .setNegativeButton("Refine top Nâ€¦") { _, _ -> chooseRefineCount(jobId) }
+            .setNegativeButton("Refine top N…") { _, _ -> chooseRefineCount(jobId) }
             .create()
 
         val statusFile = File(offlineDataRoot, "wide_area_search_status_$jobId.json")
