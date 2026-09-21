@@ -516,6 +516,10 @@ class WideAreaSearchActivity : AppCompatActivity() {
             val jobId = row.optString("id")
             val rowText = buildString {
                 append("#").append(i + 1).append("  ").append(row.optString("title")).append("\n")
+                // Short job id (first 6 characters) so near-identical titles
+                // can be told apart -- the same short form used when
+                // identifying a job in a database query.
+                append("  id: ").append(jobId.take(6)).append("\n")
                 append("  ").append(row.optString("input_kind")).append("   ").append(row.optInt("n_tiles")).append(" tiles\n")
                 append("  status: ").append(row.optString("status")).append("\n")
                 append("  created: ").append(row.optString("created_at")).append("\n")
