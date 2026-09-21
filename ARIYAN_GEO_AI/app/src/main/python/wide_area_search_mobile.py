@@ -631,7 +631,8 @@ def parse_tile_health(investigation_json: str) -> Optional[Dict[str, Any]]:
 class _RunHealth:
     """Running tally of what happened across the tiles processed in THIS run."""
 
-    def __init__(self) -> None:
+    def __init__(self, dem_only: bool = False) -> None:
+        self.dem_only = bool(dem_only)   # DEM-only sweep: satellite checks skipped by choice
         self.tiles = 0          # tiles processed this run (finished or failed)
         self.failed = 0
         self.checked = 0        # finished tiles whose limitations could be read
@@ -693,6 +694,11 @@ def _render_run_health(tally: "_RunHealth") -> str:
     thread; simply omitted otherwise, e.g. in tests). Never raises."""
     try:
         lines = ["RUN HEALTH (tiles processed this run)"]
+        if tally.dem_only:
+            lines.append(
+                "MODE: DEM-only sweep -- satellite checks and stability "
+                "re-fetches are skipped by choice (not run, which is NOT the "
+                "same as checked and nothing found)")
         lines.append(f"tiles: {tally.tiles} processed, {tally.failed} failed")
         lines.append("")
         lines.append("DEM elevation")
@@ -713,27 +719,30 @@ def _render_run_health(tally: "_RunHealth") -> str:
                     f"  live attempts skipped (no network call): {dem['live_attempts_skipped']}")
 
         lines.append("")
-        lines.append("Satellite checks (tiles with a problem)")
-        for name in _HEALTH_SOURCES:
-            a, some = tally.sat_all[name], tally.sat_some[name]
-            if a == 0 and some == 0:
-                lines.append(f"  {name}: no problems recorded")
-                continue
-            lines.append(f"  {name}: {a} fully unavailable, {some} partly")
-            reason = tally.sat_reason.get(name)
-            if reason:
-                lines.append(f"    last reason: {reason}")
-        if tally.ndvi_offline_composite:
-            lines.append(
-                f"  NDVI failed for every candidate on {tally.ndvi_offline_composite} "
-                "tile(s): offline NDVI was used there, and thermal/optical/SAR were "
-                "recorded but NOT combined into that tile's correlation")
-        if tally.ndvi_no_data:
-            lines.append(
-                f"  NDVI failed for every candidate on {tally.ndvi_no_data} tile(s) "
-                "with no offline NDVI either")
+        if tally.dem_only:
+            lines.append("Satellite checks: skipped by choice (none were run this pass)")
+        else:
+            lines.append("Satellite checks (tiles with a problem)")
+            for name in _HEALTH_SOURCES:
+                a, some = tally.sat_all[name], tally.sat_some[name]
+                if a == 0 and some == 0:
+                    lines.append(f"  {name}: no problems recorded")
+                    continue
+                lines.append(f"  {name}: {a} fully unavailable, {some} partly")
+                reason = tally.sat_reason.get(name)
+                if reason:
+                    lines.append(f"    last reason: {reason}")
+            if tally.ndvi_offline_composite:
+                lines.append(
+                    f"  NDVI failed for every candidate on {tally.ndvi_offline_composite} "
+                    "tile(s): offline NDVI was used there, and thermal/optical/SAR were "
+                    "recorded but NOT combined into that tile's correlation")
+            if tally.ndvi_no_data:
+                lines.append(
+                    f"  NDVI failed for every candidate on {tally.ndvi_no_data} tile(s) "
+                    "with no offline NDVI either")
 
-        cop = sh_backoff.status()
+        cop = None if tally.dem_only else sh_backoff.status()
         if cop is not None:
             lines.append("")
             lines.append("Copernicus 429 handling")
@@ -770,12 +779,14 @@ def _summarise_run_health(tally: "_RunHealth") -> Optional[str]:
                          else f"{tally.dem_offline} of {n} tiles")
                 why = tally.top_dem_reason()
                 parts.append(f"DEM from offline library on {scope}" + (f" ({why})" if why else ""))
+        if tally.dem_only:
+            parts.insert(0, "DEM-only sweep (satellite checks and stability re-fetches skipped by choice)")
         missing = [f"{name} {tally.sat_all[name] + tally.sat_some[name]}"
                    for name in _HEALTH_SOURCES
                    if tally.sat_all[name] + tally.sat_some[name] > 0]
-        if missing:
+        if missing and not tally.dem_only:
             parts.append("tiles with missing checks: " + ", ".join(missing))
-        if tally.ndvi_offline_composite:
+        if tally.ndvi_offline_composite and not tally.dem_only:
             parts.append(f"NDVI offline fallback on {tally.ndvi_offline_composite} tiles")
         if tally.failed:
             parts.append(f"{tally.failed} tile(s) failed")
@@ -854,9 +865,15 @@ def run_wide_area_search_job(
     demtype: str = "SRTMGL1",
     ndvi_client_id: str = "",
     ndvi_client_secret: str = "",
+    dem_only: bool = False,
 ) -> str:
     """Runs (or RESUMES) one wide-area search job -- the full behavioural
     description is on _run_wide_area_search_job_impl() below.
+
+    `dem_only=True` runs a DEM-ONLY SWEEP (see the DEM-ONLY SWEEP note on
+    _run_wide_area_search_job_impl()): no Copernicus calls at all and no
+    Detection Stability re-fetches, so each tile costs about 2 live
+    OpenTopography calls instead of up to 10.
 
     THROTTLE HANDLING. For the duration of this call, on this thread only,
     two protections are armed and then ALWAYS disarmed in a `finally`
@@ -881,7 +898,7 @@ def run_wide_area_search_job(
     try:
         result = _run_wide_area_search_job_impl(
             data_root, job_id, radius_m, grid_size, api_key, demtype,
-            ndvi_client_id, ndvi_client_secret,
+            ndvi_client_id, ndvi_client_secret, dem_only=bool(dem_only),
         )
     except BaseException as exc:
         # Leave an honest "stopped" in the status file instead of a stale
@@ -905,8 +922,32 @@ def _run_wide_area_search_job_impl(
     demtype: str = "SRTMGL1",
     ndvi_client_id: str = "",
     ndvi_client_secret: str = "",
+    dem_only: bool = False,
 ) -> str:
     """Runs (or RESUMES) one wide-area search job.
+
+    DEM-ONLY SWEEP (`dem_only=True`): a deliberately cheaper first pass.
+    For this run only, (1) the Copernicus credentials are blanked before
+    they reach the investigation, so NDVI/Thermal/Optical/SAR and
+    temporal-persistence checks are skipped WITHOUT any network call
+    (investigation_multi_mobile._get_shared_copernicus_token() already
+    treats blank credentials that way), and (2) Detection Stability's
+    offset re-fetches are switched off (max_auto_stability_candidates=0,
+    an existing parameter) because they are the largest consumer of the
+    live OpenTopography free-key quota (about 4 fetches per borderline
+    candidate, up to 8 per tile). The tile's primary DEM fetch and the
+    second-DEM cross-check still run. Candidates are still detected,
+    recorded, debated and persisted exactly as in a full run.
+    HONEST LABELLING: every skipped check is "not run", never "checked,
+    nothing found" -- the tile's own limitations record the missing
+    credentials, each tile's objective is tagged "DEM-only sweep", and
+    the run-health report says so in plain words. The choice is per RUN,
+    not stored on the job: resuming the same job in the other mode
+    simply continues the remaining PENDING tiles in that mode, so a job
+    can end up with a mix (each tile's objective says which it was).
+    Note that in the offline-library area (Iran) an offline NDVI fallback
+    may still be recorded for a tile -- that is local data, not a live
+    call.
 
     ANALYSIS-WINDOW / COVERAGE FIX: `radius_m` <= 0 and `grid_size` <= 0
     (the defaults) now mean "size this tile's analysis window from the
@@ -988,8 +1029,17 @@ def _run_wide_area_search_job_impl(
     -- best-effort, never raises on its own.
 
     Returns the job's final real progress counts as a JSON string:
-    {"total", "pending", "done", "failed"}.
+    {"total", "pending", "done", "failed", "dem_only"}.
     """
+    if dem_only:
+        # See DEM-ONLY SWEEP above: blank credentials => every Copernicus
+        # check is skipped with no network call.
+        ndvi_client_id = ""
+        ndvi_client_secret = ""
+    investigation_extra_kwargs: Dict[str, Any] = (
+        {"max_auto_stability_candidates": 0} if dem_only else {}
+    )
+
     job = db.get_wide_area_search_job(data_root, job_id)
     if job is None:
         raise WideAreaSearchError(f"No wide-area search job with id {job_id!r} was found.")
@@ -1022,9 +1072,12 @@ def _run_wide_area_search_job_impl(
     total = len(all_tiles)
     already_done = total - len(pending_tiles)
 
-    _write_wide_area_status(data_root, job_id, already_done, total, "starting")
+    tally = _RunHealth(dem_only=bool(dem_only))
 
-    tally = _RunHealth()
+    _write_wide_area_status(
+        data_root, job_id, already_done, total, "starting",
+        health=_render_run_health(tally),
+    )
 
     for i, tile in enumerate(pending_tiles):
         tile_id = tile["id"]
@@ -1052,6 +1105,7 @@ def _run_wide_area_search_job_impl(
                 ndvi_client_id=ndvi_client_id,
                 ndvi_client_secret=ndvi_client_secret,
                 offline_data_root=data_root,
+                **investigation_extra_kwargs,
             )
 
             try:
@@ -1072,6 +1126,8 @@ def _run_wide_area_search_job_impl(
                     f"tile {tile_index + 1}/{total} "
                     f"(analysis radius {radius_m:.0f} m, "
                     f"{grid_size}x{grid_size} grid, {cell_size_m:.1f} m cells)"
+                    + (" -- DEM-only sweep (satellite checks and stability "
+                       "re-fetches skipped by choice)" if dem_only else "")
                 ),
             )
             db.mark_tile_done(data_root, tile_id, result["investigation_id"])
@@ -1097,4 +1153,6 @@ def _run_wide_area_search_job_impl(
         phase="complete", health=_render_run_health(tally),
     )
 
-    return json.dumps(progress)
+    final_payload: Dict[str, Any] = dict(progress)
+    final_payload["dem_only"] = bool(dem_only)
+    return json.dumps(final_payload)
