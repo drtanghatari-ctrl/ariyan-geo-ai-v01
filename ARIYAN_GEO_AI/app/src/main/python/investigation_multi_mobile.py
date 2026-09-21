@@ -301,8 +301,9 @@ this retrofit -- see its own docstring.
 from __future__ import annotations
 
 import json
+import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from coordinate import GeoPoint, build_aoi, offset_point, haversine_distance_m
 from anomaly_detection_mobile import detect_anomalies, detect_raster_anomalies
@@ -320,8 +321,63 @@ from gpr_source_mobile import GPRSurvey, GPRPick, estimate_depths, GPREvidence
 from gpr_depth_model import GPRDepthModelError
 from ert_source_mobile import ERTSurvey, ERTReading, classify_survey, ERTEvidence
 from ert_resistivity_model import ERTResistivityModelError
+from dem_source import DEM
 from dem_source_mobile import OpenTopographyAAIGridSource, OpenTopographyFetchError
+from np_ops import resample_bilinear
 from offline_evidence_fallback import fetch_offline_dem, fetch_offline_ndvi, OfflineDataUnavailableError
+
+
+# --- OFFLINE-FIRST DEM (DEM-only wide-area sweeps only) -----------------------
+# The normal rule everywhere is ONLINE FIRST: the live OpenTopography fetch is
+# always attempted first and the offline library is only the fallback. The one
+# deliberate exception is dem_offline_first=True on run_investigation_multi_json()
+# below, which wide_area_search_mobile.py sets ONLY for a DEM-only sweep that the
+# user explicitly chose as "offline library first". It exists because each tile
+# of a big sweep otherwise costs 1-2 live OpenTopography calls even when the
+# tile is already on the phone, against a free-key daily cap of about 50.
+OFFLINE_FIRST_NATIVE_CELL_M = 30.0   # Copernicus GLO-30's own ground sample
+                                     # distance; the offline library is sampled
+                                     # on this grid, then bilinearly resampled,
+                                     # exactly like a live raster is.
+OFFLINE_FIRST_LIMITATION_PREFIX = "This run read the offline DEM library first"
+OFFLINE_FIRST_MISS_LIMITATION_PREFIX = "The offline DEM library was tried first"
+DEM_CROSS_CHECK_SKIPPED_PREFIX = "The second independent DEM cross-check was not run"
+
+
+def _fetch_offline_dem_resampled(aoi, offline_data_root: str) -> DEM:
+    """Reads this device's offline DEM library for `aoi` the way a live raster
+    is handled: sample at the dataset's own ~30 m grid (offline_dem_store's
+    reader is nearest-pixel, so sampling it directly on a 10 m analysis grid
+    would give 3x3-cell steps), then bilinearly resample to the AOI's
+    grid_size with np_ops.resample_bilinear -- the SAME function the live
+    OpenTopography path uses (see dem_source_mobile.py).
+
+    All-or-nothing, inherited from fetch_offline_dem(): raises
+    OfflineDataUnavailableError if any sampled point has no downloaded tile;
+    never returns a partial or fabricated raster."""
+    n = int(aoi.grid_size)
+    native_n = int(max(8, math.ceil(2.0 * float(aoi.radius_m) / OFFLINE_FIRST_NATIVE_CELL_M)))
+    if native_n >= n:
+        dem = fetch_offline_dem(aoi, offline_data_root)
+        sampling_note = f"Sampled directly on the {n}x{n} analysis grid."
+    else:
+        native_aoi = build_aoi(aoi.center, radius_m=aoi.radius_m, grid_size=native_n)
+        native = fetch_offline_dem(native_aoi, offline_data_root)
+        dem = replace(native, aoi=aoi, elevation_m=resample_bilinear(native.elevation_m, n, n))
+        native_cell_m = 2.0 * float(aoi.radius_m) / native_n
+        sampling_note = (
+            f"Sampled on a {native_n}x{native_n} grid (~{native_cell_m:.0f} m cells, "
+            f"the dataset's own ground resolution) and bilinearly resampled to "
+            f"{n}x{n}, the same way live rasters are."
+        )
+    return replace(
+        dem,
+        notes=(
+            "Real Copernicus DEM GLO-30 data read from this device's own offline "
+            "library FIRST, by design (DEM-only offline-first sweep), not fetched "
+            f"live for this run. {sampling_note}"
+        ),
+    )
 
 
 def _write_investigation_status(
@@ -1951,6 +2007,8 @@ def run_investigation_multi_json(
     max_auto_stability_candidates: int = MAX_AUTO_STABILITY_CANDIDATES_DEFAULT,
     temporal_persistence_days_back: float = DEFAULT_TEMPORAL_PERSISTENCE_DAYS_BACK,
     dem_cross_check_dataset: str = DEM_CROSS_CHECK_DATASET_DEFAULT,
+    dem_offline_first: bool = False,
+    run_dem_cross_check: bool = True,
 ) -> str:
     """Run a DEM + NDVI + Thermal + Optical + SAR investigation and
     return the InvestigationRecord as a JSON string. This is the
@@ -1969,6 +2027,20 @@ def run_investigation_multi_json(
     the abandoned background thread's eventual real outcome is also
     reported separately to dem_fetch_diagnostic.json (see
     dem_source_mobile.py's own docstring) for deeper debugging.
+
+    OFFLINE-FIRST EXCEPTION (dem_offline_first=True, default False): for the
+    PRIMARY DEM only, this device's offline library is read FIRST (sampled at
+    the dataset's ~30 m grid and bilinearly resampled, see
+    _fetch_offline_dem_resampled()); live OpenTopography is used only if the
+    library does not cover every grid point. Intended solely for a DEM-only
+    wide-area sweep that the user chose as "offline library first", together
+    with run_dem_cross_check=False and max_auto_stability_candidates=0: the
+    Detection Stability re-fetches (which stay live-first) are not part of
+    that mode. The offline library IS Copernicus GLO-30, so a cross-check
+    against it would only confirm itself -- that is why the cross-check is
+    skipped there (and recorded as NOT RUN in limitations, never as passed or
+    failed). With both parameters at their defaults nothing changes: live
+    first, offline fallback, cross-check on.
 
     NDVI: real (Copernicus Sentinel Hub Statistical API, per-DEM-candidate
     core/halo check) always attempted first via ndvi_client_id/secret,
@@ -2074,23 +2146,45 @@ def run_investigation_multi_json(
     aoi = build_aoi(center, radius_m=radius_m, grid_size=grid_size)
 
     # --- DEM: real-first, offline-fallback (same pattern as investigation_mobile.py) ---
+    # The one exception is dem_offline_first=True (DEM-only offline-first sweeps
+    # only): the offline library is read first and live is the fallback. See
+    # the OFFLINE-FIRST EXCEPTION note in this function's docstring.
     live_dem_error: OpenTopographyFetchError | None = None
     dem = None
-    if api_key:
-        try:
-            dem = OpenTopographyAAIGridSource(
-                api_key, demtype=demtype, offline_data_root=offline_data_root,
-            ).fetch(aoi)
-        except OpenTopographyFetchError as exc:
-            live_dem_error = exc
-    else:
-        live_dem_error = OpenTopographyFetchError(
-            "No OpenTopography API key is configured yet -- enter your "
-            "free key (opentopography.org) to enable live real DEM fetch."
-        )
-
     used_offline_dem = False
+    used_offline_first = False
+    offline_first_miss: OfflineDataUnavailableError | None = None
+
+    if dem_offline_first:
+        try:
+            dem = _fetch_offline_dem_resampled(aoi, offline_data_root)
+            used_offline_first = True
+        except OfflineDataUnavailableError as exc:
+            offline_first_miss = exc
+
     if dem is None:
+        if api_key:
+            try:
+                dem = OpenTopographyAAIGridSource(
+                    api_key, demtype=demtype, offline_data_root=offline_data_root,
+                ).fetch(aoi)
+            except OpenTopographyFetchError as exc:
+                live_dem_error = exc
+        else:
+            live_dem_error = OpenTopographyFetchError(
+                "No OpenTopography API key is configured yet -- enter your "
+                "free key (opentopography.org) to enable live real DEM fetch."
+            )
+
+    if dem is None:
+        if offline_first_miss is not None:
+            # The library was already tried (and failed) first, so a second
+            # identical offline read would only repeat the same failure.
+            raise OpenTopographyFetchError(
+                f"The offline DEM library was tried first and did not cover "
+                f"this tile ({offline_first_miss}), and the live DEM fetch "
+                f"then failed too ({live_dem_error})."
+            ) from offline_first_miss
         used_offline_dem = True
         try:
             dem = fetch_offline_dem(aoi, offline_data_root)
@@ -2235,11 +2329,13 @@ def run_investigation_multi_json(
     # docstring above. ---
     _write_investigation_status(offline_data_root, "dem_cross_check", 0, max(1, n_candidates))
 
-    dem_cross_check_results = _run_dem_cross_check(
-        dem_candidates, aoi, api_key, offline_data_root,
-        dem_kernel_sigma_cells, dem_zscore_threshold,
-        second_dataset=dem_cross_check_dataset,
-    )
+    dem_cross_check_results: list[DemCrossCheckResult] = []
+    if run_dem_cross_check:
+        dem_cross_check_results = _run_dem_cross_check(
+            dem_candidates, aoi, api_key, offline_data_root,
+            dem_kernel_sigma_cells, dem_zscore_threshold,
+            second_dataset=dem_cross_check_dataset,
+        )
 
     _write_investigation_status(
         offline_data_root, "dem_cross_check", max(1, n_candidates), max(1, n_candidates)
@@ -2450,13 +2546,36 @@ def run_investigation_multi_json(
         tenth_evidence_type="DEM_CROSS_CHECK",
     )
 
-    if used_offline_dem:
+    if used_offline_first:
+        record.limitations.append(
+            f"{OFFLINE_FIRST_LIMITATION_PREFIX}, by design (DEM-only "
+            f"offline-first sweep) -- no live OpenTopography fetch was "
+            f"attempted for this tile. The elevations are real Copernicus DEM "
+            f"GLO-30 from this device's own offline library, a different "
+            f"dataset from a live SRTMGL1 run, so candidates are not directly "
+            f"comparable tile-for-tile with SRTMGL1-based results."
+        )
+    elif used_offline_dem:
         record.limitations.append(
             f"This run used the offline DEM library, not a live fetch -- "
             f"the live OpenTopography attempt failed with: {live_dem_error}. "
             f"If you expected a live fetch to succeed (e.g. you have "
             f"network and a valid API key), this real error message is the "
             f"actual reason it didn't."
+        )
+
+    if offline_first_miss is not None and not used_offline_first:
+        record.limitations.append(
+            f"{OFFLINE_FIRST_MISS_LIMITATION_PREFIX} and did not cover this "
+            f"tile ({offline_first_miss}); the live OpenTopography fetch was "
+            f"used instead, so this tile's DEM is a live {demtype} raster, "
+            f"unlike tiles read from the offline library."
+        )
+    if not run_dem_cross_check and dem_candidates:
+        record.limitations.append(
+            f"{DEM_CROSS_CHECK_SKIPPED_PREFIX} for this tile (skipped by "
+            f"choice in a DEM-only offline-first sweep) -- not run, which is "
+            f"NOT the same as run and confirmed, or run and failed."
         )
 
     for note in ndvi_limitations:
