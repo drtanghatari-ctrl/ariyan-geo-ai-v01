@@ -76,6 +76,21 @@ import java.io.File
  * first pass; the service itself is the actual source of truth and
  * keeps running regardless of whether this dialog is open.
  *
+ * RUN MODE + IN-TILE PROGRESS: tapping "Start / Resume" in the job-detail
+ * dialog first asks how to run -- a full run, or a DEM-ONLY SWEEP (no
+ * Copernicus calls, no stability re-fetches; roughly 2 OpenTopography
+ * calls per tile instead of up to 10). The choice is per start, passed
+ * to the service as EXTRA_DEM_ONLY; nothing about it is stored on the
+ * job. While a tile is running, the dialog also shows which stage of
+ * that tile the pipeline is in (DEM / stability / NDVI / thermal /
+ * optical / SAR / persistence / cross-check, with candidate counts) by
+ * reading investigation_status.json -- the file
+ * investigation_multi_mobile.py already writes at every stage. That file
+ * is shared with single-point runs, so it is only trusted when it was
+ * written AFTER the job's own status file's last write (i.e. during the
+ * tile now running); otherwise the stage line is hidden rather than risk
+ * showing a stale stage from some earlier run.
+ *
  * PROJECT SCOPE: uses the SAME interim stopgap MainActivity.kt's and
  * GrandProjectActivity.kt's own Grand Project persistence already use --
  * grand_project_sync.get_or_create_default_grand_project() -- since no
@@ -505,18 +520,38 @@ class WideAreaSearchActivity : AppCompatActivity() {
             val pad = (16 * density).toInt()
             setPadding(pad, pad, pad, pad)
         }
-        val scrollView = ScrollView(this).apply { addView(progressText) }
+        // The in-tile stage line lives in its OWN TextView, above the
+        // selectable text: it changes every few seconds while a tile runs,
+        // and re-assigning the selectable text that often would clear any
+        // text the user is selecting/copying.
+        val stageText = TextView(this).apply {
+            typeface = Typeface.MONOSPACE
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(this@WideAreaSearchActivity, R.color.ariyan_text_primary))
+            val pad = (16 * density).toInt()
+            setPadding(pad, pad, pad, 0)
+            visibility = View.GONE
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(stageText)
+            addView(progressText)
+        }
+        val scrollView = ScrollView(this).apply { addView(content) }
 
         val dialog = AlertDialog.Builder(this)
             .setTitle(title)
             .setView(scrollView)
             .setPositiveButton("Close", null)
-            .setNeutralButton("Start / Resume") { _, _ -> startJob(jobId) }
+            .setNeutralButton("Start / Resume") { _, _ -> chooseRunMode(jobId) }
             .create()
 
         val statusFile = File(offlineDataRoot, "wide_area_search_status_$jobId.json")
         val pollingJob: Job = lifecycleScope.launch {
             while (isActive) {
+                val stageLine = readCurrentTileStageText(statusFile) ?: ""
+                if (stageText.text.toString() != stageLine) stageText.text = stageLine
+                stageText.visibility = if (stageLine.isEmpty()) View.GONE else View.VISIBLE
                 val liveText = readWideAreaStatusText(statusFile)
                 if (liveText != null) {
                     // Only assign when changed: re-assigning identical text every
@@ -605,6 +640,81 @@ class WideAreaSearchActivity : AppCompatActivity() {
         }
     }
 
+    /** One line describing which stage of the tile that is running RIGHT
+     * NOW the pipeline is in, e.g. "in this tile: thermal checks, 12 of 26
+     * candidates done (updated 10:42:17)" -- read from
+     * investigation_status.json, which investigation_multi_mobile.py's own
+     * _write_investigation_status() writes at every stage (phase / done /
+     * total). Returns null (line hidden) unless ALL of these hold: the job
+     * file says "running"; investigation_status.json exists; it was last
+     * written at or after the job file's last write (the job file is
+     * rewritten when a tile starts and when it ends, so this means "written
+     * during the current tile", and rules out a stale file left by a
+     * single-point run or an earlier tile); and its phase is not "done".
+     * Any read/parse problem also gives null. The candidate counts are only
+     * meaningful for the per-candidate stages; the DEM stage is shown
+     * without a count. */
+    private fun readCurrentTileStageText(jobStatusFile: File): String? {
+        try {
+            if (!jobStatusFile.exists()) return null
+            val jobObj = JSONObject(jobStatusFile.readText())
+            if (jobObj.optString("phase", "") != "running") return null
+
+            val stageFile = File(offlineDataRoot, "investigation_status.json")
+            if (!stageFile.exists()) return null
+            if (stageFile.lastModified() < jobStatusFile.lastModified()) return null
+
+            val obj = JSONObject(stageFile.readText())
+            val phase = obj.optString("phase", "")
+            if (phase.isEmpty() || phase == "done") return null
+            val done = obj.optInt("done", 0)
+            val total = obj.optInt("total", 0)
+
+            val label = when (phase) {
+                "dem" -> "reading the DEM"
+                "stability" -> "stability re-checks"
+                "ndvi" -> "NDVI checks"
+                "thermal" -> "thermal checks"
+                "optical" -> "optical checks"
+                "sar" -> "SAR checks"
+                "persistence" -> "temporal persistence checks"
+                "dem_cross_check" -> "second-DEM cross-check"
+                else -> phase
+            }
+            val updated = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+                .format(java.util.Date(stageFile.lastModified()))
+            return if (phase == "dem") {
+                "in this tile: $label (updated $updated)"
+            } else {
+                "in this tile: $label, $done of $total candidates done (updated $updated)"
+            }
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    /** Asks how to run before starting: a full run, or a DEM-only sweep.
+     * Refuses up front (same rule and same Toast as startJob()) if a job is
+     * already running, so the user is not asked a question whose answer
+     * cannot be used. */
+    private fun chooseRunMode(jobId: String) {
+        if (WideAreaSearchService.isRunning) {
+            Toast.makeText(this, "A wide-area search job is already running -- let it finish first.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val options = arrayOf(
+            "Full run: DEM + all satellite checks",
+            "DEM-only sweep: skips satellite checks and stability re-fetches " +
+                "(about 2 OpenTopography calls per tile instead of up to 10, " +
+                "and no Copernicus calls)",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("How should this run?")
+            .setItems(options) { _, which -> startJob(jobId, demOnly = (which == 1)) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
     /** Starts WideAreaSearchService for one job, passing this device's
      * real saved credentials (SecureCredentialStore, the SAME store
      * MainActivity.kt already persists into) -- resumable by design,
@@ -616,7 +726,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
      * time check for OfflineDownloadService), with a plain Toast rather
      * than silently queuing or racing two jobs against the same shared
      * Copernicus token/rate limits. */
-    private fun startJob(jobId: String) {
+    private fun startJob(jobId: String, demOnly: Boolean) {
         if (WideAreaSearchService.isRunning) {
             Toast.makeText(this, "A wide-area search job is already running -- let it finish first.", Toast.LENGTH_LONG).show()
             return
@@ -628,9 +738,15 @@ class WideAreaSearchActivity : AppCompatActivity() {
             putExtra(WideAreaSearchService.EXTRA_DEMTYPE, credentialStore.demType.ifEmpty { "SRTMGL1" })
             putExtra(WideAreaSearchService.EXTRA_NDVI_CLIENT_ID, credentialStore.copernicusClientId)
             putExtra(WideAreaSearchService.EXTRA_NDVI_CLIENT_SECRET, credentialStore.copernicusClientSecret)
+            putExtra(WideAreaSearchService.EXTRA_DEM_ONLY, demOnly)
         }
         ContextCompat.startForegroundService(this, serviceIntent)
-        Toast.makeText(this, "Wide-area search started in the background.", Toast.LENGTH_LONG).show()
+        Toast.makeText(
+            this,
+            if (demOnly) "Wide-area search (DEM-only sweep) started in the background."
+            else "Wide-area search started in the background.",
+            Toast.LENGTH_LONG
+        ).show()
     }
 
     // =========================== SHARED ===========================
