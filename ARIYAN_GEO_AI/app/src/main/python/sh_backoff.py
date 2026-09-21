@@ -118,6 +118,21 @@ def stats() -> Optional[Dict[str, Any]]:
     }
 
 
+def status() -> Optional[Dict[str, Any]]:
+    """stats() plus the LIVE pause state, for progress reporting. Read-only:
+    it changes nothing. paused_now is True while the circuit breaker is
+    failing calls instantly; resume_in_s is how long until the next probe
+    call is allowed. None on a thread that is not armed."""
+    st = getattr(_tl, "state", None)
+    if st is None:
+        return None
+    out = stats() or {}
+    remaining = (st["tripped_until"] - _now()) if st["tripped"] else 0.0
+    out["paused_now"] = bool(st["tripped"]) and remaining > 0
+    out["resume_in_s"] = round(max(0.0, remaining), 0)
+    return out
+
+
 def arm() -> None:
     """Arm 429 handling for the calling thread and make sure the source
     modules are wrapped. Call disarm() in a `finally` block."""
