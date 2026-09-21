@@ -19,11 +19,27 @@ grand_project_sync.py / grand_project_db.py / wide_area_search_mobile.py
 is modified, so none of the already-confirmed on-device behaviour can be
 disturbed by adding this file.
 
+LATER EDIT (2026-09-21, land-cover flags): this file was edited ONCE
+after it was first written, only to let selection skip candidates that
+land_cover_flags.py has flagged as trees / buildings / water (see item 1b
+below). The edit is additive: skip_flagged is the LAST parameter of the
+three affected functions, and a job whose candidates were never
+land-cover checked behaves exactly as before. skip_flagged=False gives
+the original behaviour unconditionally.
+
 THE APPROVED DESIGN (2026-09-21):
 1. RANK by abs(candidate.score) (the stored DEM peak_zscore, which is
    signed; the detector itself sorts by abs). Candidates too close to
    one already chosen (or already refined) are skipped, so the ~2 m
    apart duplicates seen at Persepolis are not refined twice.
+1b. SKIP FLAGGED (added 2026-09-21): candidates that land_cover_flags has
+   flagged (tree cover + built-up >= 20% of the ~60 m window, or open
+   water) are left out of the selection, and counted in the result. They
+   are NOT deleted or changed; the user can choose to include them
+   (skip_flagged=False). A flagged candidate could still be a real buried
+   feature under an orchard or field -- the flag only says the DEM bump
+   is probably a tree stand or a building. A candidate that was never
+   land-cover checked is never skipped.
 2. RUN one small full-evidence investigation centred on each chosen
    candidate's own coordinates, stored as its OWN investigation row so
    provenance stays intact. The window is the proven 500 m / 96-cell
@@ -92,6 +108,7 @@ import dem_source_mobile
 import grand_project_db as db
 import grand_project_sync as sync
 import investigation_multi_mobile
+import land_cover_flags
 import sh_backoff
 import wide_area_search_mobile as was
 
@@ -177,10 +194,21 @@ def _abs_score(c: Dict[str, Any]) -> float:
 def select_refinement_candidates(
     db_root: str, job_id: str, n: int,
     min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
+    skip_flagged: bool = True,
 ) -> Dict[str, Any]:
     """Returns {"selected": [candidate dicts], "eligible": int,
     "already_refined": int, "skipped_near_duplicates": int,
-    "job_candidates": int}.
+    "job_candidates": int, "skip_flagged": bool, "skipped_flagged": int,
+    "skipped_flagged_by_reason": {reason: count},
+    "land_cover_unchecked": int}.
+
+    skip_flagged (default True): candidates flagged by land_cover_flags
+    (trees / buildings / water) are left out and counted in
+    "skipped_flagged". Any problem reading the flags means "nothing is
+    flagged" -- the flag can never break a refinement. "eligible" is the
+    pool AFTER this exclusion. "land_cover_unchecked" is how many of the
+    job's candidates have no land-cover row (so were NOT filtered); it is
+    0 when skip_flagged is False.
 
     Ranking is abs(score) descending; a candidate with no score ranks last
     (never dropped). A candidate is skipped as a near-duplicate when it is
@@ -197,6 +225,30 @@ def select_refinement_candidates(
     refined_ids = _refined_candidate_ids(db_root)
     already = [c for c in candidates if c["id"] in refined_ids]
     eligible = [c for c in candidates if c["id"] not in refined_ids]
+
+    flagged: Dict[str, str] = {}
+    land_cover_unchecked = 0
+    if skip_flagged:
+        try:
+            lc = land_cover_flags.job_flags(db_root, job_id)
+            flagged = lc["flagged"]
+            land_cover_unchecked = max(0, lc["candidates"] - lc["checked"])
+        except Exception:
+            flagged = {}
+            land_cover_unchecked = 0
+    skipped_flagged = 0
+    skipped_flagged_by_reason: Dict[str, int] = {}
+    if flagged:
+        kept = []
+        for c in eligible:
+            reason = flagged.get(c["id"])
+            if reason:
+                skipped_flagged += 1
+                skipped_flagged_by_reason[reason] = skipped_flagged_by_reason.get(reason, 0) + 1
+            else:
+                kept.append(c)
+        eligible = kept
+
     eligible.sort(key=_abs_score, reverse=True)
 
     occupied = [(c["lat"], c["lon"]) for c in already
@@ -224,16 +276,22 @@ def select_refinement_candidates(
         "already_refined": len(already),
         "skipped_near_duplicates": skipped,
         "job_candidates": len(candidates),
+        "skip_flagged": bool(skip_flagged),
+        "skipped_flagged": skipped_flagged,
+        "skipped_flagged_by_reason": skipped_flagged_by_reason,
+        "land_cover_unchecked": land_cover_unchecked,
     }
 
 
 def preview_refinement_selection_json(
     db_root: str, job_id: str, n: int = 5,
     min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
+    skip_flagged: bool = True,
 ) -> str:
     """Cheap, read-only: what a Pass 2 of size n WOULD refine. For a UI
     confirmation step before spending real API budget."""
-    result = select_refinement_candidates(db_root, job_id, n, min_separation_m)
+    result = select_refinement_candidates(
+        db_root, job_id, n, min_separation_m, skip_flagged=bool(skip_flagged))
     result["selected"] = [
         {"candidate_id": c["id"], "lat": c["lat"], "lon": c["lon"], "score": c["score"]}
         for c in result["selected"]
@@ -491,8 +549,10 @@ def run_refinement_pass(
     ndvi_client_id: str = "",
     ndvi_client_secret: str = "",
     min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
+    skip_flagged: bool = True,
 ) -> Dict[str, Any]:
-    """Runs Pass 2 over the top `n` unrefined Pass 1 candidates of a job.
+    """Runs Pass 2 over the top `n` unrefined Pass 1 candidates of a job
+    (leaving out land-cover-flagged ones unless skip_flagged is False).
 
     The same throttle protections a wide-area job arms are armed here for
     the duration of the call and ALWAYS disarmed in a `finally` (Copernicus
@@ -504,7 +564,8 @@ def run_refinement_pass(
     Progress goes to wide_area_refine_status_<job_id>.json (a separate file
     from Pass 1's status file).
     """
-    selection = select_refinement_candidates(data_root, job_id, n, min_separation_m)
+    selection = select_refinement_candidates(
+        data_root, job_id, n, min_separation_m, skip_flagged=bool(skip_flagged))
     chosen = selection["selected"]
     total = len(chosen)
     job = db.get_wide_area_search_job(data_root, job_id)
@@ -573,6 +634,10 @@ def run_refinement_pass(
         "eligible_before_run": selection["eligible"],
         "already_refined_before_run": selection["already_refined"],
         "skipped_near_duplicates": selection["skipped_near_duplicates"],
+        "skip_flagged": selection["skip_flagged"],
+        "skipped_flagged": selection["skipped_flagged"],
+        "skipped_flagged_by_reason": selection["skipped_flagged_by_reason"],
+        "land_cover_unchecked": selection["land_cover_unchecked"],
         "seconds": round(time.time() - started, 1),
         "results": results,
         "copernicus_throttle": copernicus,
@@ -589,6 +654,7 @@ def run_refinement_pass_json(
     ndvi_client_id: str = "",
     ndvi_client_secret: str = "",
     min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
+    skip_flagged: bool = True,
 ) -> str:
     """Chaquopy-facing wrapper (same argument order convention as
     wide_area_search_mobile.run_wide_area_search_job). Raises
@@ -596,4 +662,5 @@ def run_refinement_pass_json(
     caller is expected to catch it, exactly like the wide-area service."""
     return json.dumps(run_refinement_pass(
         data_root, job_id, int(n), api_key, demtype,
-        ndvi_client_id, ndvi_client_secret, float(min_separation_m)), default=str)
+        ndvi_client_id, ndvi_client_secret, float(min_separation_m),
+        bool(skip_flagged)), default=str)
