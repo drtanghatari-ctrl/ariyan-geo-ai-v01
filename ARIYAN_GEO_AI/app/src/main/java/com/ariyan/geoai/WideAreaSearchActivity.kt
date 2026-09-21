@@ -773,3 +773,4 @@ class WideAreaSearchActivity : AppCompatActivity() {
         binding.buttonShowJobs.isEnabled = !loading
     }
 }
+
