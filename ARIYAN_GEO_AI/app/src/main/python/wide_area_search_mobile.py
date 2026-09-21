@@ -75,6 +75,7 @@ import geocoding_source_mobile_nominatim as geocoding
 import investigation_multi_mobile
 import debate_mobile
 import dem_source_mobile
+import offline_dem_store
 import grand_project_sync
 import sh_backoff
 
@@ -535,6 +536,14 @@ def _mark_status_phase(data_root: str, job_id: str, phase: str, detail: str) -> 
 
 _HEALTH_SOURCES = ("NDVI", "Thermal", "Optical", "SAR")
 _DEM_OFFLINE_PREFIX = "This run used the offline DEM library"
+# Wording owned by investigation_multi_mobile.py (shared constants, so the two
+# files cannot silently drift apart):
+_DEM_OFFLINE_FIRST_PREFIX = investigation_multi_mobile.OFFLINE_FIRST_LIMITATION_PREFIX
+_DEM_OFFLINE_FIRST_MISS_PREFIX = investigation_multi_mobile.OFFLINE_FIRST_MISS_LIMITATION_PREFIX
+# In an offline-first DEM-only sweep the decoded offline DEM tiles are dropped
+# every this-many tiles so memory cannot grow across a province-sized job
+# (offline_dem_store keeps every opened tile in a module-level cache).
+OFFLINE_TILE_CACHE_CLEAR_EVERY_TILES = 20
 _DEM_REASON_RE = re.compile(
     r"the live OpenTopography attempt failed with: (.*?)\. If you expected", re.S)
 _NDVI_ALL_PREFIX = "Live per-candidate NDVI checks were unavailable for every candidate this run"
@@ -590,21 +599,33 @@ def _short_sat_reason(text: str) -> str:
 def parse_tile_health(investigation_json: str) -> Optional[Dict[str, Any]]:
     """Reads one tile's own recorded `limitations` and returns
     {"dem_offline": bool, "dem_reason": str|None,
+     "dem_offline_first": bool, "dem_offline_first_miss": bool,
      "sources": {name: "all"|"some"}, "reasons": {name: str},
      "ndvi_offline_composite": bool, "ndvi_no_data": bool}
-    or None if the JSON can't be read. Never raises."""
+    or None if the JSON can't be read. Never raises.
+
+    "dem_offline" = the offline library was used as a FALLBACK after a failed
+    live fetch. "dem_offline_first" = it was read FIRST by choice (DEM-only
+    offline-first sweep). "dem_offline_first_miss" = it was tried first, did
+    not cover the tile, and a live fetch was used instead."""
     try:
         payload = json.loads(investigation_json)
         notes = payload.get("limitations") if isinstance(payload, dict) else None
         if not isinstance(notes, list):
             return None
         out: Dict[str, Any] = {
-            "dem_offline": False, "dem_reason": None, "sources": {}, "reasons": {},
+            "dem_offline": False, "dem_reason": None,
+            "dem_offline_first": False, "dem_offline_first_miss": False,
+            "sources": {}, "reasons": {},
             "ndvi_offline_composite": False, "ndvi_no_data": False,
         }
         for note in notes:
             if not isinstance(note, str):
                 continue
+            if note.startswith(_DEM_OFFLINE_FIRST_PREFIX):
+                out["dem_offline_first"] = True
+            if note.startswith(_DEM_OFFLINE_FIRST_MISS_PREFIX):
+                out["dem_offline_first_miss"] = True
             if note.startswith(_DEM_OFFLINE_PREFIX):
                 out["dem_offline"] = True
                 m = _DEM_REASON_RE.search(note)
@@ -631,8 +652,12 @@ def parse_tile_health(investigation_json: str) -> Optional[Dict[str, Any]]:
 class _RunHealth:
     """Running tally of what happened across the tiles processed in THIS run."""
 
-    def __init__(self, dem_only: bool = False) -> None:
+    def __init__(self, dem_only: bool = False, dem_offline_first: bool = False) -> None:
         self.dem_only = bool(dem_only)   # DEM-only sweep: satellite checks skipped by choice
+        # DEM-only sweep that read the offline library first, by choice:
+        self.dem_offline_first_mode = bool(dem_only) and bool(dem_offline_first)
+        self.dem_from_library_first = 0   # tiles whose DEM was read from the library first
+        self.dem_library_miss = 0         # tried library first, no coverage, went live
         self.tiles = 0          # tiles processed this run (finished or failed)
         self.failed = 0
         self.checked = 0        # finished tiles whose limitations could be read
@@ -651,6 +676,10 @@ class _RunHealth:
             if not tile_health:
                 return
             self.checked += 1
+            if tile_health.get("dem_offline_first"):
+                self.dem_from_library_first += 1
+            if tile_health.get("dem_offline_first_miss"):
+                self.dem_library_miss += 1
             if tile_health.get("dem_offline"):
                 self.dem_offline += 1
                 reason = tile_health.get("dem_reason") or "reason not recorded"
@@ -699,16 +728,31 @@ def _render_run_health(tally: "_RunHealth") -> str:
                 "MODE: DEM-only sweep -- satellite checks and stability "
                 "re-fetches are skipped by choice (not run, which is NOT the "
                 "same as checked and nothing found)")
+            if tally.dem_offline_first_mode:
+                lines.append(
+                    "DEM SOURCE: offline library first (Copernicus DEM GLO-30, "
+                    "chosen for this run); live OpenTopography only where the "
+                    "library has no coverage. The second-DEM cross-check is "
+                    "skipped by choice (not run).")
         lines.append(f"tiles: {tally.tiles} processed, {tally.failed} failed")
         lines.append("")
         lines.append("DEM elevation")
         if tally.checked == 0:
             lines.append("  no tile finished yet")
         else:
-            live = tally.checked - tally.dem_offline
-            lines.append(f"  live: {live} tiles, offline library: {tally.dem_offline} tiles")
+            live = tally.checked - tally.dem_offline - tally.dem_from_library_first
+            if tally.dem_offline_first_mode:
+                lines.append(
+                    f"  offline library first (by choice): {tally.dem_from_library_first} tiles, "
+                    f"live: {live} tiles, offline after a failed live fetch: {tally.dem_offline} tiles")
+            else:
+                lines.append(f"  live: {live} tiles, offline library: {tally.dem_offline} tiles")
             for reason, count in sorted(tally.dem_reasons.items(), key=lambda kv: -kv[1]):
                 lines.append(f"  why offline: {reason} ({count})")
+            if tally.dem_library_miss:
+                lines.append(
+                    f"  offline library had no coverage on {tally.dem_library_miss} tile(s): "
+                    "live fetch used instead")
         dem = dem_source_mobile.live_dem_quota_status()
         if dem is not None:
             if dem["suspended_now"]:
@@ -772,7 +816,17 @@ def _summarise_run_health(tally: "_RunHealth") -> Optional[str]:
         parts: List[str] = []
         n = tally.checked
         if n:
-            if tally.dem_offline == 0:
+            if tally.dem_from_library_first:
+                scope = (f"all {n} tiles" if tally.dem_from_library_first == n
+                         else f"{tally.dem_from_library_first} of {n} tiles")
+                parts.append(f"DEM read from the offline library first, by choice, on {scope}")
+                if tally.dem_library_miss:
+                    parts.append(
+                        f"{tally.dem_library_miss} tile(s) not covered by the library, fetched live")
+                if tally.dem_offline:
+                    parts.append(f"{tally.dem_offline} tile(s) fell back to the offline library "
+                                 "after a failed live fetch")
+            elif tally.dem_offline == 0:
                 parts.append(f"DEM live on all {n} tiles")
             else:
                 scope = (f"all {n} tiles" if tally.dem_offline == n
@@ -837,6 +891,14 @@ def derive_analysis_window(tile_size_m: float) -> Dict[str, Any]:
     }
 
 
+def _clear_offline_tile_cache() -> None:
+    """Drops offline_dem_store's cached, decoded DEM tiles. Never raises."""
+    try:
+        offline_dem_store.clear_tile_cache()
+    except Exception:
+        pass
+
+
 def _attach_throttle_report(
     result: str, copernicus: Any, live_dem: Any, health_summary: Optional[str] = None,
 ) -> str:
@@ -866,6 +928,7 @@ def run_wide_area_search_job(
     ndvi_client_id: str = "",
     ndvi_client_secret: str = "",
     dem_only: bool = False,
+    dem_offline_first: bool = False,
 ) -> str:
     """Runs (or RESUMES) one wide-area search job -- the full behavioural
     description is on _run_wide_area_search_job_impl() below.
@@ -874,6 +937,14 @@ def run_wide_area_search_job(
     _run_wide_area_search_job_impl()): no Copernicus calls at all and no
     Detection Stability re-fetches, so each tile costs about 2 live
     OpenTopography calls instead of up to 10.
+
+    `dem_offline_first=True` (only honoured together with dem_only=True; a
+    full run ignores it) reads each tile's DEM from this device's offline
+    library FIRST and goes live only where the library has no coverage, and
+    skips the second-DEM cross-check. Default False: the normal rule
+    everywhere is ONLINE FIRST with the offline library as the fallback.
+    The offline tile cache is cleared every OFFLINE_TILE_CACHE_CLEAR_EVERY_TILES
+    tiles and always once more when the run ends, however it ends.
 
     THROTTLE HANDLING. For the duration of this call, on this thread only,
     two protections are armed and then ALWAYS disarmed in a `finally`
@@ -899,6 +970,7 @@ def run_wide_area_search_job(
         result = _run_wide_area_search_job_impl(
             data_root, job_id, radius_m, grid_size, api_key, demtype,
             ndvi_client_id, ndvi_client_secret, dem_only=bool(dem_only),
+            dem_offline_first=bool(dem_offline_first),
         )
     except BaseException as exc:
         # Leave an honest "stopped" in the status file instead of a stale
@@ -909,6 +981,8 @@ def run_wide_area_search_job(
     finally:
         copernicus = sh_backoff.disarm()
         live_dem = dem_source_mobile.disarm_live_dem_quota_breaker()
+        if dem_only and dem_offline_first:
+            _clear_offline_tile_cache()
     return _attach_throttle_report(
         result, copernicus, live_dem, getattr(_run_state, "summary", None))
 
@@ -923,6 +997,7 @@ def _run_wide_area_search_job_impl(
     ndvi_client_id: str = "",
     ndvi_client_secret: str = "",
     dem_only: bool = False,
+    dem_offline_first: bool = False,
 ) -> str:
     """Runs (or RESUMES) one wide-area search job.
 
@@ -948,6 +1023,21 @@ def _run_wide_area_search_job_impl(
     Note that in the offline-library area (Iran) an offline NDVI fallback
     may still be recorded for a tile -- that is local data, not a live
     call.
+
+    OFFLINE-FIRST DEM (`dem_offline_first=True`, honoured ONLY when
+    dem_only=True): the ONE exception to this app's online-first rule. Each
+    tile's primary DEM is read from the offline library first (real
+    Copernicus DEM GLO-30, sampled at ~30 m and bilinearly resampled like a
+    live raster -- see investigation_multi_mobile._fetch_offline_dem_resampled)
+    and a live OpenTopography fetch is made only if the library does not
+    cover the whole tile. The second-DEM cross-check is skipped (the library
+    IS Copernicus GLO-30, so it would only confirm itself) and recorded as
+    not run. Every tile's limitations say which way its DEM was obtained, and
+    each tile's objective says so too. It is chosen per RUN in the run-mode
+    dialog, never stored on the job and never the default, so simply choosing
+    the plain DEM-only or the full-run option next time is all it takes to be
+    back to online first. Different DEM datasets make tiles from the two
+    modes not directly comparable, so prefer one mode per job.
 
     ANALYSIS-WINDOW / COVERAGE FIX: `radius_m` <= 0 and `grid_size` <= 0
     (the defaults) now mean "size this tile's analysis window from the
@@ -1039,6 +1129,11 @@ def _run_wide_area_search_job_impl(
     investigation_extra_kwargs: Dict[str, Any] = (
         {"max_auto_stability_candidates": 0} if dem_only else {}
     )
+    offline_first = bool(dem_only) and bool(dem_offline_first)
+    if offline_first:
+        # See OFFLINE-FIRST DEM above. Only ever set for a DEM-only sweep.
+        investigation_extra_kwargs["dem_offline_first"] = True
+        investigation_extra_kwargs["run_dem_cross_check"] = False
 
     job = db.get_wide_area_search_job(data_root, job_id)
     if job is None:
@@ -1072,7 +1167,7 @@ def _run_wide_area_search_job_impl(
     total = len(all_tiles)
     already_done = total - len(pending_tiles)
 
-    tally = _RunHealth(dem_only=bool(dem_only))
+    tally = _RunHealth(dem_only=bool(dem_only), dem_offline_first=offline_first)
 
     _write_wide_area_status(
         data_root, job_id, already_done, total, "starting",
@@ -1126,8 +1221,12 @@ def _run_wide_area_search_job_impl(
                     f"tile {tile_index + 1}/{total} "
                     f"(analysis radius {radius_m:.0f} m, "
                     f"{grid_size}x{grid_size} grid, {cell_size_m:.1f} m cells)"
-                    + (" -- DEM-only sweep (satellite checks and stability "
-                       "re-fetches skipped by choice)" if dem_only else "")
+                    + ((" -- DEM-only sweep (satellite checks and stability "
+                        "re-fetches skipped by choice; second-DEM cross-check "
+                        "skipped and DEM read from the offline library first)"
+                        if offline_first else
+                        " -- DEM-only sweep (satellite checks and stability "
+                        "re-fetches skipped by choice)") if dem_only else "")
                 ),
             )
             db.mark_tile_done(data_root, tile_id, result["investigation_id"])
@@ -1136,6 +1235,9 @@ def _run_wide_area_search_job_impl(
         except Exception as exc:
             db.mark_tile_failed(data_root, tile_id, f"{type(exc).__name__}: {exc}")
             tally.add_failed()
+
+        if offline_first and (i + 1) % OFFLINE_TILE_CACHE_CLEAR_EVERY_TILES == 0:
+            _clear_offline_tile_cache()   # never raises
 
         _write_wide_area_status(
             data_root, job_id, already_done + i + 1, total,
@@ -1155,4 +1257,5 @@ def _run_wide_area_search_job_impl(
 
     final_payload: Dict[str, Any] = dict(progress)
     final_payload["dem_only"] = bool(dem_only)
+    final_payload["dem_offline_first"] = offline_first
     return json.dumps(final_payload)
