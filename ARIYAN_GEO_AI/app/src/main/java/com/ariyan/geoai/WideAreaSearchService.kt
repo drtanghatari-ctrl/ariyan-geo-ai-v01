@@ -76,6 +76,13 @@ class WideAreaSearchService : Service() {
         // not stored on the job; absent/false = the normal full run.
         const val EXTRA_DEM_ONLY = "dem_only"
 
+        // true (only together with EXTRA_DEM_ONLY) = read each tile's DEM
+        // from the offline library FIRST and skip the second-DEM cross-check
+        // (see wide_area_search_mobile's OFFLINE-FIRST DEM note). Chosen per
+        // START in WideAreaSearchActivity's run-mode dialog, never stored on
+        // the job; absent/false = the normal online-first behaviour.
+        const val EXTRA_DEM_OFFLINE_FIRST = "dem_offline_first"
+
         // > 0 = run PASS 2 (grand_project_refinement) on the top N Pass 1
         // candidates of this job instead of the wide-area search; absent/0
         // = the normal search start. See the class doc.
@@ -133,6 +140,7 @@ class WideAreaSearchService : Service() {
         val ndviClientId = intent.getStringExtra(EXTRA_NDVI_CLIENT_ID) ?: ""
         val ndviClientSecret = intent.getStringExtra(EXTRA_NDVI_CLIENT_SECRET) ?: ""
         val demOnly = intent.getBooleanExtra(EXTRA_DEM_ONLY, false)
+        val demOfflineFirst = demOnly && intent.getBooleanExtra(EXTRA_DEM_OFFLINE_FIRST, false)
         val refineTopN = intent.getIntExtra(EXTRA_REFINE_TOP_N, 0)
         val isRefinement = refineTopN > 0
 
@@ -152,9 +160,10 @@ class WideAreaSearchService : Service() {
             startForeground(
                 NOTIFICATION_ID,
                 buildNotification(
-                    if (isRefinement) "Starting Pass 2 refinement of the top $refineTopN candidates…"
-                    else if (demOnly) "Starting wide-area search (DEM-only sweep)…"
-                    else "Starting wide-area search…"
+                    if (isRefinement) "Starting Pass 2 refinement of the top $refineTopN candidatesâ€¦"
+                    else if (demOfflineFirst) "Starting wide-area search (DEM-only sweep, offline library first)â€¦"
+                    else if (demOnly) "Starting wide-area search (DEM-only sweep)â€¦"
+                    else "Starting wide-area searchâ€¦"
                 )
             )
             acquireWakeLock()
@@ -194,6 +203,7 @@ class WideAreaSearchService : Service() {
                         Kwarg("ndvi_client_id", ndviClientId),
                         Kwarg("ndvi_client_secret", ndviClientSecret),
                         Kwarg("dem_only", demOnly),
+                        Kwarg("dem_offline_first", demOfflineFirst),
                     ).toString()
                 }
                 sendBroadcast(Intent(ACTION_JOB_FINISHED).apply {
@@ -271,7 +281,7 @@ class WideAreaSearchService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("ARIYAN GEO AI — wide-area search")
+            .setContentTitle("ARIYAN GEO AI â€” wide-area search")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setOngoing(true)
