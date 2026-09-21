@@ -59,6 +59,13 @@ class WideAreaSearchService : Service() {
         const val EXTRA_NDVI_CLIENT_ID = "ndvi_client_id"
         const val EXTRA_NDVI_CLIENT_SECRET = "ndvi_client_secret"
 
+        // true = run this start as a DEM-ONLY SWEEP (see
+        // wide_area_search_mobile._run_wide_area_search_job_impl()'s own
+        // DEM-ONLY SWEEP note): no Copernicus calls and no Detection
+        // Stability re-fetches. Chosen per START in WideAreaSearchActivity,
+        // not stored on the job; absent/false = the normal full run.
+        const val EXTRA_DEM_ONLY = "dem_only"
+
         const val ACTION_JOB_FINISHED = "com.ariyan.geoai.WIDE_AREA_SEARCH_FINISHED"
         const val ACTION_JOB_FAILED = "com.ariyan.geoai.WIDE_AREA_SEARCH_FAILED"
         const val EXTRA_RESULT_JSON = "result_json"
@@ -106,6 +113,7 @@ class WideAreaSearchService : Service() {
         val demType = intent.getStringExtra(EXTRA_DEMTYPE) ?: "SRTMGL1"
         val ndviClientId = intent.getStringExtra(EXTRA_NDVI_CLIENT_ID) ?: ""
         val ndviClientSecret = intent.getStringExtra(EXTRA_NDVI_CLIENT_SECRET) ?: ""
+        val demOnly = intent.getBooleanExtra(EXTRA_DEM_ONLY, false)
 
         if (!running.compareAndSet(false, true)) {
             reportFailure(jobId, "Another wide-area search job is already running -- wait for it to finish, or stop it first.")
@@ -120,7 +128,13 @@ class WideAreaSearchService : Service() {
         // here would be invisible to the user -- every failure mode is
         // routed through the same broadcast every other failure uses.
         try {
-            startForeground(NOTIFICATION_ID, buildNotification("Starting wide-area search…"))
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification(
+                    if (demOnly) "Starting wide-area search (DEM-only sweep)…"
+                    else "Starting wide-area search…"
+                )
+            )
             acquireWakeLock()
         } catch (t: Throwable) {
             Log.e("WideAreaSearchService", "startForeground/acquireWakeLock failed for job $jobId", t)
@@ -143,6 +157,7 @@ class WideAreaSearchService : Service() {
                     Kwarg("demtype", demType),
                     Kwarg("ndvi_client_id", ndviClientId),
                     Kwarg("ndvi_client_secret", ndviClientSecret),
+                    Kwarg("dem_only", demOnly),
                 ).toString()
                 sendBroadcast(Intent(ACTION_JOB_FINISHED).apply {
                     setPackage(packageName)
