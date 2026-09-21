@@ -81,7 +81,10 @@ import java.io.File
  * Copernicus calls, no stability re-fetches; roughly 2 OpenTopography
  * calls per tile instead of up to 10). The choice is per start, passed
  * to the service as EXTRA_DEM_ONLY; nothing about it is stored on the
- * job. While a tile is running, the dialog also shows which stage of
+ * job. A third choice, "DEM-only sweep, offline library first", also sets
+ * EXTRA_DEM_OFFLINE_FIRST (offline DEM library read first, cross-check
+ * skipped); it is never the default -- plain DEM-only and full runs stay
+ * online first. While a tile is running, the dialog also shows which stage of
  * that tile the pipeline is in (DEM / stability / NDVI / thermal /
  * optical / SAR / persistence / cross-check, with candidate counts) by
  * reading investigation_status.json -- the file
@@ -540,7 +543,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
     private fun showJobDetail(jobId: String, title: String) {
         val density = resources.displayMetrics.density
         val progressText = TextView(this).apply {
-            text = "Loading…"
+            text = "Loadingâ€¦"
             typeface = Typeface.MONOSPACE
             textSize = 12f
             setTextIsSelectable(true)
@@ -572,7 +575,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
             .setView(scrollView)
             .setPositiveButton("Close", null)
             .setNeutralButton("Start / Resume") { _, _ -> chooseRunMode(jobId) }
-            .setNegativeButton("Refine top N…") { _, _ -> chooseRefineCount(jobId) }
+            .setNegativeButton("Refine top Nâ€¦") { _, _ -> chooseRefineCount(jobId) }
             .create()
 
         val statusFile = File(offlineDataRoot, "wide_area_search_status_$jobId.json")
@@ -746,10 +749,16 @@ class WideAreaSearchActivity : AppCompatActivity() {
             "DEM-only sweep: skips satellite checks and stability re-fetches " +
                 "(about 2 OpenTopography calls per tile instead of up to 10, " +
                 "and no Copernicus calls)",
+            "DEM-only sweep, offline library first: as above, but reads elevation " +
+                "from the offline library first (live OpenTopography only where the " +
+                "library has no coverage) and skips the second-DEM cross-check -- " +
+                "saves the OpenTopography quota",
         )
         AlertDialog.Builder(this)
             .setTitle("How should this run?")
-            .setItems(options) { _, which -> startJob(jobId, demOnly = (which == 1)) }
+            .setItems(options) { _, which ->
+                startJob(jobId, demOnly = (which >= 1), demOfflineFirst = (which == 2))
+            }
             .setNegativeButton("Cancel", null)
             .show()
     }
@@ -765,7 +774,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
      * time check for OfflineDownloadService), with a plain Toast rather
      * than silently queuing or racing two jobs against the same shared
      * Copernicus token/rate limits. */
-    private fun startJob(jobId: String, demOnly: Boolean) {
+    private fun startJob(jobId: String, demOnly: Boolean, demOfflineFirst: Boolean = false) {
         if (WideAreaSearchService.isRunning) {
             Toast.makeText(this, "A wide-area search job is already running -- let it finish first.", Toast.LENGTH_LONG).show()
             return
@@ -778,11 +787,13 @@ class WideAreaSearchActivity : AppCompatActivity() {
             putExtra(WideAreaSearchService.EXTRA_NDVI_CLIENT_ID, credentialStore.copernicusClientId)
             putExtra(WideAreaSearchService.EXTRA_NDVI_CLIENT_SECRET, credentialStore.copernicusClientSecret)
             putExtra(WideAreaSearchService.EXTRA_DEM_ONLY, demOnly)
+            putExtra(WideAreaSearchService.EXTRA_DEM_OFFLINE_FIRST, demOnly && demOfflineFirst)
         }
         ContextCompat.startForegroundService(this, serviceIntent)
         Toast.makeText(
             this,
-            if (demOnly) "Wide-area search (DEM-only sweep) started in the background."
+            if (demOnly && demOfflineFirst) "Wide-area search (DEM-only sweep, offline library first) started in the background."
+            else if (demOnly) "Wide-area search (DEM-only sweep) started in the background."
             else "Wide-area search started in the background.",
             Toast.LENGTH_LONG
         ).show()
