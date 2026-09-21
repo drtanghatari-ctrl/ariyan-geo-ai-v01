@@ -236,13 +236,26 @@ def _parse_layout(f) -> _TiffLayout:
 
 
 def _undo_floatingpoint_predictor(tile: np.ndarray) -> np.ndarray:
+    """Undoes TIFF Predictor=3 (floating-point horizontal differencing).
+
+    FIX (2026-09-21, found by comparing this reader against rasterio on
+    the byte-identical real Copernicus tile N33_E044): the byte-wise
+    differencing of Predictor=3 runs across the WHOLE ROW of
+    tile_width*4 shuffled bytes as one continuous sequence (libtiff's
+    fpAcc does exactly this), and only AFTER that are the four byte
+    planes interleaved back into float32 values. The earlier version
+    accumulated each of the four byte planes on its own, restarting at
+    every plane boundary, which returns wrong elevations (errors of tens
+    of metres) for most tiles. Its old synthetic round-trip test used
+    an encoder built on the same wrong assumption, so it passed anyway.
+    The sum is taken modulo 256 by accumulating directly in uint8."""
     tile_height, row_bytes = tile.shape
     tile_width = row_bytes // 4
     out = np.empty((tile_height, tile_width), dtype='>f4')
     for row in range(tile_height):
-        planes = tile[row].reshape(4, tile_width)
-        undone = np.cumsum(planes.astype(np.uint16), axis=1).astype(np.uint8)
-        buf = undone.T.copy()
+        undone = np.cumsum(tile[row], dtype=np.uint8)
+        planes = undone.reshape(4, tile_width)
+        buf = planes.T.copy()
         out[row] = np.frombuffer(buf.tobytes(), dtype='>f4')
     return out.astype(np.float32)
 
