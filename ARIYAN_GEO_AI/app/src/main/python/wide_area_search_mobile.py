@@ -1259,3 +1259,4 @@ def _run_wide_area_search_job_impl(
     final_payload["dem_only"] = bool(dem_only)
     final_payload["dem_offline_first"] = offline_first
     return json.dumps(final_payload)
+
