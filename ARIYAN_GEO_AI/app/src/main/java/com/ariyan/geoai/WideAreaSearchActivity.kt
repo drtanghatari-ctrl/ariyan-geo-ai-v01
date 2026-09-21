@@ -1036,3 +1036,4 @@ class WideAreaSearchActivity : AppCompatActivity() {
     }
 }
 
+
