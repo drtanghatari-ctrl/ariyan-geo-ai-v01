@@ -88,8 +88,9 @@ import java.io.File
  * to pick a suggestion from; see wide_area_search_mobile.py's own module
  * doc for why this is expected to be a thin addition once that picker
  * UI exists, not a new geocoding/geometry capability. Also not built: a
- * radius_m/grid_size override per job (uses this app's existing single-
- * point investigation defaults, 500m/96, for every tile).
+ * radius_m/grid_size override per job -- the analysis window is derived
+ * from each job's tile size by wide_area_search_mobile.derive_analysis_window()
+ * (e.g. 1 km tiles -> 750 m radius, 144x144 grid, 10.4 m cells).
  */
 class WideAreaSearchActivity : AppCompatActivity() {
 
@@ -123,7 +124,22 @@ class WideAreaSearchActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 WideAreaSearchService.ACTION_JOB_FINISHED -> {
-                    Toast.makeText(this@WideAreaSearchActivity, "Wide-area search job finished.", Toast.LENGTH_LONG).show()
+                    // The job's result JSON carries a one-line "health_summary"
+                    // (e.g. why tiles used the offline DEM library) -- see
+                    // wide_area_search_mobile.py. Best-effort: an absent or
+                    // unreadable summary just gives the plain message.
+                    val healthSummary = try {
+                        JSONObject(intent.getStringExtra(WideAreaSearchService.EXTRA_RESULT_JSON) ?: "{}")
+                            .optString("health_summary", "")
+                    } catch (e: Exception) {
+                        ""
+                    }
+                    val finishedMessage = if (healthSummary.isNotEmpty()) {
+                        "Wide-area search job finished. $healthSummary"
+                    } else {
+                        "Wide-area search job finished."
+                    }
+                    Toast.makeText(this@WideAreaSearchActivity, finishedMessage, Toast.LENGTH_LONG).show()
                     if (binding.containerJobs.visibility == View.VISIBLE) loadJobsTab()
                 }
                 WideAreaSearchService.ACTION_JOB_FAILED -> {
@@ -503,7 +519,9 @@ class WideAreaSearchActivity : AppCompatActivity() {
             while (isActive) {
                 val liveText = readWideAreaStatusText(statusFile)
                 if (liveText != null) {
-                    progressText.text = liveText
+                    // Only assign when changed: re-assigning identical text every
+                    // second would clear any text the user is selecting/copying.
+                    if (progressText.text.toString() != liveText) progressText.text = liveText
                 } else {
                     refreshJobDetailTextFromDb(jobId, progressText)
                 }
@@ -553,14 +571,35 @@ class WideAreaSearchActivity : AppCompatActivity() {
      * mirroring MainActivity.kt's own readInvestigationProgressText()
      * exactly, just against this project's per-job status shape
      * (phase/done/total/detail) instead of the single-investigation
-     * one. */
+     * one. Also shows the optional "health" text the job writes -- the
+     * run-health report (why tiles used the offline DEM library, which
+     * satellite checks were unavailable, live rate-limit/quota pause
+     * state) -- and, while running, the time of the last update, so a
+     * slow tile (rate-limit retry waits can take minutes) is
+     * distinguishable from a job that has stopped. */
     private fun readWideAreaStatusText(file: File): String? {
         if (!file.exists()) return null
         return try {
             val obj = JSONObject(file.readText())
-            "phase: ${obj.optString("phase", "?")}\n" +
-                "done: ${obj.optInt("done", 0)} / ${obj.optInt("total", 0)}\n" +
-                obj.optString("detail", "")
+            val phase = obj.optString("phase", "?")
+            val health = obj.optString("health", "")
+            buildString {
+                append("phase: ").append(phase).append("\n")
+                append("done: ").append(obj.optInt("done", 0))
+                append(" / ").append(obj.optInt("total", 0)).append("\n")
+                append(obj.optString("detail", ""))
+                if (phase == "running") {
+                    // Absolute time (not "N s ago") so the text only changes when
+                    // the job writes a new update, which keeps selection/copy usable.
+                    val updated = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+                        .format(java.util.Date(file.lastModified()))
+                    append("\n(last update ").append(updated).append(")")
+                }
+                if (health.isNotEmpty()) {
+                    append("\n\n")
+                    append(health)
+                }
+            }
         } catch (e: Exception) {
             null
         }
