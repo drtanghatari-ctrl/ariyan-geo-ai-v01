@@ -46,6 +46,16 @@ import kotlin.concurrent.thread
  * one left off (e.g. if this service was killed mid-run and the user
  * taps Resume in WideAreaSearchActivity later). This service is
  * therefore safe to start again for the same job_id at any time.
+ *
+ * PASS 2 (REFINEMENT) USES THIS SAME SERVICE: when EXTRA_REFINE_TOP_N is
+ * greater than 0, this start runs grand_project_refinement.
+ * run_refinement_pass_json() for that job instead of the wide-area search
+ * -- a full-evidence re-investigation of the top N Pass 1 candidates.
+ * Sharing the service keeps the one-job-at-a-time rule (one shared
+ * OpenTopography quota and Copernicus token), the foreground
+ * notification and the wake lock exactly as they already are. The
+ * finished/failed broadcasts carry EXTRA_IS_REFINEMENT so the Activity
+ * can word its message for a refinement rather than for a search.
  */
 class WideAreaSearchService : Service() {
 
@@ -65,6 +75,15 @@ class WideAreaSearchService : Service() {
         // Stability re-fetches. Chosen per START in WideAreaSearchActivity,
         // not stored on the job; absent/false = the normal full run.
         const val EXTRA_DEM_ONLY = "dem_only"
+
+        // > 0 = run PASS 2 (grand_project_refinement) on the top N Pass 1
+        // candidates of this job instead of the wide-area search; absent/0
+        // = the normal search start. See the class doc.
+        const val EXTRA_REFINE_TOP_N = "refine_top_n"
+
+        // Set on the finished/failed broadcasts of a Pass 2 run so the
+        // Activity words its message for a refinement.
+        const val EXTRA_IS_REFINEMENT = "is_refinement"
 
         const val ACTION_JOB_FINISHED = "com.ariyan.geoai.WIDE_AREA_SEARCH_FINISHED"
         const val ACTION_JOB_FAILED = "com.ariyan.geoai.WIDE_AREA_SEARCH_FAILED"
@@ -114,9 +133,11 @@ class WideAreaSearchService : Service() {
         val ndviClientId = intent.getStringExtra(EXTRA_NDVI_CLIENT_ID) ?: ""
         val ndviClientSecret = intent.getStringExtra(EXTRA_NDVI_CLIENT_SECRET) ?: ""
         val demOnly = intent.getBooleanExtra(EXTRA_DEM_ONLY, false)
+        val refineTopN = intent.getIntExtra(EXTRA_REFINE_TOP_N, 0)
+        val isRefinement = refineTopN > 0
 
         if (!running.compareAndSet(false, true)) {
-            reportFailure(jobId, "Another wide-area search job is already running -- wait for it to finish, or stop it first.")
+            reportFailure(jobId, "Another wide-area search job is already running -- wait for it to finish, or stop it first.", isRefinement)
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -131,7 +152,8 @@ class WideAreaSearchService : Service() {
             startForeground(
                 NOTIFICATION_ID,
                 buildNotification(
-                    if (demOnly) "Starting wide-area search (DEM-only sweep)…"
+                    if (isRefinement) "Starting Pass 2 refinement of the top $refineTopN candidates…"
+                    else if (demOnly) "Starting wide-area search (DEM-only sweep)…"
                     else "Starting wide-area search…"
                 )
             )
@@ -139,7 +161,7 @@ class WideAreaSearchService : Service() {
         } catch (t: Throwable) {
             Log.e("WideAreaSearchService", "startForeground/acquireWakeLock failed for job $jobId", t)
             running.set(false)
-            reportFailure(jobId, "Foreground-service start failed: ${t.javaClass.simpleName}: ${t.message}\n${t.stackTraceToString().take(1500)}")
+            reportFailure(jobId, "Foreground-service start failed: ${t.javaClass.simpleName}: ${t.message}\n${t.stackTraceToString().take(1500)}", isRefinement)
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -147,22 +169,38 @@ class WideAreaSearchService : Service() {
         thread(name = "wide-area-search-$jobId") {
             try {
                 val python = Python.getInstance()
-                val module = python.getModule("wide_area_search_mobile")
-                val resultJson = module.callAttr(
-                    "run_wide_area_search_job",
-                    dataRoot, jobId,
-                    Kwarg("radius_m", radiusM),
-                    Kwarg("grid_size", gridSize),
-                    Kwarg("api_key", apiKey),
-                    Kwarg("demtype", demType),
-                    Kwarg("ndvi_client_id", ndviClientId),
-                    Kwarg("ndvi_client_secret", ndviClientSecret),
-                    Kwarg("dem_only", demOnly),
-                ).toString()
+                val resultJson = if (isRefinement) {
+                    // PASS 2: full-evidence refinement of the top N Pass 1
+                    // candidates. One candidate failing never fails the pass
+                    // (handled in Python); an unknown job id raises, and is
+                    // reported by the catch below.
+                    python.getModule("grand_project_refinement").callAttr(
+                        "run_refinement_pass_json",
+                        dataRoot, jobId,
+                        Kwarg("n", refineTopN),
+                        Kwarg("api_key", apiKey),
+                        Kwarg("demtype", demType),
+                        Kwarg("ndvi_client_id", ndviClientId),
+                        Kwarg("ndvi_client_secret", ndviClientSecret),
+                    ).toString()
+                } else {
+                    python.getModule("wide_area_search_mobile").callAttr(
+                        "run_wide_area_search_job",
+                        dataRoot, jobId,
+                        Kwarg("radius_m", radiusM),
+                        Kwarg("grid_size", gridSize),
+                        Kwarg("api_key", apiKey),
+                        Kwarg("demtype", demType),
+                        Kwarg("ndvi_client_id", ndviClientId),
+                        Kwarg("ndvi_client_secret", ndviClientSecret),
+                        Kwarg("dem_only", demOnly),
+                    ).toString()
+                }
                 sendBroadcast(Intent(ACTION_JOB_FINISHED).apply {
                     setPackage(packageName)
                     putExtra(EXTRA_JOB_ID, jobId)
                     putExtra(EXTRA_RESULT_JSON, resultJson)
+                    putExtra(EXTRA_IS_REFINEMENT, isRefinement)
                 })
             } catch (t: Throwable) {
                 // Widened to Throwable, same reasoning and same real
@@ -172,8 +210,8 @@ class WideAreaSearchService : Service() {
                 // isn't a PyException, an unexpected Kotlin exception)
                 // must still be visible to the user, not just kill
                 // this thread silently with the notification stuck.
-                Log.e("WideAreaSearchService", "Wide-area search job $jobId failed", t)
-                reportFailure(jobId, "${t.javaClass.simpleName}: ${t.message}\n${t.stackTraceToString().take(1500)}")
+                Log.e("WideAreaSearchService", "Wide-area search job $jobId failed (refinement=$isRefinement)", t)
+                reportFailure(jobId, "${t.javaClass.simpleName}: ${t.message}\n${t.stackTraceToString().take(1500)}", isRefinement)
             } finally {
                 running.set(false)
                 releaseWakeLock()
@@ -185,12 +223,13 @@ class WideAreaSearchService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun reportFailure(jobId: String?, message: String) {
+    private fun reportFailure(jobId: String?, message: String, isRefinement: Boolean = false) {
         try {
             sendBroadcast(Intent(ACTION_JOB_FAILED).apply {
                 setPackage(packageName)
                 if (jobId != null) putExtra(EXTRA_JOB_ID, jobId)
                 putExtra(EXTRA_ERROR_MESSAGE, message)
+                putExtra(EXTRA_IS_REFINEMENT, isRefinement)
             })
         } catch (t: Throwable) {
             // Broadcasting itself should never realistically throw,
