@@ -56,6 +56,12 @@ import kotlin.concurrent.thread
  * notification and the wake lock exactly as they already are. The
  * finished/failed broadcasts carry EXTRA_IS_REFINEMENT so the Activity
  * can word its message for a refinement rather than for a search.
+ *
+ * LAND-COVER FILTER: a Pass 2 start also carries EXTRA_REFINE_SKIP_FLAGGED
+ * (default true when absent). It is passed to run_refinement_pass_json as
+ * skip_flagged, so the run leaves out exactly the candidates the
+ * confirmation dialog said it would (trees / buildings / open water, see
+ * land_cover_flags.py). The service itself does no land-cover work.
  */
 class WideAreaSearchService : Service() {
 
@@ -87,6 +93,13 @@ class WideAreaSearchService : Service() {
         // candidates of this job instead of the wide-area search; absent/0
         // = the normal search start. See the class doc.
         const val EXTRA_REFINE_TOP_N = "refine_top_n"
+
+        // Only meaningful together with EXTRA_REFINE_TOP_N. true (also the
+        // value when absent) = Pass 2 leaves out candidates that
+        // land_cover_flags has flagged as trees / buildings / open water;
+        // false = include them. Chosen per START in the Activity's Pass 2
+        // confirmation dialog.
+        const val EXTRA_REFINE_SKIP_FLAGGED = "refine_skip_flagged"
 
         // Set on the finished/failed broadcasts of a Pass 2 run so the
         // Activity words its message for a refinement.
@@ -142,6 +155,7 @@ class WideAreaSearchService : Service() {
         val demOnly = intent.getBooleanExtra(EXTRA_DEM_ONLY, false)
         val demOfflineFirst = demOnly && intent.getBooleanExtra(EXTRA_DEM_OFFLINE_FIRST, false)
         val refineTopN = intent.getIntExtra(EXTRA_REFINE_TOP_N, 0)
+        val refineSkipFlagged = intent.getBooleanExtra(EXTRA_REFINE_SKIP_FLAGGED, true)
         val isRefinement = refineTopN > 0
 
         if (!running.compareAndSet(false, true)) {
@@ -191,6 +205,7 @@ class WideAreaSearchService : Service() {
                         Kwarg("demtype", demType),
                         Kwarg("ndvi_client_id", ndviClientId),
                         Kwarg("ndvi_client_secret", ndviClientSecret),
+                        Kwarg("skip_flagged", refineSkipFlagged),
                     ).toString()
                 } else {
                     python.getModule("wide_area_search_mobile").callAttr(
