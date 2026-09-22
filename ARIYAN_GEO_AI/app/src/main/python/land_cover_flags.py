@@ -15,17 +15,19 @@ would spend the daily API budget mostly on palms.
 
 WHAT THIS DOES: for each candidate it reads the ESA WorldCover 2021 v200
 10 m land-cover map (a public Cloud-Optimized GeoTIFF on AWS Open Data),
-measures what share of the ground within about 60 m is tree cover or
-built-up, and stores those shares in its OWN table. A candidate is
-FLAGGED when:
+measures what share of the ground within about 60 m is tree cover,
+built-up or open water, and stores those shares in its OWN table. A
+candidate is FLAGGED when:
   - tree cover + built-up >= TREE_BUILT_THRESHOLD (0.20) of that window, or
-  - the candidate's own pixel is open water.
+  - the candidate's own pixel is open water, or
+  - open water >= WATER_FRACTION_THRESHOLD (0.20) of that window (added
+    2026-09-22 -- see CHANGELOG below).
 FLAG, NOT DELETE: nothing is removed. Candidate rows, scores and
 evidence are never touched. The flag only lets Pass 2 skip these
 candidates (grand_project_refinement.select_refinement_candidates,
 skip_flagged=True by default), and the user can choose to include them.
-The raw shares are stored, not just the yes/no, so the threshold can be
-changed later without downloading anything again.
+The raw shares are stored, not just the yes/no, so either threshold can
+be changed later without downloading anything again.
 
 WHAT IT CANNOT DO (honest limits):
 - A real buried feature under an orchard or a field WILL be flagged too,
@@ -59,8 +61,28 @@ rule: a decoder must never assume).
 VERIFICATION STATUS: written 2026-09-21. In a sandbox, against the REAL
 N33E042 WorldCover tile over the network: decoded windows were compared
 with rasterio, and the stored shares for all 1963 ef20fd candidates were
-compared with an independent rasterio calculation. It has NOT been run
-on real hardware. Treat it as unverified on-device until it has been.
+compared with an independent rasterio calculation. The reader and the
+ORIGINAL flag_reason() (center-pixel water, tree+built window fraction)
+were run on real hardware as part of job ef20fd's 2026-09-21 Pass 2
+selection (1228 of 1963 candidates flagged).
+
+CHANGELOG:
+- 2026-09-22: added the window-based water rule (frac_water >=
+  WATER_FRACTION_THRESHOLD) to flag_reason(), and added l.frac_water to
+  the SELECT in job_flags() (it was being stored but not read back,
+  which would have made the new rule crash on the first real row).
+  Trigger: two candidates from job ef20fd's Pass 2 output (NEW #1 at
+  33.057946,44.627758 and candidate 'E' at 33.10143,44.61275) sat on the
+  narrow berm between aquaculture ponds -- non-water center pixel, but a
+  60 m window that was mostly open water -- so the original center-pixel
+  -only water rule missed both, and they were only caught by manual
+  satellite review after already consuming Pass 2 DEM budget. No reader
+  code, table schema, or existing stored row is touched by this change;
+  frac_water was already being sampled and written for every candidate,
+  just never read back for the flag decision. Sandbox-checked (ast.parse,
+  manual logic trace) only -- NOT yet run on real hardware against this
+  candidate or any other. Treat the water-fraction path specifically as
+  unverified on-device until it has been.
 """
 
 from __future__ import annotations
@@ -95,6 +117,7 @@ WINDOW_HALF_PX = 6
 # Flag rule (see the module docstring). Fractions are stored, so changing
 # these needs no new download.
 TREE_BUILT_THRESHOLD = 0.20
+WATER_FRACTION_THRESHOLD = 0.20
 WATER_CLASS = 80
 
 REASON_TREE_OR_BUILT = "tree_or_built"
@@ -417,9 +440,16 @@ def sample_fractions(reader: WorldCoverHttpTile, lat: float, lon: float,
 
 
 def flag_reason(row: Any) -> Optional[str]:
-    """The flag rule, applied to one stored row (a dict or sqlite3.Row).
-    Returns REASON_WATER, REASON_TREE_OR_BUILT or None (not flagged)."""
+    """The flag rule, applied to one stored row (a dict or sqlite3.Row,
+    must include frac_water -- see job_flags()'s SELECT). Returns
+    REASON_WATER, REASON_TREE_OR_BUILT or None (not flagged)."""
     if row["center_class"] == WATER_CLASS:
+        return REASON_WATER
+    water = row["frac_water"] or 0.0
+    if water >= WATER_FRACTION_THRESHOLD:
+        # Added 2026-09-22: catches a candidate sitting on the berm
+        # between ponds -- its own pixel need not be water for its 60 m
+        # surroundings to be mostly water. See module CHANGELOG.
         return REASON_WATER
     tree = row["frac_tree"] or 0.0
     built = row["frac_built"] or 0.0
@@ -465,7 +495,8 @@ def job_flags(db_root: str, job_id: str) -> Dict[str, Any]:
         n_candidates = len(_job_candidate_rows(conn, job_id, only_unchecked=False))
         rows = conn.execute(
             """
-            SELECT l.candidate_id, l.center_class, l.frac_tree, l.frac_built
+            SELECT l.candidate_id, l.center_class, l.frac_tree, l.frac_built,
+                   l.frac_water
             FROM candidate_land_cover l
             JOIN candidate c ON c.id = l.candidate_id
             WHERE c.investigation_id IN (
@@ -611,4 +642,5 @@ def job_land_cover_summary_json(db_root: str, job_id: str) -> str:
         "flagged_total": len(flags["flagged"]),
         "flagged_by_reason": flags["by_reason"],
         "threshold_tree_plus_built": TREE_BUILT_THRESHOLD,
+        "threshold_water_fraction": WATER_FRACTION_THRESHOLD,
     })
