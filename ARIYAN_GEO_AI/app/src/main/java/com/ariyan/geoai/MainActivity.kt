@@ -219,7 +219,7 @@ class MainActivity : AppCompatActivity() {
         credentialStore = SecureCredentialStore(this)
         if (credentialStore.activeOpenTopographyApiKey().isNotEmpty()) {
             binding.inputApiKey.setText(credentialStore.activeOpenTopographyApiKey())
-        
+        }
         if (credentialStore.demType.isNotEmpty()) {
             binding.inputDemType.setText(credentialStore.demType)
         }
