@@ -217,9 +217,9 @@ class MainActivity : AppCompatActivity() {
         // back into the input fields, so the user doesn't have to retype
         // them every session -- see SecureCredentialStore.kt.
         credentialStore = SecureCredentialStore(this)
-        if (credentialStore.openTopographyApiKey.isNotEmpty()) {
-            binding.inputApiKey.setText(credentialStore.openTopographyApiKey)
-        }
+        if (credentialStore.activeOpenTopographyApiKey().isNotEmpty()) {
+            binding.inputApiKey.setText(credentialStore.activeOpenTopographyApiKey())
+        
         if (credentialStore.demType.isNotEmpty()) {
             binding.inputDemType.setText(credentialStore.demType)
         }
@@ -364,11 +364,10 @@ class MainActivity : AppCompatActivity() {
         // Real-data-first redesign: persist whatever credentials were
         // actually entered/used for this run, so they're pre-filled next
         // time -- see SecureCredentialStore.kt.
-        credentialStore.openTopographyApiKey = apiKey
-        credentialStore.demType = demType
+       credentialStore.demType = demType
+        credentialStore.upsertOpenTopographySlot(id = "manual-primary", primaryValue = apiKey)
         if (includeNdvi) {
-            credentialStore.copernicusClientId = ndviClientId
-            credentialStore.copernicusClientSecret = ndviClientSecret
+            credentialStore.upsertCopernicusSlot(id = "manual-primary", primaryValue = ndviClientId, secondaryValue = ndviClientSecret)
         }
 
         setRunning(true)
