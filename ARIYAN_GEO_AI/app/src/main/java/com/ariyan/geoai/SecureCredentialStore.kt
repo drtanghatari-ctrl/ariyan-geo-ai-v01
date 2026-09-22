@@ -131,6 +131,29 @@ class SecureCredentialStore(context: Context) {
         get() = prefs.getString(KEY_DEM_TYPE, "") ?: ""
         set(value) = prefs.edit().putString(KEY_DEM_TYPE, value).apply()
 
+    // ---- Backward-compatible flat accessors. Other call sites across
+    // the app besides MainActivity (confirmed so far: WideAreaSearchActivity,
+    // and there may be more not yet found) still read/write the old flat
+    // property names directly. Rather than hunt down and patch every one of
+    // those call sites by hand -- and risk missing another -- these three
+    // properties keep the old names working exactly as before, just backed
+    // by the active slot underneath. Reading returns the currently active
+    // slot's value. Writing upserts the "manual-primary" slot, same as
+    // MainActivity's own save-on-Run behaviour, and leaves any other backup
+    // slots untouched. ----
+
+    var openTopographyApiKey: String
+        get() = activeOpenTopographyApiKey()
+        set(value) = upsertOpenTopographySlot(id = "manual-primary", primaryValue = value)
+
+    var copernicusClientId: String
+        get() = activeCopernicusClientId()
+        set(value) = upsertCopernicusSlot(id = "manual-primary", primaryValue = value, secondaryValue = activeCopernicusClientSecret())
+
+    var copernicusClientSecret: String
+        get() = activeCopernicusClientSecret()
+        set(value) = upsertCopernicusSlot(id = "manual-primary", primaryValue = activeCopernicusClientId(), secondaryValue = value)
+
     // ---- OpenTopography slots ----
 
     fun getOpenTopographySlots(): List<CredentialSlot> = readSlots(KEY_OPENTOPO_SLOTS)
