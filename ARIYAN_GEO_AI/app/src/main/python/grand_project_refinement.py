@@ -27,6 +27,36 @@ three affected functions, and a job whose candidates were never
 land-cover checked behaves exactly as before. skip_flagged=False gives
 the original behaviour unconditionally.
 
+LATER EDIT (2026-09-23, "refine selected candidates" + DEM source): also
+additive, with the existing top-N path unchanged apart from two new keys:
+- DEM SOURCE IS RECORDED per refinement. The marker row's detail now
+  carries "dem_source" (LIVE / OFFLINE_FALLBACK / OFFLINE_FIRST / UNKNOWN),
+  "dem_type" (the live dataset asked for, only when LIVE) and
+  "dem_live_failure_reason" (short reason, only for OFFLINE_FALLBACK). It
+  is read from the investigation's own limitations with the SAME parser
+  (wide_area_search_mobile.parse_tile_health) the completion summary
+  already used, so the two can never disagree. Before this, live vs
+  offline had to be inferred from processing-time gaps.
+- SELECTED MODE (run_selected_refinement_json): the user names candidate
+  ids (full ids or unique prefixes of at least 6 characters). They are
+  resolved ONLY against the given job's own candidates, so an id from a
+  different (for example a known-corrupted) job is refused, never
+  refined. Ambiguous or unknown references are reported, never guessed.
+  A candidate that was refined before MAY be refined again in this mode
+  (allow_repeat): the new rows are additional, separately-tagged
+  observations (their own refinement_investigation_id); nothing earlier
+  is deleted or edited, and confidence_history stays append-only.
+- REQUIRE LIVE DEM (require_live_dem, default True in selected mode,
+  False in top-N mode): before each candidate the live-DEM quota breaker
+  is checked, and if the candidate's primary DEM still came from the
+  offline library, its results are DISCARDED before anything is written
+  (no investigation row, no evidence, no marker) and the pass stops;
+  the remaining candidates are listed as not started. Reason: the offline
+  library is the same Copernicus GLO-30 the wide-area sweep was built
+  from, so an offline "reproduction" is partly the data agreeing with
+  itself. The discarded run still cost its Copernicus calls -- a known,
+  bounded waste of at most one candidate per pass.
+
 THE APPROVED DESIGN (2026-09-21):
 1. RANK by abs(candidate.score) (the stored DEM peak_zscore, which is
    signed; the detector itself sorts by abs). Candidates too close to
@@ -113,17 +143,30 @@ import sh_backoff
 import wide_area_search_mobile as was
 
 REFINEMENT_RELATION = "refinement_dem_check"
-REFINEMENT_TILE_SIZE_M = 500.0      # -> proven 500 m radius / 96-cell window
+REFINEMENT_TILE_SIZE_M = 500.0 # -> proven 500 m radius / 96-cell window
 DEFAULT_MIN_SEPARATION_M = 30.0
-MIN_MATCH_TOLERANCE_M = 30.0        # same floor as the GPR/ERT colocation rule
-MATCH_TOLERANCE_CELLS = 4.0         # same multiplier as the GPR/ERT rule
-FALLBACK_PASS1_CELL_SIZE_M = 10.4   # the tested cell size, used only if the
+MIN_MATCH_TOLERANCE_M = 30.0 # same floor as the GPR/ERT colocation rule
+MATCH_TOLERANCE_CELLS = 4.0 # same multiplier as the GPR/ERT rule
+FALLBACK_PASS1_CELL_SIZE_M = 10.4 # the tested cell size, used only if the
                                     # original investigation's own is unreadable
-_SATELLITE_DETAIL_TOLERANCE_M = 5.0  # same as grand_project_sync's own
+_SATELLITE_DETAIL_TOLERANCE_M = 5.0 # same as grand_project_sync's own
+
+
+DEM_SOURCE_LIVE = "LIVE"
+DEM_SOURCE_OFFLINE_FALLBACK = "OFFLINE_FALLBACK"
+DEM_SOURCE_OFFLINE_FIRST = "OFFLINE_FIRST"
+DEM_SOURCE_UNKNOWN = "UNKNOWN"
+MIN_ID_PREFIX_LEN = 6
+MAX_SELECTED_CANDIDATES = 20
 
 
 class RefinementError(Exception):
     """A genuine caller error (unknown job, unknown candidate)."""
+
+
+class LiveDemUnavailableError(Exception):
+    """require_live_dem was set and the live DEM could not be used for
+    this candidate. Nothing was written for it."""
 
 
 def _status_path(data_root: str, job_id: str) -> str:
@@ -182,6 +225,85 @@ def _refined_candidate_ids(db_root: str) -> set:
         return {r["candidate_id"] for r in rows}
     finally:
         conn.close()
+
+
+def _refinement_history(db_root: str, candidate_id: str) -> List[Dict[str, Any]]:
+    """Earlier refinement markers of one candidate, oldest first, as
+    {"reproduced", "match_distance_m", "dem_source"}. For markers written
+    before 2026-09-23 (no dem_source key) the source is inferred from the
+    stored limitations ONLY when they contain an offline-DEM note
+    ("..._INFERRED"); otherwise it is "NOT_RECORDED". Never raises."""
+    try:
+        conn = db.get_connection(db_root)
+        try:
+            db.initialize_schema(conn)
+            rows = conn.execute(
+                "SELECT detail_json FROM evidence_link WHERE candidate_id = ? "
+                "AND relation = ? ORDER BY id ASC",
+                (candidate_id, REFINEMENT_RELATION),
+            ).fetchall()
+        finally:
+            conn.close()
+        out = []
+        for r in rows:
+            try:
+                d = json.loads(r["detail_json"]) if r["detail_json"] else {}
+            except (TypeError, ValueError):
+                d = {}
+            src = d.get("dem_source")
+            if not src:
+                # Marker from before 2026-09-23: infer ONLY a positive
+                # offline finding from its stored limitations. No offline
+                # note is NOT proof of a live fetch, so it stays NOT_RECORDED.
+                health = was.parse_tile_health(
+                    json.dumps({"limitations": d.get("refinement_limitations") or []}))
+                if health and health.get("dem_offline_first"):
+                    src = DEM_SOURCE_OFFLINE_FIRST + "_INFERRED"
+                elif health and health.get("dem_offline"):
+                    src = DEM_SOURCE_OFFLINE_FALLBACK + "_INFERRED"
+                else:
+                    src = "NOT_RECORDED"
+            out.append({
+                "reproduced": d.get("reproduced"),
+                "match_distance_m": d.get("match_distance_m"),
+                "dem_source": src,
+            })
+        return out
+    except Exception:
+        return []
+
+
+def _dem_source_of(investigation_json: str, demtype: str) -> Dict[str, Any]:
+    """Which DEM the investigation's PRIMARY fetch actually used, read from
+    its own recorded limitations by the same parser the run-health summary
+    uses. Never raises."""
+    health = was.parse_tile_health(investigation_json)
+    if health is None:
+        return {"dem_source": DEM_SOURCE_UNKNOWN, "dem_type": None,
+                "dem_live_failure_reason": None}
+    if health.get("dem_offline_first"):
+        return {"dem_source": DEM_SOURCE_OFFLINE_FIRST, "dem_type": None,
+                "dem_live_failure_reason": None}
+    if health.get("dem_offline"):
+        return {"dem_source": DEM_SOURCE_OFFLINE_FALLBACK, "dem_type": None,
+                "dem_live_failure_reason": health.get("dem_reason")}
+    return {"dem_source": DEM_SOURCE_LIVE, "dem_type": demtype,
+            "dem_live_failure_reason": None}
+
+
+def _live_dem_blocked_reason(api_key: str) -> Optional[str]:
+    """Why a live DEM fetch cannot be attempted right now, or None."""
+    if not api_key:
+        return "no OpenTopography API key is saved on this device"
+    try:
+        status = dem_source_mobile.live_dem_quota_status()
+    except Exception:
+        status = None
+    if status and status.get("suspended_now"):
+        minutes = max(1, int(round(float(status.get("retry_in_s") or 0) / 60.0)))
+        return (f"live OpenTopography is suspended for about {minutes} min "
+                f"({status.get('reason') or 'quota or key rejected'})")
+    return None
 
 
 def _abs_score(c: Dict[str, Any]) -> float:
@@ -299,6 +421,97 @@ def preview_refinement_selection_json(
     return json.dumps(result)
 
 
+def parse_candidate_refs(text: Any) -> List[str]:
+    """Splits user input (a string, or a list of strings) into candidate
+    references: separated by whitespace, commas or semicolons, lower-cased,
+    duplicates dropped, order kept."""
+    if isinstance(text, (list, tuple)):
+        text = " ".join(str(t) for t in text)
+    raw = str(text or "").replace(",", " ").replace(";", " ").split()
+    out: List[str] = []
+    for r in raw:
+        r = r.strip().lower()
+        if r and r not in out:
+            out.append(r)
+    return out
+
+
+def resolve_candidate_refs(
+    db_root: str, job_id: str, refs: Any,
+) -> Dict[str, Any]:
+    """Resolves references to candidates OF THIS JOB ONLY. Returns
+    {"resolved": [candidate dicts, in the order given],
+     "problems": [{"ref": str, "problem": str}]}.
+    A reference must be a full id or a prefix of at least
+    MIN_ID_PREFIX_LEN characters matching exactly one of the job's
+    candidates. A reference that matches a candidate of ANOTHER job is
+    reported as such (and refused) -- never refined under this job."""
+    job = db.get_wide_area_search_job(db_root, job_id)
+    if job is None:
+        raise RefinementError(f"No wide-area search job with id {job_id!r} was found.")
+    candidates = _job_candidates(db_root, job_id)
+    refs = parse_candidate_refs(refs)
+    resolved: List[Dict[str, Any]] = []
+    problems: List[Dict[str, str]] = []
+    seen_ids: set = set()
+    for ref in refs:
+        if len(ref) < MIN_ID_PREFIX_LEN:
+            problems.append({"ref": ref, "problem":
+                             f"too short (use at least {MIN_ID_PREFIX_LEN} characters)"})
+            continue
+        matches = [c for c in candidates if str(c["id"]).lower().startswith(ref)]
+        if len(matches) == 1:
+            c = matches[0]
+            if c["id"] in seen_ids:
+                problems.append({"ref": ref, "problem": "same candidate listed twice"})
+                continue
+            seen_ids.add(c["id"])
+            resolved.append(c)
+        elif len(matches) > 1:
+            problems.append({"ref": ref, "problem":
+                             f"matches {len(matches)} candidates of this job -- type more characters"})
+        else:
+            elsewhere = False
+            try:
+                conn = db.get_connection(db_root)
+                try:
+                    db.initialize_schema(conn)
+                    row = conn.execute(
+                        "SELECT 1 FROM candidate WHERE lower(substr(id, 1, ?)) = ? LIMIT 1",
+                        (len(ref), ref),
+                    ).fetchone()
+                    elsewhere = row is not None
+                finally:
+                    conn.close()
+            except Exception:
+                elsewhere = False
+            problems.append({"ref": ref, "problem":
+                             "belongs to a different job, not refined here" if elsewhere
+                             else "no candidate with this id"})
+    if len(resolved) > MAX_SELECTED_CANDIDATES:
+        for c in resolved[MAX_SELECTED_CANDIDATES:]:
+            problems.append({"ref": str(c["id"])[:8], "problem":
+                             f"over the limit of {MAX_SELECTED_CANDIDATES} per run"})
+        resolved = resolved[:MAX_SELECTED_CANDIDATES]
+    return {"resolved": resolved, "problems": problems}
+
+
+def preview_selected_refinement_json(db_root: str, job_id: str, refs: Any) -> str:
+    """Cheap, read-only: what a selected-candidates Pass 2 WOULD refine,
+    with each candidate's earlier refinements (and their recorded DEM
+    source) so the user can see what a repeat adds."""
+    res = resolve_candidate_refs(db_root, job_id, refs)
+    selected = []
+    for c in res["resolved"]:
+        history = _refinement_history(db_root, c["id"])
+        selected.append({
+            "candidate_id": c["id"], "lat": c["lat"], "lon": c["lon"],
+            "score": c["score"], "confidence_band": c.get("confidence_band"),
+            "previous_refinements": history,
+        })
+    return json.dumps({"selected": selected, "problems": res["problems"]})
+
+
 # ============================ ONE CANDIDATE ============================
 
 def _pass1_cell_size_m(db_root: str, investigation_id: str) -> float:
@@ -331,9 +544,17 @@ def refine_candidate(
     demtype: str = "SRTMGL1",
     ndvi_client_id: str = "",
     ndvi_client_secret: str = "",
+    allow_repeat: bool = False,
+    require_live_dem: bool = False,
 ) -> Dict[str, Any]:
     """Runs ONE full-evidence refinement of an existing Pass 1 candidate
     and records the results against THAT candidate (see module docstring).
+
+    allow_repeat (default False): refine even if the candidate already has
+    a refinement marker (selected mode only). require_live_dem (default
+    False): raise LiveDemUnavailableError, having written NOTHING, if the
+    live DEM cannot be attempted or the primary DEM came from the offline
+    library.
 
     Raises RefinementError if the candidate does not exist. Any failure
     while RUNNING the investigation propagates (nothing has been written
@@ -345,8 +566,13 @@ def refine_candidate(
     cand = db.get_candidate(db_root, candidate_id)
     if cand is None:
         raise RefinementError(f"No candidate with id {candidate_id!r} was found.")
-    if candidate_id in _refined_candidate_ids(db_root):
+    previous = _refinement_history(db_root, candidate_id)
+    if previous and not allow_repeat:
         return {"candidate_id": candidate_id, "status": "ALREADY_REFINED"}
+    if require_live_dem:
+        blocked = _live_dem_blocked_reason(api_key)
+        if blocked:
+            raise LiveDemUnavailableError(blocked)
 
     grand_project_id = cand["grand_project_id"]
     lat, lon = cand["lat"], cand["lon"]
@@ -366,7 +592,16 @@ def refine_candidate(
     try:
         debate_json: Optional[str] = debate_mobile.run_debate_json(investigation_json)
     except Exception:
-        debate_json = None  # a debate failure never hides the evidence gathered
+        debate_json = None # a debate failure never hides the evidence gathered
+
+    dem_info = _dem_source_of(investigation_json, demtype)
+    if require_live_dem and dem_info["dem_source"] != DEM_SOURCE_LIVE:
+        # Checked BEFORE any write: this candidate gets no rows at all and
+        # stays exactly as it was.
+        why = dem_info.get("dem_live_failure_reason") or dem_info["dem_source"]
+        raise LiveDemUnavailableError(
+            f"the primary DEM came from the offline library ({why}); "
+            f"results discarded, nothing recorded")
 
     investigation = json.loads(investigation_json)
     debate_result = json.loads(debate_json) if debate_json else None
@@ -499,6 +734,11 @@ def refine_candidate(
             "confidence_recorded": confidence_recorded,
             "steward_note": steward_note,
             "refinement_limitations": investigation.get("limitations") or [],
+            "dem_source": dem_info["dem_source"],
+            "dem_type": dem_info["dem_type"],
+            "dem_live_failure_reason": dem_info["dem_live_failure_reason"],
+            "repeat_refinement": bool(previous),
+            "previous_refinements": len(previous),
             "note": note,
         }, refinement_investigation_id, candidate_id),
     )
@@ -507,7 +747,8 @@ def refine_candidate(
             db_root, grand_project_id, "CANDIDATE_REFINED",
             related_entity_type="candidate", related_entity_id=candidate_id,
             description=(
-                f"Pass 2 refinement finished: DEM anomaly "
+                f"Pass 2 refinement finished ({dem_info['dem_source']} DEM"
+                + (", repeat" if previous else "") + f"): DEM anomaly "
                 f"{'reproduced' if reproduced else 'not reproduced'}"
                 + (f"; satellite evidence: {', '.join(satellite_recorded)}"
                    if satellite_recorded else "")
@@ -534,39 +775,33 @@ def refine_candidate(
         "confidence_recorded": confidence_recorded,
         "confidence_band": band,
         "confidence_numeric": numeric,
-        "_investigation_json": investigation_json,   # stripped by the pass runner
+        "dem_source": dem_info["dem_source"],
+        "dem_live_failure_reason": dem_info["dem_live_failure_reason"],
+        "repeat_refinement": bool(previous),
+        "_investigation_json": investigation_json, # stripped by the pass runner
     }
 
 
 # ============================ THE PASS ============================
 
-def run_refinement_pass(
+def _run_refinement_loop(
     data_root: str,
     job_id: str,
-    n: int = 5,
-    api_key: str = "",
-    demtype: str = "SRTMGL1",
-    ndvi_client_id: str = "",
-    ndvi_client_secret: str = "",
-    min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
-    skip_flagged: bool = True,
+    chosen: List[Dict[str, Any]],
+    api_key: str,
+    demtype: str,
+    ndvi_client_id: str,
+    ndvi_client_secret: str,
+    allow_repeat: bool,
+    require_live_dem: bool,
 ) -> Dict[str, Any]:
-    """Runs Pass 2 over the top `n` unrefined Pass 1 candidates of a job
-    (leaving out land-cover-flagged ones unless skip_flagged is False).
-
-    The same throttle protections a wide-area job arms are armed here for
-    the duration of the call and ALWAYS disarmed in a `finally` (Copernicus
-    429 handling; live-OpenTopography quota breaker), so the app is back in
-    its original state however the pass ends.
-
-    One candidate's failure never fails the pass: it is counted, logged to
-    the timeline, and the candidate stays eligible for a later retry.
-    Progress goes to wide_area_refine_status_<job_id>.json (a separate file
-    from Pass 1's status file).
-    """
-    selection = select_refinement_candidates(
-        data_root, job_id, n, min_separation_m, skip_flagged=bool(skip_flagged))
-    chosen = selection["selected"]
+    """The loop shared by top-N and selected mode. Arms the same throttle
+    protections a wide-area job arms and ALWAYS disarms them in a
+    `finally`. One candidate's failure never fails the pass. With
+    require_live_dem, the first LiveDemUnavailableError STOPS the pass:
+    that candidate and every later one are listed in "not_started" (each
+    untouched, still eligible), because once live DEM is unavailable every
+    further attempt would be discarded too."""
     total = len(chosen)
     job = db.get_wide_area_search_job(data_root, job_id)
     grand_project_id = job["grand_project_id"]
@@ -574,6 +809,8 @@ def run_refinement_pass(
     tally = was._RunHealth(dem_only=False)
     results: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
+    not_started: List[Dict[str, Any]] = []
+    stopped_reason: Optional[str] = None
     started = time.time()
 
     _write_refine_status(data_root, job_id, 0, total, "starting", health=was._render_run_health(tally))
@@ -588,13 +825,28 @@ def run_refinement_pass(
             try:
                 res = refine_candidate(
                     data_root, cand["id"], api_key=api_key, demtype=demtype,
-                    ndvi_client_id=ndvi_client_id, ndvi_client_secret=ndvi_client_secret)
+                    ndvi_client_id=ndvi_client_id, ndvi_client_secret=ndvi_client_secret,
+                    allow_repeat=allow_repeat, require_live_dem=require_live_dem)
                 inv_json = res.pop("_investigation_json", None)
                 if inv_json:
-                    tally.add(was.parse_tile_health(inv_json))  # never raises
+                    tally.add(was.parse_tile_health(inv_json)) # never raises
                 else:
                     tally.add(None)
                 results.append(res)
+            except LiveDemUnavailableError as exc:
+                stopped_reason = str(exc)
+                not_started = [{"candidate_id": c["id"], "score": c.get("score")}
+                               for c in chosen[i:]]
+                try:
+                    db.log_timeline_event(
+                        data_root, grand_project_id, "REFINEMENT_STOPPED_NO_LIVE_DEM",
+                        related_entity_type="candidate", related_entity_id=cand["id"],
+                        description=(f"Pass 2 stopped before recording this candidate: "
+                                     f"live DEM required but unavailable -- {exc}")[:500],
+                    )
+                except Exception:
+                    pass
+                break
             except Exception as exc:
                 tally.add_failed()
                 failures.append({"candidate_id": cand["id"],
@@ -614,16 +866,25 @@ def run_refinement_pass(
         copernicus = sh_backoff.disarm()
         live_dem = dem_source_mobile.disarm_live_dem_quota_breaker()
 
+    if stopped_reason:
+        final_detail = f"stopped: live DEM unavailable, {len(not_started)} not started"
+    elif failures:
+        final_detail = f"done, {len(failures)} failed"
+    else:
+        final_detail = "done"
+    done_count = total - len(not_started)
     _write_refine_status(
-        data_root, job_id, total, total,
-        "done" if not failures else f"done, {len(failures)} failed",
+        data_root, job_id, done_count, total, final_detail,
         phase="complete", health=was._render_run_health(tally))
 
     refined = [r for r in results if r.get("status") == "REFINED"]
+    dem_sources: Dict[str, int] = {}
+    for r in refined:
+        key = r.get("dem_source") or DEM_SOURCE_UNKNOWN
+        dem_sources[key] = dem_sources.get(key, 0) + 1
     return {
         "job_id": job_id,
-        "requested": int(n),
-        "attempted": total,
+        "attempted": done_count,
         "refined": len(refined),
         "reproduced": sum(1 for r in refined if r.get("reproduced")),
         "not_reproduced": sum(1 for r in refined if not r.get("reproduced")),
@@ -631,6 +892,44 @@ def run_refinement_pass(
         "confidence_recorded": sum(1 for r in refined if r.get("confidence_recorded")),
         "failed": len(failures),
         "failures": failures,
+        "require_live_dem": bool(require_live_dem),
+        "stopped_no_live_dem": stopped_reason,
+        "not_started": not_started,
+        "dem_sources": dem_sources,
+        "seconds": round(time.time() - started, 1),
+        "results": results,
+        "copernicus_throttle": copernicus,
+        "opentopography_live_dem": live_dem,
+    }
+
+
+def run_refinement_pass(
+    data_root: str,
+    job_id: str,
+    n: int = 5,
+    api_key: str = "",
+    demtype: str = "SRTMGL1",
+    ndvi_client_id: str = "",
+    ndvi_client_secret: str = "",
+    min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
+    skip_flagged: bool = True,
+    require_live_dem: bool = False,
+) -> Dict[str, Any]:
+    """Runs Pass 2 over the top `n` unrefined Pass 1 candidates of a job
+    (leaving out land-cover-flagged ones unless skip_flagged is False).
+    Behaviour is unchanged from the original top-N pass unless
+    require_live_dem is set (it is not, from the UI). See
+    _run_refinement_loop() for throttle, failure and progress handling.
+    """
+    selection = select_refinement_candidates(
+        data_root, job_id, n, min_separation_m, skip_flagged=bool(skip_flagged))
+    out = _run_refinement_loop(
+        data_root, job_id, selection["selected"], api_key, demtype,
+        ndvi_client_id, ndvi_client_secret,
+        allow_repeat=False, require_live_dem=bool(require_live_dem))
+    out.update({
+        "mode": "top_n",
+        "requested": int(n),
         "eligible_before_run": selection["eligible"],
         "already_refined_before_run": selection["already_refined"],
         "skipped_near_duplicates": selection["skipped_near_duplicates"],
@@ -638,11 +937,61 @@ def run_refinement_pass(
         "skipped_flagged": selection["skipped_flagged"],
         "skipped_flagged_by_reason": selection["skipped_flagged_by_reason"],
         "land_cover_unchecked": selection["land_cover_unchecked"],
-        "seconds": round(time.time() - started, 1),
-        "results": results,
-        "copernicus_throttle": copernicus,
-        "opentopography_live_dem": live_dem,
-    }
+    })
+    return out
+
+
+def run_selected_refinement(
+    data_root: str,
+    job_id: str,
+    candidate_refs: Any,
+    api_key: str = "",
+    demtype: str = "SRTMGL1",
+    ndvi_client_id: str = "",
+    ndvi_client_secret: str = "",
+    require_live_dem: bool = True,
+) -> Dict[str, Any]:
+    """Refines exactly the named candidates of this job, in the order given,
+    including ones refined before (see the 2026-09-23 note in the module
+    docstring). No land-cover filter and no near-duplicate skipping: the
+    user chose these candidates on purpose. Unresolvable references are
+    returned in "reference_problems" and nothing is run for them.
+
+    With require_live_dem and no API key, raises RefinementError before
+    anything runs (every candidate would be discarded)."""
+    res = resolve_candidate_refs(data_root, job_id, candidate_refs)
+    if require_live_dem and not api_key and res["resolved"]:
+        raise RefinementError(
+            "Live DEM is required for this run, but no OpenTopography API key "
+            "is saved on this device.")
+    out = _run_refinement_loop(
+        data_root, job_id, res["resolved"], api_key, demtype,
+        ndvi_client_id, ndvi_client_secret,
+        allow_repeat=True, require_live_dem=bool(require_live_dem))
+    out.update({
+        "mode": "selected",
+        "requested": len(res["resolved"]) + len(res["problems"]),
+        "reference_problems": res["problems"],
+    })
+    return out
+
+
+def run_selected_refinement_json(
+    data_root: str,
+    job_id: str,
+    candidate_refs: Any,
+    api_key: str = "",
+    demtype: str = "SRTMGL1",
+    ndvi_client_id: str = "",
+    ndvi_client_secret: str = "",
+    require_live_dem: bool = True,
+) -> str:
+    """Chaquopy-facing wrapper for run_selected_refinement(). candidate_refs
+    may be one string (ids separated by spaces, commas, semicolons or new
+    lines) -- that is what the Kotlin service passes."""
+    return json.dumps(run_selected_refinement(
+        data_root, job_id, candidate_refs, api_key, demtype,
+        ndvi_client_id, ndvi_client_secret, bool(require_live_dem)), default=str)
 
 
 def run_refinement_pass_json(
