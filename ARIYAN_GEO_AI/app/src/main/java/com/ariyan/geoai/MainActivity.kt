@@ -274,6 +274,52 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** SAVE-ON-LEAVE (ADDED 2026-09-23): credentials used to be saved
+     * only inside onRunClicked() (and Copernicus only with "Include NDVI
+     * correlation" on), so keys typed here were lost unless a single-point
+     * run was started first -- and a wide-area or Pass 2 run launched
+     * afterwards silently ran without them. Now whatever is typed in the
+     * key fields is saved whenever this screen is left (opening Wide-Area
+     * Search, Grand Project, going home, etc.). onRunClicked() still saves
+     * exactly as before. */
+    override fun onPause() {
+        super.onPause()
+        saveTypedCredentials()
+    }
+
+    /** Saves only fields whose value actually CHANGED and is NOT empty:
+     * an unchanged value is not re-written (that would needlessly reset
+     * the slot's tested status), and clearing a field never wipes a saved
+     * key here -- that stays a deliberate action via Run, as before. */
+    private fun saveTypedCredentials() {
+        if (!::credentialStore.isInitialized || !::binding.isInitialized) return
+        try {
+            var changed = false
+            val apiKey = binding.inputApiKey.text?.toString()?.trim().orEmpty()
+            if (apiKey.isNotEmpty() && apiKey != credentialStore.activeOpenTopographyApiKey()) {
+                credentialStore.upsertOpenTopographySlot(id = "manual-primary", primaryValue = apiKey)
+                changed = true
+            }
+            val demType = binding.inputDemType.text?.toString()?.trim().orEmpty()
+            if (demType.isNotEmpty() && demType != credentialStore.demType) {
+                credentialStore.demType = demType
+            }
+            val clientId = binding.inputNdviClientId.text?.toString()?.trim().orEmpty()
+            val clientSecret = binding.inputNdviClientSecret.text?.toString()?.trim().orEmpty()
+            val savedId = credentialStore.copernicusClientId
+            val savedSecret = credentialStore.copernicusClientSecret
+            val newId = if (clientId.isNotEmpty()) clientId else savedId
+            val newSecret = if (clientSecret.isNotEmpty()) clientSecret else savedSecret
+            if (newId != savedId || newSecret != savedSecret) {
+                credentialStore.upsertCopernicusSlot(id = "manual-primary", primaryValue = newId, secondaryValue = newSecret)
+                changed = true
+            }
+            if (changed) toast("API keys saved")
+        } catch (e: Exception) {
+            toast("Could not save API keys: ${e.message}")
+        }
+    }
+
     /** Shows/hides the NDVI credential fields and their explanatory notes
      * based on whether "Include NDVI correlation" is on. There is no
      * longer a separate "use real NDVI" switch -- real NDVI is always
