@@ -17,6 +17,13 @@ distance tolerance and classifies each candidate as CORROBORATED
 It does not claim to know *why* they co-locate — that interpretation
 step belongs to a human investigator or a future debate/steward layer,
 not to this statistical correlation step.
+
+OVERCLAIM FIX (2026-09-23): the CORROBORATED note previously called
+co-location "genuine independent corroboration" and recommended
+"MODERATE to HIGH" confidence, contradicting the Scientific Steward's
+Confidence Ceiling (MODERATE maximum until Phase 4). It now states the
+measured co-location and defers to the Steward's confidence. Wording
+only; status tokens and the co-location test are unchanged.
 """
 from __future__ import annotations
 
@@ -98,9 +105,12 @@ def correlate_anomalies(
             note = (
                 f"{n_sources} independent evidence sources "
                 f"({', '.join(sorted(group.keys()))}) show co-located anomalies "
-                f"within {colocation_distance_m:.0f}m. This is genuine independent "
-                f"corroboration — confidence should be treated as MODERATE to HIGH, "
-                f"still pending field verification."
+                f"within {colocation_distance_m:.0f}m. Co-location is a measured "
+                f"fact, not proof of a buried feature: a shared non-archaeological "
+                f"cause (buildings, water, vegetation, irrigation or industrial "
+                f"works) can make several sources agree. The Scientific Steward's "
+                f"confidence (currently capped at MODERATE) is the governing "
+                f"value; field verification is still required."
             )
         else:
             status = "SINGLE_SOURCE"
