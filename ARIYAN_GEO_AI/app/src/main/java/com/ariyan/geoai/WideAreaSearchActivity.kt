@@ -8,8 +8,10 @@ import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import android.util.TypedValue
 import android.view.View
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -170,6 +172,17 @@ class WideAreaSearchActivity : AppCompatActivity() {
                         JSONObject(intent.getStringExtra(WideAreaSearchService.EXTRA_RESULT_JSON) ?: "{}")
                     } catch (e: Exception) {
                         JSONObject()
+                    }
+                    if (isRefinement && !isFinishing && !isDestroyed) {
+                        // Pass 2: a dialog with the per-candidate outcome and
+                        // DEM source (a toast cannot hold it).
+                        AlertDialog.Builder(this@WideAreaSearchActivity)
+                            .setTitle("Pass 2 refinement finished")
+                            .setView(scrollableText(formatRefinementResult(resultObj)))
+                            .setPositiveButton("OK", null)
+                            .show()
+                        if (binding.containerJobs.visibility == View.VISIBLE) loadJobsTab()
+                        return
                     }
                     val finishedMessage = if (isRefinement) {
                         // Pass 2 result: counts straight from
@@ -515,14 +528,14 @@ class WideAreaSearchActivity : AppCompatActivity() {
             val row = array.getJSONObject(i)
             val jobId = row.optString("id")
             val rowText = buildString {
-                append("#").append(i + 1).append("  ").append(row.optString("title")).append("\n")
+                append("#").append(i + 1).append(" ").append(row.optString("title")).append("\n")
                 // Short job id (first 6 characters) so near-identical titles
                 // can be told apart -- the same short form used when
                 // identifying a job in a database query.
-                append("  id: ").append(jobId.take(6)).append("\n")
-                append("  ").append(row.optString("input_kind")).append("   ").append(row.optInt("n_tiles")).append(" tiles\n")
-                append("  status: ").append(row.optString("status")).append("\n")
-                append("  created: ").append(row.optString("created_at")).append("\n")
+                append(" id: ").append(jobId.take(6)).append("\n")
+                append(" ").append(row.optString("input_kind")).append(" ").append(row.optInt("n_tiles")).append(" tiles\n")
+                append(" status: ").append(row.optString("status")).append("\n")
+                append(" created: ").append(row.optString("created_at")).append("\n")
                 append("(tap to view progress / start / refine)")
             }
             val rowView = TextView(this).apply {
@@ -833,10 +846,14 @@ class WideAreaSearchActivity : AppCompatActivity() {
             "Top 3 (a good first try)",
             "Top 5",
             "Top 10 (uses the most API budget)",
+            "Specific candidates (enter IDs)…",
         )
         AlertDialog.Builder(this)
             .setTitle("Refine how many top candidates?")
-            .setItems(labels) { _, which -> previewRefinement(jobId, counts[which], true) }
+            .setItems(labels) { _, which ->
+                if (which < counts.size) previewRefinement(jobId, counts[which], true)
+                else askCandidateIds(jobId)
+            }
             .setNegativeButton("Cancel", null)
             .show()
     }
@@ -960,9 +977,9 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 val c = selected.getJSONObject(i)
                 val scoreText = if (c.isNull("score")) "n/a"
                 else String.format(java.util.Locale.US, "%+.2f", c.optDouble("score"))
-                append(i + 1).append(".  ")
+                append(i + 1).append(". ")
                 append(String.format(java.util.Locale.US, "%.5f, %.5f", c.optDouble("lat"), c.optDouble("lon")))
-                append("   z=").append(scoreText).append("\n")
+                append(" z=").append(scoreText).append("\n")
             }
             append("\nEach refinement makes about 2 live OpenTopography calls, up to about 8 ")
             append("stability re-fetches, and Copernicus calls -- not cheap while the daily ")
@@ -1015,6 +1032,280 @@ class WideAreaSearchActivity : AppCompatActivity() {
         Toast.makeText(this, "Pass 2 refinement of $n candidate(s) started in the background.", Toast.LENGTH_LONG).show()
     }
 
+    // ====================== PASS 2: SELECTED CANDIDATES ======================
+
+    /** "Refine selected candidates": the user types candidate ids (or unique
+     * prefixes of at least 6 characters, e.g. the 8-character ids used in
+     * notes), separated by spaces, commas or new lines. Python resolves them
+     * against THIS job only (grand_project_refinement.resolve_candidate_refs),
+     * so an id from another job is refused, never refined. Repeats of
+     * already-refined candidates are allowed here on purpose (live re-checks).
+     * "Require live DEM" (default on) discards and stops rather than record
+     * an offline-library refinement. */
+    private fun askCandidateIds(jobId: String, prefill: String = "", requireLivePrefill: Boolean = true) {
+        if (WideAreaSearchService.isRunning) {
+            Toast.makeText(this, "A wide-area search job is already running -- let it finish first.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val density = resources.displayMetrics.density
+        val pad = (20 * density).toInt()
+        val input = EditText(this).apply {
+            hint = "e.g. eaef8a95 55f6d053 a3bf3758"
+            setText(prefill)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            minLines = 2
+            typeface = Typeface.MONOSPACE
+        }
+        val requireLive = CheckBox(this).apply {
+            text = "Require live DEM (stop instead of using the offline library)"
+            isChecked = requireLivePrefill
+        }
+        val note = TextView(this).apply {
+            text = "Only candidates of this job are accepted. Candidates refined before " +
+                "can be refined again; earlier results are kept."
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(this@WideAreaSearchActivity, R.color.ariyan_text_secondary))
+        }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(input)
+            addView(requireLive)
+            addView(note)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Refine selected candidates")
+            .setView(layout)
+            .setPositiveButton("Preview") { _, _ ->
+                val text = input.text?.toString().orEmpty()
+                if (text.isBlank()) {
+                    Toast.makeText(this, "No candidate ids entered.", Toast.LENGTH_SHORT).show()
+                } else {
+                    previewSelectedRefinement(jobId, text, requireLive.isChecked)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Read-only preview (grand_project_refinement.
+     * preview_selected_refinement_json): the resolved candidates, each with
+     * its earlier refinements and their DEM source, plus every reference
+     * that could not be used and why. */
+    private fun previewSelectedRefinement(jobId: String, refsText: String, requireLive: Boolean) {
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_refinement")
+                        .callAttr("preview_selected_refinement_json", offlineDataRoot, jobId, refsText)
+                        .toString()
+                }
+                showSelectedRefinementConfirmation(jobId, refsText, requireLive, JSONObject(jsonText))
+            } catch (e: PyException) {
+                Toast.makeText(this@WideAreaSearchActivity, "Could not preview the refinement: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            } catch (e: org.json.JSONException) {
+                Toast.makeText(this@WideAreaSearchActivity, "Could not read the refinement preview: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    private fun showSelectedRefinementConfirmation(
+        jobId: String, refsText: String, requireLive: Boolean, preview: JSONObject
+    ) {
+        val selected = preview.optJSONArray("selected") ?: JSONArray()
+        val problems = preview.optJSONArray("problems") ?: JSONArray()
+        val ids = ArrayList<String>()
+        val message = buildString {
+            if (selected.length() == 0) {
+                append("None of the entered ids can be refined.\n")
+            } else {
+                append("Pass 2 will refine these ").append(selected.length()).append(" candidate(s), in this order:\n\n")
+            }
+            for (i in 0 until selected.length()) {
+                val c = selected.getJSONObject(i)
+                val id = c.optString("candidate_id")
+                ids.add(id)
+                val scoreText = if (c.isNull("score")) "n/a"
+                else String.format(java.util.Locale.US, "%+.2f", c.optDouble("score"))
+                append(i + 1).append(". ").append(id.take(8)).append(" z=").append(scoreText)
+                if (!c.isNull("confidence_band")) append(" ").append(c.optString("confidence_band"))
+                append("\n ")
+                append(String.format(java.util.Locale.US, "%.5f, %.5f", c.optDouble("lat"), c.optDouble("lon")))
+                append("\n")
+                val history = c.optJSONArray("previous_refinements") ?: JSONArray()
+                if (history.length() == 0) {
+                    append(" never refined\n")
+                } else {
+                    for (h in 0 until history.length()) {
+                        val e = history.getJSONObject(h)
+                        append(" earlier: ")
+                        append(if (e.optBoolean("reproduced", false)) "reproduced" else "not reproduced")
+                        append(", DEM ").append(demSourceLabel(e.optString("dem_source")))
+                        append("\n")
+                    }
+                }
+            }
+            if (problems.length() > 0) {
+                append("\nNot used:\n")
+                for (i in 0 until problems.length()) {
+                    val p = problems.getJSONObject(i)
+                    append(" ").append(p.optString("ref")).append(": ").append(p.optString("problem")).append("\n")
+                }
+            }
+            if (selected.length() > 0) {
+                append("\n")
+                if (requireLive) {
+                    append("Live DEM required: if the live OpenTopography fetch is unavailable, that ")
+                    append("candidate's results are discarded (nothing recorded) and the run stops; ")
+                    append("the rest stay as they are.")
+                    if (credentialStore.openTopographyApiKey.isNullOrBlank()) {
+                        append("\n\nNo OpenTopography API key is saved on this device, so this run ")
+                        append("cannot start with live DEM required.")
+                    }
+                } else {
+                    append("Live DEM NOT required: if the live fetch fails, the offline library is used ")
+                    append("and recorded as such (it is the same data the sweep was built from).")
+                }
+                append("\n\nEach refinement makes about 2 live OpenTopography calls, up to about 8 ")
+                append("stability re-fetches, and Copernicus calls.")
+                if (credentialStore.copernicusClientId.isNullOrBlank() || credentialStore.copernicusClientSecret.isNullOrBlank()) {
+                    append("\n\nNo Copernicus credentials are saved: satellite checks will be recorded as not run.")
+                }
+            }
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle(if (ids.isEmpty()) "Nothing to refine" else "Refine ${ids.size} selected candidate(s)?")
+            .setView(scrollableText(message))
+            .setNeutralButton("Edit ids") { _, _ -> askCandidateIds(jobId, refsText, requireLive) }
+            .setNegativeButton("Cancel", null)
+        if (ids.isNotEmpty()) {
+            builder.setPositiveButton("Start refinement") { _, _ ->
+                startSelectedRefinement(jobId, ids, requireLive)
+            }
+        }
+        builder.show()
+    }
+
+    /** Starts WideAreaSearchService with the RESOLVED full ids from the
+     * preview (so the run refines exactly what was confirmed), same
+     * credentials as startRefinement(). */
+    private fun startSelectedRefinement(jobId: String, ids: List<String>, requireLive: Boolean) {
+        if (WideAreaSearchService.isRunning) {
+            Toast.makeText(this, "A wide-area search job is already running -- let it finish first.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val serviceIntent = Intent(this, WideAreaSearchService::class.java).apply {
+            putExtra(WideAreaSearchService.EXTRA_JOB_ID, jobId)
+            putExtra(WideAreaSearchService.EXTRA_DATA_ROOT, offlineDataRoot)
+            putExtra(WideAreaSearchService.EXTRA_API_KEY, credentialStore.openTopographyApiKey)
+            putExtra(WideAreaSearchService.EXTRA_DEMTYPE, credentialStore.demType.ifEmpty { "SRTMGL1" })
+            putExtra(WideAreaSearchService.EXTRA_NDVI_CLIENT_ID, credentialStore.copernicusClientId)
+            putExtra(WideAreaSearchService.EXTRA_NDVI_CLIENT_SECRET, credentialStore.copernicusClientSecret)
+            putExtra(WideAreaSearchService.EXTRA_REFINE_CANDIDATE_IDS, ids.joinToString("\n"))
+            putExtra(WideAreaSearchService.EXTRA_REFINE_REQUIRE_LIVE_DEM, requireLive)
+        }
+        ContextCompat.startForegroundService(this, serviceIntent)
+        Toast.makeText(this, "Pass 2 refinement of ${ids.size} selected candidate(s) started in the background.", Toast.LENGTH_LONG).show()
+    }
+
+    /** Plain-language label for a stored dem_source value (see
+     * grand_project_refinement.py's DEM_SOURCE_* constants). */
+    private fun demSourceLabel(raw: String?): String = when (raw) {
+        "LIVE" -> "live"
+        "OFFLINE_FALLBACK" -> "offline library (live failed)"
+        "OFFLINE_FIRST" -> "offline library (by choice)"
+        "OFFLINE_FALLBACK_INFERRED" -> "offline library (from old record)"
+        "OFFLINE_FIRST_INFERRED" -> "offline library, by choice (from old record)"
+        "NOT_RECORDED" -> "source not recorded"
+        null, "" -> "source not recorded"
+        else -> raw?.lowercase(java.util.Locale.US) ?: "source not recorded"
+    }
+
+    /** The finished-dialog text for any Pass 2 run (top N or selected),
+     * straight from run_refinement_pass()/run_selected_refinement(). Keys
+     * that an older result lacks simply do not appear. */
+    private fun formatRefinementResult(r: JSONObject): String = buildString {
+        append(r.optInt("refined")).append(" of ").append(r.optInt("attempted")).append(" refined: ")
+        append(r.optInt("reproduced")).append(" reproduced the DEM anomaly, ")
+        append(r.optInt("not_reproduced")).append(" did not.\n")
+        val results = r.optJSONArray("results") ?: JSONArray()
+        if (results.length() > 0) append("\n")
+        for (i in 0 until results.length()) {
+            val x = results.getJSONObject(i)
+            append(x.optString("candidate_id").take(8)).append(" ")
+            if (x.optString("status") != "REFINED") {
+                append(x.optString("status")).append("\n")
+                continue
+            }
+            if (x.optBoolean("reproduced", false)) {
+                append("reproduced")
+                if (!x.isNull("match_distance_m")) {
+                    append(String.format(java.util.Locale.US, " (%.0f m)", x.optDouble("match_distance_m")))
+                }
+            } else {
+                append("not reproduced")
+            }
+            append("\n DEM ").append(demSourceLabel(x.optString("dem_source")))
+            if (x.optBoolean("repeat_refinement", false)) append(", repeat")
+            val sats = x.optJSONArray("satellite_sources_recorded")
+            if (sats != null && sats.length() > 0) {
+                append("\n + ")
+                for (j in 0 until sats.length()) {
+                    if (j > 0) append(", ")
+                    append(sats.optString(j))
+                }
+            }
+            if (!x.isNull("confidence_band")) append("\n confidence ").append(x.optString("confidence_band"))
+            append("\n")
+        }
+        val failures = r.optJSONArray("failures") ?: JSONArray()
+        if (failures.length() > 0) {
+            append("\nFailed (stay eligible for a retry):\n")
+            for (i in 0 until failures.length()) {
+                val f = failures.getJSONObject(i)
+                append(" ").append(f.optString("candidate_id").take(8)).append(": ")
+                append(cleanErrorMessage(f.optString("error"))).append("\n")
+            }
+        }
+        if (!r.isNull("stopped_no_live_dem") && r.optString("stopped_no_live_dem").isNotEmpty()) {
+            append("\nSTOPPED: live DEM unavailable -- ").append(r.optString("stopped_no_live_dem")).append("\n")
+            val notStarted = r.optJSONArray("not_started") ?: JSONArray()
+            if (notStarted.length() > 0) {
+                append("Not refined this time (nothing recorded, unchanged):\n")
+                for (i in 0 until notStarted.length()) {
+                    append(" ").append(notStarted.getJSONObject(i).optString("candidate_id").take(8)).append("\n")
+                }
+            }
+        }
+        val problems = r.optJSONArray("reference_problems") ?: JSONArray()
+        if (problems.length() > 0) {
+            append("\nIds not used:\n")
+            for (i in 0 until problems.length()) {
+                val p = problems.getJSONObject(i)
+                append(" ").append(p.optString("ref")).append(": ").append(p.optString("problem")).append("\n")
+            }
+        }
+    }
+
+    /** A selectable monospace text in a ScrollView, for long dialog bodies. */
+    private fun scrollableText(text: String): ScrollView {
+        val density = resources.displayMetrics.density
+        val pad = (20 * density).toInt()
+        val tv = TextView(this).apply {
+            this.text = text
+            typeface = Typeface.MONOSPACE
+            textSize = 12f
+            setTextIsSelectable(true)
+            setTextColor(ContextCompat.getColor(this@WideAreaSearchActivity, R.color.ariyan_text_primary))
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        return ScrollView(this).apply { addView(tv) }
+    }
+
     // =========================== SHARED ===========================
 
     /** Resolves the (one, stopgap) Grand Project's id -- same real
@@ -1039,5 +1330,3 @@ class WideAreaSearchActivity : AppCompatActivity() {
         binding.buttonShowJobs.isEnabled = !loading
     }
 }
-
-
