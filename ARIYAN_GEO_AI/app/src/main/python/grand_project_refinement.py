@@ -306,6 +306,36 @@ def _live_dem_blocked_reason(api_key: str) -> Optional[str]:
     return None
 
 
+PROBE_RADIUS_M = 150.0
+PROBE_GRID_SIZE = 8
+
+
+def _probe_live_dem(api_key: str, demtype: str, lat: float, lon: float) -> Optional[str]:
+    """ONE tiny live OpenTopography request (a ~300 m square, 8x8 grid) made
+    before the first candidate when live DEM is required. Returns None if
+    live DEM works right now, else a human-readable reason.
+
+    Why: the quota breaker only knows about failures seen in THIS process,
+    so after an app restart a spent daily cap was only discovered deep
+    inside the first candidate's full investigation -- which then ran its
+    satellite (Copernicus) calls for ~10 minutes before being discarded.
+    The probe goes through the armed breaker, so a quota/key rejection
+    also trips it exactly as a real fetch would. Costs one API call per
+    pass. Any failure (quota, key, network, timeout) counts as 'live DEM
+    unavailable' because the real run would have fallen back offline and
+    been discarded anyway."""
+    if not api_key:
+        return "no OpenTopography API key is saved on this device"
+    try:
+        from coordinate import GeoPoint, build_aoi
+        aoi = build_aoi(GeoPoint(float(lat), float(lon)), PROBE_RADIUS_M, PROBE_GRID_SIZE)
+        dem_source_mobile.OpenTopographyAAIGridSource(api_key, demtype=demtype).fetch(aoi)
+    except Exception as exc:
+        return (f"quick live DEM check before starting failed "
+                f"({str(exc).rstrip('. ')[:300]})")
+    return None
+
+
 def _abs_score(c: Dict[str, Any]) -> float:
     try:
         return abs(float(c.get("score")))
@@ -823,6 +853,16 @@ def _run_refinement_loop(
                 data_root, job_id, i, total,
                 f"refining {i + 1}/{total}: running", health=was._render_run_health(tally))
             try:
+                if require_live_dem and i == 0:
+                    plat, plon = cand.get("lat"), cand.get("lon")
+                    if plat is None or plon is None:
+                        full = db.get_candidate(data_root, cand["id"]) or {}
+                        plat, plon = full.get("lat"), full.get("lon")
+                    probe_fail = (_probe_live_dem(api_key, demtype, plat, plon)
+                                  if plat is not None and plon is not None else
+                                  "candidate has no coordinates for the live DEM check")
+                    if probe_fail:
+                        raise LiveDemUnavailableError(probe_fail)
                 res = refine_candidate(
                     data_root, cand["id"], api_key=api_key, demtype=demtype,
                     ndvi_client_id=ndvi_client_id, ndvi_client_secret=ndvi_client_secret,
