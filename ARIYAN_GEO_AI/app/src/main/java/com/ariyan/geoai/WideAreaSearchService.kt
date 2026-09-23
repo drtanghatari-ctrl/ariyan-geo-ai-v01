@@ -62,6 +62,14 @@ import kotlin.concurrent.thread
  * skip_flagged, so the run leaves out exactly the candidates the
  * confirmation dialog said it would (trees / buildings / open water, see
  * land_cover_flags.py). The service itself does no land-cover work.
+ *
+ * SELECTED CANDIDATES (2026-09-23): when EXTRA_REFINE_CANDIDATE_IDS is a
+ * non-blank string (ids or unique prefixes, one per line), this start runs
+ * grand_project_refinement.run_selected_refinement_json() instead: exactly
+ * those candidates of this job, repeats allowed, with
+ * EXTRA_REFINE_REQUIRE_LIVE_DEM (default true) deciding whether a candidate
+ * whose DEM would come from the offline library is discarded and the pass
+ * stopped. It takes precedence over EXTRA_REFINE_TOP_N if both are given.
  */
 class WideAreaSearchService : Service() {
 
@@ -100,6 +108,15 @@ class WideAreaSearchService : Service() {
         // false = include them. Chosen per START in the Activity's Pass 2
         // confirmation dialog.
         const val EXTRA_REFINE_SKIP_FLAGGED = "refine_skip_flagged"
+
+        // Non-blank = run PASS 2 on exactly these candidates of this job
+        // (newline-separated ids or unique prefixes). See the class doc.
+        const val EXTRA_REFINE_CANDIDATE_IDS = "refine_candidate_ids"
+
+        // Only with EXTRA_REFINE_CANDIDATE_IDS. true (also when absent) =
+        // never record a refinement whose primary DEM came from the offline
+        // library; stop the pass instead.
+        const val EXTRA_REFINE_REQUIRE_LIVE_DEM = "refine_require_live_dem"
 
         // Set on the finished/failed broadcasts of a Pass 2 run so the
         // Activity words its message for a refinement.
@@ -156,7 +173,11 @@ class WideAreaSearchService : Service() {
         val demOfflineFirst = demOnly && intent.getBooleanExtra(EXTRA_DEM_OFFLINE_FIRST, false)
         val refineTopN = intent.getIntExtra(EXTRA_REFINE_TOP_N, 0)
         val refineSkipFlagged = intent.getBooleanExtra(EXTRA_REFINE_SKIP_FLAGGED, true)
-        val isRefinement = refineTopN > 0
+        val refineCandidateIds = intent.getStringExtra(EXTRA_REFINE_CANDIDATE_IDS)?.trim().orEmpty()
+        val refineRequireLiveDem = intent.getBooleanExtra(EXTRA_REFINE_REQUIRE_LIVE_DEM, true)
+        val isSelectedRefinement = refineCandidateIds.isNotEmpty()
+        val isRefinement = refineTopN > 0 || isSelectedRefinement
+        val selectedCount = refineCandidateIds.lines().count { it.isNotBlank() }
 
         if (!running.compareAndSet(false, true)) {
             reportFailure(jobId, "Another wide-area search job is already running -- wait for it to finish, or stop it first.", isRefinement)
@@ -174,7 +195,8 @@ class WideAreaSearchService : Service() {
             startForeground(
                 NOTIFICATION_ID,
                 buildNotification(
-                    if (isRefinement) "Starting Pass 2 refinement of the top $refineTopN candidates…"
+                    if (isSelectedRefinement) "Starting Pass 2 refinement of $selectedCount selected candidate(s)…"
+                    else if (isRefinement) "Starting Pass 2 refinement of the top $refineTopN candidates…"
                     else if (demOfflineFirst) "Starting wide-area search (DEM-only sweep, offline library first)…"
                     else if (demOnly) "Starting wide-area search (DEM-only sweep)…"
                     else "Starting wide-area search…"
@@ -192,7 +214,19 @@ class WideAreaSearchService : Service() {
         thread(name = "wide-area-search-$jobId") {
             try {
                 val python = Python.getInstance()
-                val resultJson = if (isRefinement) {
+                val resultJson = if (isSelectedRefinement) {
+                    // PASS 2, SELECTED: exactly the named candidates of this
+                    // job (resolved in Python against this job only).
+                    python.getModule("grand_project_refinement").callAttr(
+                        "run_selected_refinement_json",
+                        dataRoot, jobId, refineCandidateIds,
+                        Kwarg("api_key", apiKey),
+                        Kwarg("demtype", demType),
+                        Kwarg("ndvi_client_id", ndviClientId),
+                        Kwarg("ndvi_client_secret", ndviClientSecret),
+                        Kwarg("require_live_dem", refineRequireLiveDem),
+                    ).toString()
+                } else if (isRefinement) {
                     // PASS 2: full-evidence refinement of the top N Pass 1
                     // candidates. One candidate failing never fails the pass
                     // (handled in Python); an unknown job id raises, and is
@@ -304,4 +338,3 @@ class WideAreaSearchService : Service() {
             .build()
     }
 }
-
