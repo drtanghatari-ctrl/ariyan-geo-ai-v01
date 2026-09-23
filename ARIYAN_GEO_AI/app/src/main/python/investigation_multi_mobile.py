@@ -297,6 +297,16 @@ statistical logic, detection thresholds, or CORROBORATED/SINGLE_SOURCE
 status computation. SarCoreHaloResult (added this session) is built
 with sample counts already included from the start, so it never needed
 this retrofit -- see its own docstring.
+
+CORROBORATION-NOTE OVERCLAIM FIX (2026-09-23): the CORROBORATED note
+built in _build_correlated_candidates() said "This is genuine
+independent corroboration ... confidence should be treated as MODERATE
+to HIGH". That contradicted the Scientific Steward's Confidence Ceiling
+(MODERATE maximum until Phase 4) and presented co-location as proof.
+The note now states the measured co-location and names the Steward's
+confidence as the governing value -- same fix, same date, as
+evidence_record.py's confidence statement and correlation.py's note.
+Wording only: status tokens, sources lists and thresholds unchanged.
 """
 from __future__ import annotations
 
@@ -1716,10 +1726,14 @@ def _build_correlated_candidates(
             status = "CORROBORATED"
             note = (
                 " ".join(notes) +
-                f" This is genuine independent corroboration from "
-                f"{n_independent} real source(s) beyond DEM -- confidence "
-                f"should be treated as MODERATE to HIGH, still pending "
-                f"field verification."
+                f" Co-located anomalies from {n_independent} real "
+                f"source(s) beyond DEM. Co-location is a measured fact, "
+                f"not proof of a buried feature: a shared "
+                f"non-archaeological cause (buildings, water, vegetation, "
+                f"irrigation or industrial works) can make several sources "
+                f"agree. The Scientific Steward's confidence (currently "
+                f"capped at MODERATE) is the governing value; field "
+                f"verification is still required."
             )
         else:
             status = "SINGLE_SOURCE"
