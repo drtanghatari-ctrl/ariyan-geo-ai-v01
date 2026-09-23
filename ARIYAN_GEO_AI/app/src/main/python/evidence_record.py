@@ -254,6 +254,26 @@ to HIGH" sentence, with nothing following it to misread. No change to
 the underlying n_corroborated/CORROBORATED-status computation itself,
 and no change to the SINGLE_SOURCE-only (n_corroborated == 0) branch
 below, which was never affected by this issue.
+
+CONFIDENCE-STATEMENT OVERCLAIM FIX (2026-09-23 -- found on-device via
+Termux in a Pass 2 refinement's stored interpretation_summary): the
+CORROBORATED branch said "This is genuine independent corroboration;
+confidence should be treated as MODERATE to HIGH pending field
+verification." That text predates the Scientific Steward and
+contradicted it: the Steward's Confidence Ceiling caps every candidate
+at MODERATE until Phase 4 (provenance + confounder checks), so "HIGH"
+was a level the system itself forbids. It also called co-location
+"genuine" corroboration, although the tank-farm case (2026-09-22,
+DEM+THERMAL raw 0.90) showed independent sources agreeing because of a
+shared non-archaeological cause, and a Pass 2 re-check can reuse the
+same offline DEM its Pass 1 came from. The statement now reports only
+what was measured (co-located anomalies, which sources) and names the
+Steward's confidence as the governing value. The DEM-only branch's
+"LOW to MODERATE" recommendation was replaced the same way. Wording
+only: no change to n_corroborated, the CORROBORATED/SINGLE_SOURCE
+status tokens, the data model, or any threshold. Rows already stored in
+investigation.interpretation_summary keep their old text (history is
+not rewritten).
 """
 from __future__ import annotations
 
@@ -721,10 +741,15 @@ def build_investigation_record(
                     if s not in corroborating_sources:
                         corroborating_sources.append(s)
             confidence = (
-                f"{n_corroborated} candidate(s) CORROBORATED by independent evidence "
-                f"sources (co-located anomalies in {' + '.join(corroborating_sources)}). "
-                f"This is genuine independent corroboration; confidence should be "
-                f"treated as MODERATE to HIGH pending field verification."
+                f"{n_corroborated} candidate(s) show co-located anomalies in "
+                f"{' + '.join(corroborating_sources)} (DEM plus at least one "
+                f"independent evidence source). "
+                f"Co-location is a measured fact, not proof of a buried feature: "
+                f"a shared non-archaeological cause (buildings, water, vegetation, "
+                f"irrigation or industrial works) can make several sources agree. "
+                f"The Scientific Steward's per-candidate confidence (currently "
+                f"capped at MODERATE) is the governing confidence value; field "
+                f"verification is still required."
             )
             # CONFIDENCE-STATEMENT WORDING FIX (a prior session -- see module
             # docstring): only append the "N additional single-source
@@ -750,8 +775,9 @@ def build_investigation_record(
             f"{len(anomalies)} candidate(s) detected. Strongest: "
             f"|z|={abs(top.peak_zscore):.2f}, area={top.area_cells} cells, "
             f"amplitude={top.peak_residual_m:.2f}m. This reflects DEM-only "
-            f"statistical evidence; confidence should be treated as LOW to "
-            f"MODERATE until corroborated by an independent evidence source."
+            f"statistical evidence. The Scientific Steward's per-candidate "
+            f"confidence is the governing confidence value, and it cannot rise "
+            f"without an independent evidence source."
         )
 
     record_kwargs = dict(
