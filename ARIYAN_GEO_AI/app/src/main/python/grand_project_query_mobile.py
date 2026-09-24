@@ -37,6 +37,7 @@ import json
 
 import grand_project_db as db
 import grand_project_review as review
+import known_sites
 
 
 def list_investigations_json(db_root: str, grand_project_id: str) -> str:
@@ -66,7 +67,22 @@ def list_candidates_json(db_root: str, grand_project_id: str) -> str:
     summary = review.review_summary_for_project(db_root, grand_project_id)
     for row in rows:
         row.update(summary.get(row["id"], {}))
+        # ADDED 2026-09-24 (F1 Known-Site Layer): offline gazetteer
+        # context. Extra keys only: known_site_label, known_site_text.
+        # Context, never evidence -- see known_sites.py. A lookup
+        # failure never breaks the list; it is reported on the row.
+        row.update(_known_site_brief(row.get("lat"), row.get("lon")))
     return json.dumps(rows)
+
+
+def _known_site_brief(lat, lon) -> dict:
+    if lat is None or lon is None:
+        return {"known_site_label": None, "known_site_text": "no coordinates"}
+    try:
+        a = known_sites.annotate(lat, lon)
+        return {"known_site_label": a["label"], "known_site_text": a["text"]}
+    except Exception as e:
+        return {"known_site_label": None, "known_site_text": "known-site lookup failed: %s" % e}
 
 
 def list_timeline_json(db_root: str, grand_project_id: str) -> str:
@@ -186,6 +202,14 @@ def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
     review_entry = review.review_summary_for_project(
         db_root, candidate["grand_project_id"]).get(candidate_id)
 
+    # ADDED 2026-09-24 (F1 Known-Site Layer): full gazetteer context
+    # (label, nearest recorded sites with distances, city outlines,
+    # local density, source citation). Context only; never evidence.
+    if candidate.get("lat") is None or candidate.get("lon") is None:
+        known_site = {"error": "no coordinates"}
+    else:
+        known_site = json.loads(known_sites.annotate_json(candidate["lat"], candidate["lon"]))
+
     return json.dumps({
         "candidate": candidate,
         "investigation": investigation,
@@ -194,6 +218,7 @@ def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
         "hypothesis": hypothesis,
         "review_history": review_history,
         "review": review_entry,
+        "known_site": known_site,
     })
 
 
