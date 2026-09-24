@@ -203,14 +203,17 @@ class GrandProjectActivity : AppCompatActivity() {
         binding.containerHypotheses.visibility = View.GONE
         binding.containerCandidateRows.visibility = View.VISIBLE
         binding.containerCandidateRows.removeAllViews()
-
+lastCandidatesJson = jsonText
+        addCandidateControls()
         val tapBackground = TypedValue()
         theme.resolveAttribute(android.R.attr.selectableItemBackground, tapBackground, true)
         val density = resources.displayMetrics.density
 
         val sortedRows = ArrayList<JSONObject>(array.length())
         for (k in 0 until array.length()) {
-            sortedRows.add(array.getJSONObject(k))
+            val c = array.getJSONObject(k)
+            if (hideRejected && c.optString("status") == "REJECTED") continue
+            sortedRows.add(c)
         }
         sortedRows.sortWith(
             compareByDescending<JSONObject> { c ->
@@ -229,13 +232,20 @@ class GrandProjectActivity : AppCompatActivity() {
                 if (!row.isNull("score")) {
                     append(String.format("DEM z-score: %+.2f\n", row.optDouble("score")))
                 }
-                append("status: ").append(row.optString("status"))
+                append("status: ").append(row.optString("status_label", row.optString("status")))
                 val band = row.optString("confidence_band", "")
                 if (band.isNotEmpty()) {
                     append("   confidence: ").append(band)
                     if (!row.isNull("confidence_numeric")) {
                         append(String.format(" (%.2f)", row.optDouble("confidence_numeric")))
                     }
+                }
+if (row.optString("job_trust") == "CORRUPTED") {
+                    append("\n!! JOB ").append(row.optString("job_id").take(6)).append(" MARKED CORRUPTED - ignore")
+                }
+                val lastReason = row.optString("last_review_reason", "")
+                if (lastReason.isNotEmpty() && lastReason != "null") {
+                    append("\nreview: ").append(lastReason)
                 }
                 append("\n(tap for confidence history + evidence)")
             }
@@ -497,7 +507,7 @@ class GrandProjectActivity : AppCompatActivity() {
             }
             sb.append("\n")
         }
-
+appendReviewSection(sb, detail)
         val history = detail.optJSONArray("confidence_history")
         if (history != null && history.length() > 0) {
             sb.append("Confidence History (").append(history.length()).append(" entries, oldest first)\n")
@@ -585,6 +595,7 @@ class GrandProjectActivity : AppCompatActivity() {
             .setTitle("Candidate Detail")
             .setView(scrollView)
             .setPositiveButton("Close", null)
+.setNegativeButton("Review...") { _, _ -> showReviewPicker(candidateId) }
             .setNeutralButton("Link to Hypothesis") { _, _ -> showHypothesisPicker(candidateId) }
             .show()
     }
@@ -667,6 +678,197 @@ class GrandProjectActivity : AppCompatActivity() {
             }
         }
     }
+    // =================== ADDED 2026-09-24, PHASE 3 REVIEW UI ===================
+    // User-set candidate status (Open / Supported / Rejected / Inconclusive,
+    // always with a written reason) and user-set job trust (Trusted /
+    // Corrupted / Unverified). Python side: grand_project_review.py via
+    // grand_project_query_mobile.py. Never changes Steward confidence.
+
+    private var hideRejected = false
+    private var lastCandidatesJson: String? = null
+
+    /** Adds the "Hide rejected" toggle and "Job trust..." button at the
+     * top of the Candidates list. Called by renderCandidateRows() right
+     * after it clears the container. */
+    private fun addCandidateControls() {
+        val density = resources.displayMetrics.density
+        var rejectedCount = 0
+        try {
+            val all = JSONArray(lastCandidatesJson ?: "[]")
+            for (k in 0 until all.length()) {
+                if (all.getJSONObject(k).optString("status") == "REJECTED") rejectedCount++
+            }
+        } catch (e: Exception) {
+            // leave count at 0
+        }
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding((8 * density).toInt(), (4 * density).toInt(), (8 * density).toInt(), (4 * density).toInt())
+        }
+        val hideButton = MaterialButton(this).apply {
+            text = if (hideRejected) "Show rejected ($rejectedCount)" else "Hide rejected ($rejectedCount)"
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginEnd = (8 * density).toInt() }
+            setOnClickListener {
+                hideRejected = !hideRejected
+                lastCandidatesJson?.let { renderCandidateRows(it) }
+            }
+        }
+        val trustButton = MaterialButton(this).apply {
+            text = "Job trust..."
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { showJobTrustStart() }
+        }
+        bar.addView(hideButton)
+        bar.addView(trustButton)
+        binding.containerCandidateRows.addView(bar)
+    }
+
+    /** Adds the "Review" and "Job" sections to the candidate detail text. */
+    private fun appendReviewSection(sb: StringBuilder, detail: JSONObject) {
+        val review = detail.optJSONObject("review")
+        if (review != null) {
+            sb.append("Review (user judgement, not Steward confidence)\n")
+            sb.append("  status: ").append(review.optString("status_label")).append("\n")
+            if (!review.isNull("job_id")) {
+                sb.append("  job: ").append(review.optString("job_id").take(6))
+                if (!review.isNull("job_trust")) {
+                    sb.append("  trust: ").append(review.optString("job_trust"))
+                    sb.append(" (").append(review.optString("job_trust_reason")).append(")")
+                } else {
+                    sb.append("  trust: not marked")
+                }
+                sb.append("\n")
+            }
+        }
+        val history = detail.optJSONArray("review_history")
+        if (history != null && history.length() > 0) {
+            for (i in 0 until history.length()) {
+                val h = history.getJSONObject(i)
+                sb.append("  ").append(h.optString("reviewed_at")).append("  ")
+                sb.append(h.optString("previous_status")).append(" -> ").append(h.optString("new_status")).append("\n")
+                sb.append("      reason: ").append(h.optString("reason")).append("\n")
+            }
+        }
+        if (review != null) sb.append("\n")
+    }
+
+    /** Asks for one line of text, then calls onOk with it (trimmed). */
+    private fun promptText(
+        title: String, hint: String, okLabel: String, message: String? = null, onOk: (String) -> Unit
+    ) {
+        val density = resources.displayMetrics.density
+        val input = EditText(this).apply {
+            this.hint = hint
+            setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_primary))
+            setHintTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
+            val pad = (16 * density).toInt()
+            setPadding(pad, pad, pad, pad)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .apply { if (message != null) setMessage(message) }
+            .setView(input)
+            .setPositiveButton(okLabel) { _, _ -> onOk(input.text.toString().trim()) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Candidate review: pick a status, then write a reason. */
+    private fun showReviewPicker(candidateId: String) {
+        val labels: Array<CharSequence> = arrayOf("Open", "Supported", "Rejected", "Inconclusive")
+        val values = arrayOf("OPEN", "SUPPORTED", "REJECTED", "INCONCLUSIVE")
+        AlertDialog.Builder(this)
+            .setTitle("Review candidate " + candidateId.take(8))
+            .setItems(labels) { _, which ->
+                promptText("Reason for " + labels[which], "e.g. satellite shows fish pond", "Save") { reason ->
+                    callReviewWrite(
+                        "set_candidate_status_json", listOf(candidateId, values[which], reason),
+                        "Candidate marked " + labels[which]
+                    )
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Job trust: shows current marks, asks for a job id (6+ characters),
+     * then a trust level, then a reason. */
+    private fun showJobTrustStart() {
+        setLoading(true)
+        lifecycleScope.launch {
+            var current = ""
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr("list_job_trust_json", offlineDataRoot).toString()
+                }
+                val arr = JSONArray(jsonText)
+                val sb = StringBuilder()
+                for (i in 0 until arr.length()) {
+                    val r = arr.getJSONObject(i)
+                    sb.append(r.optString("job_id").take(6)).append("  ").append(r.optString("trust"))
+                        .append("  (").append(r.optString("reason")).append(")\n")
+                }
+                current = if (sb.isEmpty()) "No jobs marked yet." else sb.toString()
+            } catch (e: Exception) {
+                current = "Could not load current marks."
+            } finally {
+                setLoading(false)
+            }
+            promptText("Job trust", "job id, first 6+ characters, e.g. 0fdb99", "Next", current) { jobRef ->
+                val labels: Array<CharSequence> = arrayOf("Trusted", "Corrupted", "Unverified")
+                val values = arrayOf("TRUSTED", "CORRUPTED", "UNVERIFIED")
+                AlertDialog.Builder(this@GrandProjectActivity)
+                    .setTitle("Trust for job $jobRef")
+                    .setItems(labels) { _, which ->
+                        promptText("Reason for " + labels[which], "e.g. built with old COG reader", "Save") { reason ->
+                            callReviewWrite(
+                                "set_job_trust_json", listOf(jobRef, values[which], reason),
+                                "Job $jobRef marked " + labels[which]
+                            )
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+    }
+
+    /** Runs one review write in Python; shows its {"error"} message if any,
+     * otherwise a confirmation toast and a refreshed Candidates list. */
+    private fun callReviewWrite(fnName: String, args: List<Any>, okMessage: String) {
+        setLoading(true)
+        lifecycleScope.launch {
+            var ok = false
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr(fnName, offlineDataRoot, *args.toTypedArray()).toString()
+                }
+                val result = JSONObject(jsonText)
+                if (result.has("error")) {
+                    Toast.makeText(this@GrandProjectActivity, result.optString("error"), Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this@GrandProjectActivity, okMessage, Toast.LENGTH_SHORT).show()
+                    ok = true
+                }
+            } catch (e: PyException) {
+                Toast.makeText(
+                    this@GrandProjectActivity,
+                    "Failed to save: ${cleanErrorMessage(e.message)}",
+                    Toast.LENGTH_LONG
+                ).show()
+            } finally {
+                setLoading(false)
+            }
+            if (ok) loadAndShow(ListKind.CANDIDATES)
+        }
+    }
+    // ================= END ADDED 2026-09-24, PHASE 3 REVIEW UI =================
+
 
     /** Same "first line only" convention MainActivity.kt's own
      * cleanErrorMessage() uses -- Chaquopy's PyException.message
