@@ -567,6 +567,31 @@ def _with_provenance(detail: Optional[Dict[str, Any]], refinement_investigation_
     return out
 
 
+def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Initial great-circle bearing from point 1 to point 2, degrees
+    clockwise from true north (0-360)."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    x = math.sin(dl) * math.cos(p2)
+    y = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
+
+
+_ANOMALY_SUMMARY_KEYS = ("lat", "lon", "peak_zscore", "peak_residual_m",
+                         "mean_residual_m", "area_cells", "polarity")
+_MAX_ANOMALY_SUMMARY = 5
+
+
+def _anomaly_summary(lat: float, lon: float, a: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact, measured description of one refinement-window DEM anomaly
+    relative to the candidate's original position. Only keys actually
+    present in the anomaly are copied; nothing is estimated."""
+    out = {k: a.get(k) for k in _ANOMALY_SUMMARY_KEYS if k in a}
+    out["distance_m"] = sync._haversine_distance_m(lat, lon, a["lat"], a["lon"])
+    out["bearing_deg"] = _bearing_deg(lat, lon, a["lat"], a["lon"])
+    return out
+
+
 def refine_candidate(
     db_root: str,
     candidate_id: str,
@@ -659,6 +684,17 @@ def refine_candidate(
         if match_distance_m is None or d < match_distance_m:
             match_distance_m, matched_index, matched_anomaly = d, i, a
     reproduced = matched_anomaly is not None and match_distance_m <= tolerance_m
+    # When nothing reproduces, keep a measured record of the NEAREST
+    # refinement anomaly (and a short list of all of them) so a miss can
+    # later be judged as "same feature, shifted" vs "different feature"
+    # instead of guessed. Recorded only; it never attaches evidence or
+    # changes confidence.
+    nearest_unmatched: Optional[Dict[str, Any]] = None
+    if not reproduced and matched_anomaly is not None:
+        nearest_unmatched = _anomaly_summary(lat, lon, matched_anomaly)
+    anomaly_summaries = sorted(
+        (_anomaly_summary(lat, lon, a) for _, a in dem_anoms),
+        key=lambda x: x["distance_m"])[:_MAX_ANOMALY_SUMMARY]
     if not reproduced:
         matched_index, matched_anomaly = None, None
 
@@ -760,6 +796,8 @@ def refine_candidate(
             "refinement_analysis_radius_m": radius_m,
             "n_refinement_dem_anomalies": len(dem_anoms),
             "refinement_anomaly": matched_anomaly,
+            "nearest_unmatched_anomaly": nearest_unmatched,
+            "refinement_dem_anomalies_nearest": anomaly_summaries,
             "satellite_sources_recorded": satellite_recorded,
             "confidence_recorded": confidence_recorded,
             "steward_note": steward_note,
@@ -801,6 +839,7 @@ def refine_candidate(
         "reproduced": bool(reproduced),
         "match_distance_m": match_distance_m,
         "match_tolerance_m": tolerance_m,
+        "nearest_unmatched_anomaly": nearest_unmatched,
         "satellite_sources_recorded": satellite_recorded,
         "confidence_recorded": confidence_recorded,
         "confidence_band": band,
