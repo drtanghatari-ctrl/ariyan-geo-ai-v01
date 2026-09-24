@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 
 import grand_project_db as db
+import grand_project_review as review
 
 
 def list_investigations_json(db_root: str, grand_project_id: str) -> str:
@@ -57,6 +58,14 @@ def list_candidates_json(db_root: str, grand_project_id: str) -> str:
     investigation_id, hypothesis_id, lat, lon, status, score,
     confidence_band, confidence_numeric, created_at, last_updated_at."""
     rows = db.list_candidates_for_project(db_root, grand_project_id)
+    # ADDED 2026-09-24 (Phase 3): each row also carries the user's
+    # review label and its Wide-Area Search job's trust mark, from
+    # grand_project_review.review_summary_for_project(). Extra keys only;
+    # the original fields are unchanged. Keys: status_label, job_id,
+    # job_trust, job_trust_reason, last_review_reason.
+    summary = review.review_summary_for_project(db_root, grand_project_id)
+    for row in rows:
+        row.update(summary.get(row["id"], {}))
     return json.dumps(rows)
 
 
@@ -168,10 +177,37 @@ def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
     if candidate.get("hypothesis_id"):
         hypothesis = db.get_hypothesis(db_root, candidate["hypothesis_id"])
 
+    # ADDED 2026-09-24 (Phase 3): the user's review history for this
+    # candidate (oldest first) and its job trust mark, so the detail
+    # dialog shows why a candidate is Rejected/Supported and whether its
+    # job is marked Corrupted. "review" = review_summary_for_project()'s
+    # entry for this candidate (status_label, job_id, job_trust, ...).
+    review_history = review.get_candidate_review_history(db_root, candidate_id)
+    review_entry = review.review_summary_for_project(
+        db_root, candidate["grand_project_id"]).get(candidate_id)
+
     return json.dumps({
         "candidate": candidate,
         "investigation": investigation,
         "confidence_history": confidence_history,
         "evidence": evidence,
         "hypothesis": hypothesis,
+        "review_history": review_history,
+        "review": review_entry,
     })
+
+
+# ADDED 2026-09-24 (Phase 3): write paths for the review UI. Thin
+# pass-throughs to grand_project_review.py's own *_json functions, kept
+# here so GrandProjectActivity.kt still talks to one module only.
+
+def set_candidate_status_json(db_root: str, candidate_id: str, new_status: str, reason: str) -> str:
+    return review.set_candidate_status_json(db_root, candidate_id, new_status, reason)
+
+
+def set_job_trust_json(db_root: str, job_ref: str, trust: str, reason: str) -> str:
+    return review.set_job_trust_json(db_root, job_ref, trust, reason)
+
+
+def list_job_trust_json(db_root: str) -> str:
+    return review.list_job_trust_json(db_root)
