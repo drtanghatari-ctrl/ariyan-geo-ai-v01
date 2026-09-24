@@ -247,6 +247,11 @@ if (row.optString("job_trust") == "CORRUPTED") {
                 if (lastReason.isNotEmpty() && lastReason != "null") {
                     append("\nreview: ").append(lastReason)
                 }
+                // F1 Known-Site Layer (2026-09-24): gazetteer context, not evidence.
+                val knownSiteText = row.optString("known_site_text", "")
+                if (knownSiteText.isNotEmpty() && knownSiteText != "null") {
+                    append("\nknown site: ").append(knownSiteText)
+                }
                 append("\n(tap for confidence history + evidence)")
             }
             val rowView = TextView(this).apply {
@@ -482,7 +487,9 @@ if (row.optString("job_trust") == "CORRUPTED") {
         if (candidate != null) {
             sb.append("Candidate\n")
             sb.append(String.format("  lat=%.6f  lon=%.6f\n", candidate.optDouble("lat"), candidate.optDouble("lon")))
-            sb.append("  status: ").append(candidate.optString("status")).append("\n")
+            val reviewLabel = detail.optJSONObject("review")?.optString("status_label", "") ?: ""
+            val shownStatus = if (reviewLabel.isNotEmpty() && reviewLabel != "null") reviewLabel else candidate.optString("status")
+            sb.append("  status: ").append(shownStatus).append("\n")
             val band = candidate.optString("confidence_band", "")
             if (band.isNotEmpty()) {
                 sb.append("  current confidence: ").append(band)
@@ -508,6 +515,7 @@ if (row.optString("job_trust") == "CORRUPTED") {
             sb.append("\n")
         }
 appendReviewSection(sb, detail)
+        appendKnownSiteSection(sb, detail)
         val history = detail.optJSONArray("confidence_history")
         if (history != null && history.length() > 0) {
             sb.append("Confidence History (").append(history.length()).append(" entries, oldest first)\n")
@@ -595,8 +603,8 @@ appendReviewSection(sb, detail)
             .setTitle("Candidate Detail")
             .setView(scrollView)
             .setPositiveButton("Close", null)
-.setNegativeButton("Review...") { _, _ -> showReviewPicker(candidateId) }
-            .setNeutralButton("Link to Hypothesis") { _, _ -> showHypothesisPicker(candidateId) }
+            .setNegativeButton("Review") { _, _ -> showReviewPicker(candidateId) }
+            .setNeutralButton("Hypothesis") { _, _ -> showHypothesisPicker(candidateId) }
             .show()
     }
 
@@ -753,6 +761,45 @@ appendReviewSection(sb, detail)
             }
         }
         if (review != null) sb.append("\n")
+    }
+
+    /** F1 Known-Site Layer (2026-09-24): nearest sites recorded in the
+     * bundled ANE gazetteer (Pedersen, Zenodo 10.5281/zenodo.6384045,
+     * CC-BY-4.0). Context only -- never evidence, never changes
+     * confidence. "Not in gazetteer" does not mean "new site". */
+    private fun appendKnownSiteSection(sb: StringBuilder, detail: JSONObject) {
+        val ks = detail.optJSONObject("known_site") ?: return
+        sb.append("Known Sites (gazetteer context, not evidence)\n")
+        if (ks.has("error")) {
+            sb.append("  ").append(ks.optString("error")).append("\n\n")
+            return
+        }
+        sb.append("  ").append(ks.optString("text")).append("\n")
+        val extents = ks.optJSONArray("extents_within_near")
+        if (extents != null) {
+            for (i in 0 until extents.length()) {
+                val e = extents.getJSONObject(i)
+                if (e.optBoolean("inside")) {
+                    sb.append("  inside ").append(e.optString("kind")).append(": ").append(e.optString("name")).append("\n")
+                } else {
+                    sb.append(String.format("  %.0f m from %s: ", e.optDouble("distance_m"), e.optString("kind")))
+                    sb.append(e.optString("name")).append("\n")
+                }
+            }
+        }
+        val nearest = ks.optJSONArray("nearest")
+        if (nearest != null && nearest.length() > 0) {
+            sb.append("  nearest recorded points:\n")
+            for (i in 0 until nearest.length()) {
+                val n = nearest.getJSONObject(i)
+                val dKm = n.optDouble("distance_m") / 1000.0
+                sb.append(String.format("    %.2f km  ", dKm)).append(n.optString("name")).append("\n")
+            }
+        }
+        sb.append(String.format("  gazetteer points within %.0f km: %d\n",
+            ks.optDouble("density_radius_km"), ks.optInt("density_points")))
+        sb.append("  source: ").append(ks.optString("source")).append(" (").append(ks.optString("source_license")).append(")\n")
+        sb.append("\n")
     }
 
     /** Asks for one line of text, then calls onOk with it (trimmed). */
