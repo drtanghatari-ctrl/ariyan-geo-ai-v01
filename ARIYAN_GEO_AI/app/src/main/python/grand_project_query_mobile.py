@@ -64,6 +64,16 @@ def list_candidates_json(db_root: str, grand_project_id: str) -> str:
     # grand_project_review.review_summary_for_project(). Extra keys only;
     # the original fields are unchanged. Keys: status_label, job_id,
     # job_trust, job_trust_reason, last_review_reason.
+    # ADDED 2026-09-29 (R1 auto-review): before the summary is read, the
+    # automatic pass updates the status of every candidate the user has
+    # never reviewed (writes only real changes; user reviews always win).
+    # rows were read above, so their own "status" is refreshed from the
+    # summary below. A failure here never breaks the list -- the list
+    # simply shows the statuses as they were.
+    try:
+        review.auto_review_project(db_root, grand_project_id)
+    except Exception:
+        pass
     summary = review.review_summary_for_project(db_root, grand_project_id)
     for row in rows:
         row.update(summary.get(row["id"], {}))
