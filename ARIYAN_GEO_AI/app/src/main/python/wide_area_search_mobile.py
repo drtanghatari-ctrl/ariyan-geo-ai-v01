@@ -65,10 +65,11 @@ import json
 import math
 import os
 import re
+import stat
 import threading
 from typing import Any, Dict, List, Optional
 
-from coordinate import GeoPoint, offset_point
+from coordinate import GeoPoint, offset_point, build_aoi
 
 import grand_project_db as db
 import geocoding_source_mobile_nominatim as geocoding
@@ -76,6 +77,8 @@ import investigation_multi_mobile
 import debate_mobile
 import dem_source_mobile
 import offline_dem_store
+import offline_evidence_fallback
+import offline_country_registry
 import grand_project_sync
 import sh_backoff
 
@@ -449,19 +452,124 @@ def _group_tile_failures(failed_rows: List[Dict[str, Any]]) -> List[Dict[str, An
     return out
 
 
+_TIFF_MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
+
+
+def _dem_file_status(path: str) -> str:
+    """Checks one DEM file RIGHT NOW and says which of these it is:
+    ABSENT; UNREADABLE (with the real OS error -- e.g. a storage-permission
+    or I/O problem, which os.path.isfile() would silently report as
+    "missing"); NOT A FILE; PRESENT but not starting with a TIFF header;
+    or PRESENT (size in bytes). Reads at most 4 bytes. Never raises."""
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return "ABSENT"
+    except OSError as exc:
+        return f"UNREADABLE ({type(exc).__name__}, errno {exc.errno}: {exc.strerror})"
+    if not stat.S_ISREG(st.st_mode):
+        return "NOT A FILE (a folder or special file has this name)"
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError as exc:
+        return f"UNREADABLE ({type(exc).__name__}, errno {exc.errno}: {exc.strerror})"
+    if head not in _TIFF_MAGIC:
+        return f"PRESENT ({st.st_size} bytes) but NOT a TIFF file (unexpected header)"
+    return f"PRESENT ({st.st_size} bytes)"
+
+
+def _offline_dem_check(db_root: str, job: Dict[str, Any], failed_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """For the FAILED tiles only: which offline DEM files their analysis
+    windows need, and the state of each file right now.
+
+    Uses exactly the points the offline-first read samples (see
+    investigation_multi_mobile._fetch_offline_dem_resampled(): the
+    window from derive_analysis_window() for this job's tile size, on
+    the native ~30 m grid, points from
+    offline_evidence_fallback._sample_grid_points()), and the same
+    country lookup (the window's centre) and file naming
+    (offline_dem_store.local_tile_path()). The job runner always calls
+    the analysis with automatic radius/grid (the app never passes
+    others), so this matches the window every tile actually used.
+
+    IMPORTANT for reading the result: this describes the library AT THE
+    MOMENT OF THE CHECK, not at the time the tiles ran -- a file can have
+    been added or removed since. Never raises; a problem computing one
+    tile is reported for that tile instead."""
+    window = derive_analysis_window(job["tile_size_m"])
+    radius_m = float(window["radius_m"])
+    native_n = int(max(8, math.ceil(
+        2.0 * radius_m / investigation_multi_mobile.OFFLINE_FIRST_NATIVE_CELL_M
+    )))
+
+    files: Dict[str, Dict[str, Any]] = {}
+    no_country: List[int] = []
+    errors: List[str] = []
+    folder_shown: Optional[str] = None
+
+    for row in failed_rows:
+        tile_number = int(row.get("tile_index", 0)) + 1
+        try:
+            center = GeoPoint(float(row["center_lat"]), float(row["center_lon"]))
+            country = offline_country_registry.get_country_for_point(center.lat, center.lon)
+            if country is None:
+                no_country.append(tile_number)
+                continue
+            aoi = build_aoi(center, radius_m=radius_m, grid_size=native_n)
+            lats, lons = offline_evidence_fallback._sample_grid_points(aoi)
+            for lat in lats:
+                for lon in lons:
+                    path = offline_dem_store.local_tile_path(
+                        country.storage_folder, db_root, lat, lon
+                    )
+                    entry = files.get(path)
+                    if entry is None:
+                        entry = {"file": os.path.basename(path), "tile_numbers": set()}
+                        files[path] = entry
+                        if folder_shown is None:
+                            folder_shown = os.path.dirname(path)
+                    entry["tile_numbers"].add(tile_number)
+        except Exception as exc:  # never let the diagnostic itself fail the button
+            errors.append(f"tile {tile_number}: {type(exc).__name__}: {exc}")
+
+    out_files: List[Dict[str, Any]] = []
+    for path in sorted(files):
+        entry = files[path]
+        out_files.append({
+            "file": entry["file"],
+            "status": _dem_file_status(path),
+            "tiles": _compress_tile_numbers(sorted(entry["tile_numbers"])),
+        })
+    return {
+        "folder": folder_shown,
+        "files": out_files,
+        "no_country_tiles": _compress_tile_numbers(no_country),
+        "errors": errors,
+    }
+
+
 def summarize_tile_failures_json(db_root: str, job_id: str) -> str:
     """Read-only. Returns {"job": {...} | null, "progress": {...},
     "failed": <int>, "groups": [...]} for the "Why did tiles fail?"
     button: every FAILED tile's real stored error_message, grouped (see
-    _group_tile_failures()). Changes nothing."""
+    _group_tile_failures()), plus "dem_check" (added 2026-09-29, null when
+    nothing failed): the offline DEM files the failed tiles' windows need
+    and each file's state right now -- present / absent / unreadable with
+    the OS error (see _offline_dem_check()). Changes nothing."""
     job = db.get_wide_area_search_job(db_root, job_id)
     progress = db.get_wide_area_search_job_progress(db_root, job_id)
     failed_rows = [t for t in db.list_tiles_for_job(db_root, job_id) if t.get("status") == "FAILED"]
+    dem_check = (
+        _offline_dem_check(db_root, job, failed_rows)
+        if (job is not None and failed_rows) else None
+    )
     return json.dumps({
         "job": job,
         "progress": progress,
         "failed": len(failed_rows),
         "groups": _group_tile_failures(failed_rows),
+        "dem_check": dem_check,
     })
 
 
