@@ -213,6 +213,7 @@ class GrandProjectActivity : AppCompatActivity() {
         lastCandidatesJson = jsonText
         addCandidateControls()
         addCandidateSearchBar()
+        if (candidateSearchQuery.isEmpty()) addStatusFilterButton()
 
         val allRows = ArrayList<JSONObject>(array.length())
         for (k in 0 until array.length()) allRows.add(array.getJSONObject(k))
@@ -238,6 +239,13 @@ class GrandProjectActivity : AppCompatActivity() {
     private val expandedGroups = mutableSetOf<String>()
     private val groupShowLimit = mutableMapOf<String, Int>()
     private var candidateSearchQuery = ""
+
+    // R2 step 2 (2026-09-29): status filter. "ALL" or one of the
+    // statusKey() values below. Applies to the grouped view only;
+    // search always shows every match.
+    private var statusFilter = "ALL"
+    private val nearbyRadiusM = 500.0
+    private val maxNearbyShown = 10
 
     private val noJobGroupKey = "__no_job__"
     private val rowsPerPage = 200
@@ -335,12 +343,18 @@ class GrandProjectActivity : AppCompatActivity() {
                 if (key == noJobGroupKey) "" else groups[key]!!.first().optString("job_created_at", "")
             }
         )
+        var groupsShown = 0
         for (key in orderedKeys) {
             val rows = groups[key]!!
+            val matching = if (statusFilter == "ALL") rows else rows.filter { statusKey(it) == statusFilter }
+            if (matching.isEmpty()) continue
+            groupsShown++
             addGroupHeader(key, rows)
             if (key !in expandedGroups) continue
-            val visible = rows.filter { !(hideRejected && it.optString("status") == "REJECTED") }
-                .sortedWith(rankComparator())
+            // Hide rejected is ignored when the filter itself asks for Rejected.
+            val visible = matching.filter {
+                !(hideRejected && statusFilter != "REJECTED" && it.optString("status") == "REJECTED")
+            }.sortedWith(rankComparator())
             if (visible.isEmpty()) {
                 addNoteRow("  (every candidate in this group is Rejected and hidden)")
                 continue
@@ -354,6 +368,94 @@ class GrandProjectActivity : AppCompatActivity() {
                 addShowMoreButton(key, shown, visible.size)
             }
         }
+        if (groupsShown == 0) {
+            addNoteRow("No candidates with status " + statusFilterLabel(statusFilter) + ".")
+        }
+    }
+
+    /** Maps a row's stored status to one of SUPPORTED / INCONCLUSIVE /
+     * REJECTED / OPEN (GENERATED and anything unknown count as OPEN,
+     * the same rule as the group header counts). */
+    private fun statusKey(row: JSONObject): String =
+        when (row.optString("status")) {
+            "SUPPORTED" -> "SUPPORTED"
+            "INCONCLUSIVE" -> "INCONCLUSIVE"
+            "REJECTED" -> "REJECTED"
+            else -> "OPEN"
+        }
+
+    private fun statusFilterLabel(key: String): String =
+        when (key) {
+            "SUPPORTED" -> "Supported"
+            "INCONCLUSIVE" -> "Inconclusive"
+            "REJECTED" -> "Rejected"
+            "OPEN" -> "Open"
+            else -> "All statuses"
+        }
+
+    /** Full-width "Show: ..." button; tapping it opens a picker with the
+     * number of candidates in each status. */
+    private fun addStatusFilterButton() {
+        val density = resources.displayMetrics.density
+        val counts = mutableMapOf("SUPPORTED" to 0, "INCONCLUSIVE" to 0, "OPEN" to 0, "REJECTED" to 0)
+        var total = 0
+        try {
+            val all = JSONArray(lastCandidatesJson ?: "[]")
+            for (k in 0 until all.length()) {
+                val key = statusKey(all.getJSONObject(k))
+                counts[key] = (counts[key] ?: 0) + 1
+                total++
+            }
+        } catch (e: Exception) {
+            // leave counts at 0
+        }
+        val button = MaterialButton(this).apply {
+            text = "Show: " + statusFilterLabel(statusFilter) + " (tap to change)"
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginStart = (8 * density).toInt()
+                marginEnd = (8 * density).toInt()
+            }
+            setOnClickListener {
+                val keys = arrayOf("ALL", "SUPPORTED", "INCONCLUSIVE", "OPEN", "REJECTED")
+                val labels = keys.map { key ->
+                    val n = if (key == "ALL") total else (counts[key] ?: 0)
+                    statusFilterLabel(key) + "  (" + n + ")"
+                }.toTypedArray<CharSequence>()
+                AlertDialog.Builder(this@GrandProjectActivity)
+                    .setTitle("Show candidates with status")
+                    .setItems(labels) { _, which ->
+                        statusFilter = keys[which]
+                        lastCandidatesJson?.let { renderCandidateRows(it) }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+        binding.containerCandidateRows.addView(button)
+    }
+
+    /** Other candidates within nearbyRadiusM of (lat, lon), nearest
+     * first, from the Candidates list already loaded on screen (every
+     * job, every status -- the point is to see what else was found at
+     * this spot). The candidate itself is left out. */
+    private fun nearbyCandidates(candidateId: String, lat: Double, lon: Double): List<Pair<JSONObject, Double>> {
+        val all = try {
+            JSONArray(lastCandidatesJson ?: "[]")
+        } catch (e: Exception) {
+            return emptyList()
+        }
+        val out = ArrayList<Pair<JSONObject, Double>>()
+        for (k in 0 until all.length()) {
+            val r = all.getJSONObject(k)
+            if (r.optString("id") == candidateId || r.isNull("lat") || r.isNull("lon")) continue
+            val d = distanceM(lat, lon, r.optDouble("lat"), r.optDouble("lon"))
+            if (d <= nearbyRadiusM) out.add(Pair(r, d))
+        }
+        out.sortBy { it.second }
+        return out
     }
 
     private fun addGroupHeader(key: String, rows: List<JSONObject>) {
@@ -724,7 +826,10 @@ class GrandProjectActivity : AppCompatActivity() {
                     // own documented {"error": "..."} convention.
                     Toast.makeText(this@GrandProjectActivity, detail.optString("error"), Toast.LENGTH_SHORT).show()
                 } else {
-                    showDetailDialog(candidateId, formatCandidateDetail(detail))
+                    val c = detail.optJSONObject("candidate")
+                    val lat = if (c == null || c.isNull("lat")) null else c.optDouble("lat")
+                    val lon = if (c == null || c.isNull("lon")) null else c.optDouble("lon")
+                    showDetailDialog(candidateId, formatCandidateDetail(detail), lat, lon)
                 }
             } catch (e: PyException) {
                 Toast.makeText(
@@ -868,27 +973,82 @@ appendReviewSection(sb, detail)
      * own detail view, they simply tap the same candidate row again
      * afterward; this is a deliberately simple flow for a first pass,
      * not an attempt to keep the dialog open and refresh it in place. */
-    private fun showDetailDialog(candidateId: String, text: String) {
+    private fun showDetailDialog(candidateId: String, text: String, lat: Double?, lon: Double?) {
         val density = resources.displayMetrics.density
+        val pad = (16 * density).toInt()
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
         val textView = TextView(this).apply {
             this.text = text
             typeface = Typeface.MONOSPACE
             textSize = 12f
             setTextIsSelectable(true)
             setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
-            val pad = (16 * density).toInt()
-            setPadding(pad, pad, pad, pad)
+            setPadding(pad, pad, pad, pad / 2)
         }
+        column.addView(textView)
         val scrollView = ScrollView(this).apply {
-            addView(textView)
+            addView(column)
         }
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle("Candidate Detail")
             .setView(scrollView)
             .setPositiveButton("Close", null)
             .setNegativeButton("Review") { _, _ -> showReviewPicker(candidateId) }
             .setNeutralButton("Hypothesis") { _, _ -> showHypothesisPicker(candidateId) }
-            .show()
+            .create()
+
+        // R2 step 2 (2026-09-29): "Nearby candidates" -- other candidates
+        // (any job, any status) within nearbyRadiusM, nearest first. Tap
+        // one to open its own detail. Placed at the END of the dialog,
+        // after the evidence, so the candidate's own record reads first.
+        if (lat != null && lon != null) {
+            val nearby = nearbyCandidates(candidateId, lat, lon)
+            val header = TextView(this).apply {
+                this.text = "Nearby candidates (within " + nearbyRadiusM.toInt() + " m): " + nearby.size +
+                    (if (nearby.size > maxNearbyShown) "  (nearest $maxNearbyShown shown)" else "") +
+                    (if (nearby.isEmpty()) "" else "\n  tap one to open it")
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                textSize = 12f
+                setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+                setPadding(pad, pad / 2, pad, pad / 4)
+            }
+            column.addView(header)
+            val tapBackground = TypedValue()
+            theme.resolveAttribute(android.R.attr.selectableItemBackground, tapBackground, true)
+            for (hit in nearby.take(maxNearbyShown)) {
+                val r = hit.first
+                val otherId = r.optString("id")
+                val jobId = r.optString("job_id", "")
+                val line = buildString {
+                    append(String.format("%4.0f m  ", hit.second))
+                    append(otherId.take(8))
+                    append("  job ").append(if (jobId.isEmpty() || jobId == "null") "none" else jobId.take(6))
+                    append("\n        ").append(r.optString("status_label", r.optString("status")))
+                    if (!r.isNull("score")) append(String.format("  z %+.2f", r.optDouble("score")))
+                    if (r.optString("job_trust") == "CORRUPTED") append("  !! corrupted job")
+                }
+                val row = TextView(this).apply {
+                    this.text = line
+                    typeface = Typeface.MONOSPACE
+                    textSize = 12f
+                    setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
+                    setPadding(pad, pad / 3, pad, pad / 3)
+                    isClickable = true
+                    isFocusable = true
+                    setBackgroundResource(tapBackground.resourceId)
+                    setOnClickListener {
+                        dialog.dismiss()
+                        showCandidateDetail(otherId)
+                    }
+                }
+                column.addView(row)
+            }
+            val spacer = TextView(this).apply { setPadding(0, pad / 2, 0, 0) }
+            column.addView(spacer)
+        }
+        dialog.show()
     }
 
     /** Fetches the real list of existing hypotheses for this project
