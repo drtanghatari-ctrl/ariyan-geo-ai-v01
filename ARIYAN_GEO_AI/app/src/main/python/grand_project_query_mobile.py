@@ -259,3 +259,12 @@ def set_job_trust_json(db_root: str, job_ref: str, trust: str, reason: str) -> s
 
 def list_job_trust_json(db_root: str) -> str:
     return review.list_job_trust_json(db_root)
+
+
+# F2 early self-calibration (added 2026-09-29): read-only measurement of
+# one job's hit rate against the gazetteer, with a chance baseline. See
+# grand_project_calibration.py. Imported here so the Activity still talks
+# to one module only.
+def calibrate_job_json(db_root: str, job_ref: str) -> str:
+    import grand_project_calibration as calibration
+    return calibration.calibrate_job_json(db_root, job_ref)
