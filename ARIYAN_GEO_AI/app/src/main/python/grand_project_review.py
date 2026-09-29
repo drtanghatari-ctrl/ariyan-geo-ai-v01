@@ -79,6 +79,15 @@ CHANGELOG
   - Still never changes Steward confidence and never deletes anything.
   - Satellite visual checks stay optional human calls (no rule reads
     imagery).
+- 2026-09-29 (R1 follow-up, "Return to automatic"): the user can hand a
+  candidate BACK to the automatic pass. set_candidate_status() with the
+  status "AUTO" appends a candidate_review row with reviewed_by=
+  'user_handback' whose new_status equals the current status (nothing is
+  changed by the hand-back itself; the next automatic pass sets the
+  status from the rules). A candidate is now "user-owned" only while its
+  newest user-side row (reviewed_by 'user' or 'user_handback') is a
+  'user' row -- so any later user review takes ownership again, and the
+  history keeps every step. Rows are still never updated or deleted.
 """
 
 from __future__ import annotations
@@ -125,6 +134,8 @@ MIN_ID_PREFIX_CHARS = 6
 
 REVIEWED_BY_USER = "user"
 REVIEWED_BY_AUTO = "auto"
+REVIEWED_BY_HANDBACK = "user_handback"
+STATUS_INPUT_AUTO = "AUTO"
 AUTO_REASON_PREFIX = "[auto] "
 
 # Must match grand_project_refinement.REFINEMENT_RELATION and its
@@ -227,9 +238,12 @@ def set_candidate_status(
     "new_status", "reviewed_at"}. Setting the same status again is
     allowed (it records a new reason) -- the history is the point."""
     key = str(new_status or "").strip().upper()
+    if key == STATUS_INPUT_AUTO:
+        return _hand_back_to_auto(db_root, candidate_ref, reason)
     if key not in _STATUS_INPUT:
         raise ReviewError(
-            f"Unknown status {new_status!r}; use Open, Supported, Rejected or Inconclusive.")
+            f"Unknown status {new_status!r}; use Open, Supported, Rejected, "
+            "Inconclusive or Auto.")
     status = _STATUS_INPUT[key]
     text = _clean_reason(reason)
 
@@ -277,6 +291,71 @@ def set_candidate_status(
         "previous_status": previous,
         "new_status": status,
         "reviewed_at": now,
+    }
+
+
+def _user_owned_ids(conn) -> set:
+    """Candidates whose newest user-side row (reviewed_by 'user' or
+    'user_handback') is a 'user' row, i.e. the user currently owns their
+    status and the automatic pass must leave them alone."""
+    rows = conn.execute(
+        """
+        SELECT r.candidate_id, r.reviewed_by FROM candidate_review r
+        JOIN (SELECT candidate_id, MAX(id) AS max_id FROM candidate_review
+              WHERE reviewed_by IN (?, ?) GROUP BY candidate_id) m
+          ON r.id = m.max_id
+        """,
+        (REVIEWED_BY_USER, REVIEWED_BY_HANDBACK),
+    ).fetchall()
+    return {r["candidate_id"] for r in rows if r["reviewed_by"] == REVIEWED_BY_USER}
+
+
+def _hand_back_to_auto(db_root: str, candidate_ref: str, reason: str) -> Dict[str, Any]:
+    """Returns a user-owned candidate to the automatic pass (see the
+    2026-09-29 "Return to automatic" CHANGELOG entry). The status itself
+    is not changed here; the next auto_review_project() run sets it."""
+    text = _clean_reason(reason)
+    conn = _connect(db_root)
+    try:
+        candidate_id = _resolve_id(conn, "candidate", candidate_ref)
+        if candidate_id not in _user_owned_ids(conn):
+            raise ReviewError(
+                "This candidate is already under automatic review (no user review to hand back).")
+        row = conn.execute(
+            "SELECT grand_project_id, status FROM candidate WHERE id = ?", (candidate_id,)
+        ).fetchone()
+        current = row["status"]
+        grand_project_id = row["grand_project_id"]
+        now = db._now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO candidate_review
+                    (candidate_id, previous_status, new_status, reason,
+                     reviewed_at, reviewed_by)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (candidate_id, current, current, "[handed back to automatic] " + text,
+                 now, REVIEWED_BY_HANDBACK),
+            )
+    finally:
+        conn.close()
+
+    try:
+        db.log_timeline_event(
+            db_root, grand_project_id, "CANDIDATE_REVIEWED",
+            related_entity_type="candidate", related_entity_id=candidate_id,
+            description=f"User handed the candidate back to automatic review. Reason: {text}",
+        )
+    except Exception:
+        pass
+
+    return {
+        "candidate_id": candidate_id,
+        "previous_status": current,
+        "new_status": current,
+        "reviewed_at": now,
+        "handed_back": True,
     }
 
 
@@ -405,7 +484,7 @@ def review_summary_for_project(db_root: str, grand_project_id: str) -> Dict[str,
             last = latest.get(r["id"])
             source = last["reviewed_by"] if last else None
             label = STATUS_LABELS.get(r["status"], r["status"])
-            if source == REVIEWED_BY_AUTO:
+            if source in (REVIEWED_BY_AUTO, REVIEWED_BY_HANDBACK):
                 label += " (auto)"
             out[r["id"]] = {
                 "status": r["status"],
@@ -536,12 +615,7 @@ def auto_review_project(db_root: str, grand_project_id: str) -> Dict[str, Any]:
             candidates.setdefault(r["id"], {"status": r["status"], "job_id": r["job_id"]})
         ids = set(candidates)
 
-        user_owned = {
-            r["candidate_id"] for r in conn.execute(
-                "SELECT DISTINCT candidate_id FROM candidate_review WHERE reviewed_by = ?",
-                (REVIEWED_BY_USER,),
-            ).fetchall()
-        } & ids
+        user_owned = _user_owned_ids(conn) & ids
         latest = _latest_reviews(conn)
         land = _land_cover_reasons(conn, ids)
         refine, unreadable = _refinement_verdicts(db_root, conn, ids - user_owned)
@@ -572,8 +646,11 @@ def auto_review_project(db_root: str, grand_project_id: str) -> Dict[str, Any]:
             if previous == status:
                 # Same status: write only to refresh an earlier AUTO reason
                 # that no longer describes the situation.
-                if not (last and last["reviewed_by"] == REVIEWED_BY_AUTO
-                        and last["reason"] != reason):
+                # After a hand-back, write once so the history shows which
+                # rule now holds the status.
+                if not (last and (
+                        last["reviewed_by"] == REVIEWED_BY_HANDBACK
+                        or (last["reviewed_by"] == REVIEWED_BY_AUTO and last["reason"] != reason))):
                     continue
             writes.append((cid, previous, status, reason, now, REVIEWED_BY_AUTO))
             by_status[status] = by_status.get(status, 0) + 1
