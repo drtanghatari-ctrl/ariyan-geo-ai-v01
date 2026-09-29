@@ -75,8 +75,21 @@ def list_candidates_json(db_root: str, grand_project_id: str) -> str:
     except Exception:
         pass
     summary = review.review_summary_for_project(db_root, grand_project_id)
+    # ADDED 2026-09-29 (R2 step 1, candidate organisation): each row also
+    # carries its Wide-Area Search job's title and creation time, so the
+    # Candidates tab can group rows under one header per job. Extra keys
+    # only: job_title, job_created_at (both null for candidates that did
+    # not come from a Wide-Area Search tile). A failure to read the jobs
+    # never breaks the list -- the rows simply carry no job title.
+    try:
+        jobs = {j["id"]: j for j in db.list_wide_area_search_jobs_for_project(db_root, grand_project_id)}
+    except Exception:
+        jobs = {}
     for row in rows:
         row.update(summary.get(row["id"], {}))
+        job = jobs.get(row.get("job_id"))
+        row["job_title"] = job.get("title") if job else None
+        row["job_created_at"] = job.get("created_at") if job else None
         # ADDED 2026-09-24 (F1 Known-Site Layer): offline gazetteer
         # context. Extra keys only: known_site_label, known_site_text.
         # Context, never evidence -- see known_sites.py. A lookup
