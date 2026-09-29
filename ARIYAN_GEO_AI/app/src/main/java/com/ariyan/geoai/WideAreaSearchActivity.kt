@@ -593,8 +593,32 @@ class WideAreaSearchActivity : AppCompatActivity() {
             setPadding(pad, pad, pad, 0)
             visibility = View.GONE
         }
+        // Failed-tile tools (added 2026-09-29). Buttons inside the dialog
+        // body, because its three button slots (Close / Start / Refine) are
+        // already taken. "Why did tiles fail?" is read-only; "Retry failed
+        // tiles…" asks for confirmation first and never starts a run itself.
+        val buttonWhyFailed = MaterialButton(this).apply {
+            text = "Why did tiles fail?"
+            setAllCaps(false)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val buttonRetryFailed = MaterialButton(this).apply {
+            text = "Retry failed tiles…"
+            setAllCaps(false)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                leftMargin = (8 * density).toInt()
+            }
+        }
+        val failedTileRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            val pad = (16 * density).toInt()
+            setPadding(pad, pad, pad, 0)
+            addView(buttonWhyFailed)
+            addView(buttonRetryFailed)
+        }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            addView(failedTileRow)
             addView(stageText)
             addView(progressText)
         }
@@ -607,6 +631,13 @@ class WideAreaSearchActivity : AppCompatActivity() {
             .setNeutralButton("Start / Resume") { _, _ -> chooseRunMode(jobId) }
             .setNegativeButton("Refine top N…") { _, _ -> chooseRefineCount(jobId) }
             .create()
+        buttonWhyFailed.setOnClickListener { showTileFailures(jobId, title) }
+        buttonRetryFailed.setOnClickListener {
+            // Closed first so that, when reopened, it re-reads the true
+            // counts instead of the pre-retry numbers.
+            dialog.dismiss()
+            confirmRetryFailedTiles(jobId, title)
+        }
 
         val statusFile = File(offlineDataRoot, "wide_area_search_status_$jobId.json")
         // Pass 2 writes its own file (see grand_project_refinement.py); show
@@ -636,6 +667,169 @@ class WideAreaSearchActivity : AppCompatActivity() {
         }
         dialog.setOnDismissListener { pollingJob.cancel() }
         dialog.show()
+    }
+
+    // =========================== FAILED TILES (ADDED 2026-09-29) ===========================
+
+    /** Formats wide_area_search_mobile's grouped failure reasons. Groups are
+     * formed with numbers ignored; each shows one real, unmodified stored
+     * message as its example. */
+    private fun formatFailureGroups(groups: JSONArray?): String = buildString {
+        if (groups == null) return@buildString
+        for (i in 0 until groups.length()) {
+            val g = groups.optJSONObject(i) ?: continue
+            val count = g.optInt("count")
+            append(count).append(if (count == 1) " tile" else " tiles")
+            append(" (tile ").append(g.optString("tiles")).append("):\n")
+            append(g.optString("example")).append("\n\n")
+        }
+    }
+
+    /** "Why did tiles fail?" -- read-only. Shows every FAILED tile's real
+     * stored error message (wide_area_search_tile.error_message), grouped
+     * by summarize_tile_failures_json(). Changes nothing. */
+    private fun showTileFailures(jobId: String, title: String) {
+        lifecycleScope.launch {
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("wide_area_search_mobile")
+                        .callAttr("summarize_tile_failures_json", offlineDataRoot, jobId)
+                        .toString()
+                }
+                val result = JSONObject(jsonText)
+                val progress = result.optJSONObject("progress")
+                val failed = result.optInt("failed")
+                val total = progress?.optInt("total") ?: 0
+                val body = buildString {
+                    if (progress != null) {
+                        append("tiles: ").append(progress.optInt("done")).append(" done, ")
+                        append(failed).append(" failed, ")
+                        append(progress.optInt("pending")).append(" pending, ")
+                        append(total).append(" total\n\n")
+                    }
+                    if (failed == 0) {
+                        append("No tile of this job is FAILED, so there is no failure reason to show.")
+                    } else {
+                        append("Why the ").append(failed).append(" FAILED tile")
+                        append(if (failed == 1) "" else "s").append(" failed, grouped.\n")
+                        append("Messages that differ only in numbers are grouped together; ")
+                        append("each group shows one real stored message.\n\n")
+                        append(formatFailureGroups(result.optJSONArray("groups")).trimEnd())
+                    }
+                }
+                AlertDialog.Builder(this@WideAreaSearchActivity)
+                    .setTitle("Why did tiles fail? -- $title")
+                    .setView(scrollableText(body))
+                    .setPositiveButton("Close", null)
+                    .show()
+            } catch (e: PyException) {
+                Toast.makeText(
+                    this@WideAreaSearchActivity,
+                    "Could not read tile failures: ${cleanErrorMessage(e.message)}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    /** "Retry failed tiles…" -- the explicit, human-requested retry.
+     * Refuses while any job is running (a running job only works through
+     * the PENDING list it read at start, so tiles reset mid-run would be
+     * left PENDING and misreported). Reads the current failures, asks for
+     * confirmation, then calls retry_failed_tiles_json(). Never starts a
+     * run: afterwards it offers Start / Resume, which goes through the
+     * usual run-mode choice. */
+    private fun confirmRetryFailedTiles(jobId: String, title: String) {
+        if (WideAreaSearchService.isRunning) {
+            Toast.makeText(this, "A wide-area search job is running -- let it finish before retrying failed tiles.", Toast.LENGTH_LONG).show()
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("wide_area_search_mobile")
+                        .callAttr("summarize_tile_failures_json", offlineDataRoot, jobId)
+                        .toString()
+                }
+                val result = JSONObject(jsonText)
+                val failed = result.optInt("failed")
+                if (failed == 0) {
+                    AlertDialog.Builder(this@WideAreaSearchActivity)
+                        .setTitle("Retry failed tiles -- $title")
+                        .setMessage("No tile of this job is FAILED. Nothing to retry.")
+                        .setPositiveButton("OK", null)
+                        .show()
+                    return@launch
+                }
+                val body = buildString {
+                    append("Put ").append(failed).append(" FAILED tile")
+                    append(if (failed == 1) "" else "s").append(" back to PENDING?\n\n")
+                    append("- Nothing runs until you tap Start / Resume.\n")
+                    append("- DONE tiles and their candidates are not touched; the job keeps its id.\n")
+                    append("- The failure reasons below are saved in the project timeline before ")
+                    append("they are cleared from the tiles.\n")
+                    append("- If the cause is not fixed first, the same tiles will simply fail again.\n\n")
+                    append(formatFailureGroups(result.optJSONArray("groups")).trimEnd())
+                }
+                AlertDialog.Builder(this@WideAreaSearchActivity)
+                    .setTitle("Retry failed tiles -- $title")
+                    .setView(scrollableText(body))
+                    .setPositiveButton("Retry $failed") { _, _ -> retryFailedTiles(jobId, title) }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            } catch (e: PyException) {
+                Toast.makeText(
+                    this@WideAreaSearchActivity,
+                    "Could not read tile failures: ${cleanErrorMessage(e.message)}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    private fun retryFailedTiles(jobId: String, title: String) {
+        // Checked again: a job could have been started while the
+        // confirmation dialog was open.
+        if (WideAreaSearchService.isRunning) {
+            Toast.makeText(this, "A wide-area search job is running -- let it finish before retrying failed tiles.", Toast.LENGTH_LONG).show()
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("wide_area_search_mobile")
+                        .callAttr("retry_failed_tiles_json", offlineDataRoot, jobId)
+                        .toString()
+                }
+                val result = JSONObject(jsonText)
+                val reset = result.optInt("reset")
+                val progress = result.optJSONObject("progress")
+                val body = buildString {
+                    append(reset).append(" tile").append(if (reset == 1) "" else "s")
+                    append(" put back to PENDING.\n\n")
+                    if (progress != null) {
+                        append("tiles: ").append(progress.optInt("done")).append(" done, ")
+                        append(progress.optInt("failed")).append(" failed, ")
+                        append(progress.optInt("pending")).append(" pending, ")
+                        append(progress.optInt("total")).append(" total\n\n")
+                    }
+                    append("Tap Start / Resume to run them.")
+                }
+                AlertDialog.Builder(this@WideAreaSearchActivity)
+                    .setTitle("Retry failed tiles -- $title")
+                    .setMessage(body)
+                    .setPositiveButton("Close", null)
+                    .setNeutralButton("Start / Resume") { _, _ -> chooseRunMode(jobId) }
+                    .show()
+                loadJobsTab()
+            } catch (e: PyException) {
+                Toast.makeText(
+                    this@WideAreaSearchActivity,
+                    "Retry failed: ${cleanErrorMessage(e.message)}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
     }
 
     /** Real fallback used by showJobDetail()'s polling loop whenever no
