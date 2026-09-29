@@ -685,6 +685,39 @@ class WideAreaSearchActivity : AppCompatActivity() {
         }
     }
 
+    /** Formats summarize_tile_failures_json()'s "dem_check": the offline
+     * DEM files the failed tiles need and each file's state at the moment
+     * of the check (present / absent / unreadable with the OS error).
+     * Empty string when there is no check to show. */
+    private fun formatDemCheck(check: JSONObject?): String = buildString {
+        if (check == null) return@buildString
+        val files = check.optJSONArray("files")
+        val noCountry = check.optString("no_country_tiles")
+        val errors = check.optJSONArray("errors")
+        if ((files == null || files.length() == 0) && noCountry.isEmpty() &&
+            (errors == null || errors.length() == 0)) return@buildString
+        append("OFFLINE DEM FILES THESE TILES NEED\n")
+        append("(checked just now -- the library may have changed since the tiles ran)\n")
+        val folder = check.optString("folder")
+        if (folder.isNotEmpty()) append("folder: ").append(folder).append("\n")
+        append("\n")
+        if (files != null) {
+            for (i in 0 until files.length()) {
+                val f = files.optJSONObject(i) ?: continue
+                append(f.optString("file")).append(" -- ").append(f.optString("status")).append("\n")
+                append("   needed by tile ").append(f.optString("tiles")).append("\n")
+            }
+        }
+        if (noCountry.isNotEmpty()) {
+            append("No registered offline country covers tile ").append(noCountry).append("\n")
+        }
+        if (errors != null) {
+            for (i in 0 until errors.length()) {
+                append("Check could not be computed for ").append(errors.optString(i)).append("\n")
+            }
+        }
+    }
+
     /** "Why did tiles fail?" -- read-only. Shows every FAILED tile's real
      * stored error message (wide_area_search_tile.error_message), grouped
      * by summarize_tile_failures_json(). Changes nothing. */
@@ -715,6 +748,8 @@ class WideAreaSearchActivity : AppCompatActivity() {
                         append("Messages that differ only in numbers are grouped together; ")
                         append("each group shows one real stored message.\n\n")
                         append(formatFailureGroups(result.optJSONArray("groups")).trimEnd())
+                        val demCheck = formatDemCheck(result.optJSONObject("dem_check")).trimEnd()
+                        if (demCheck.isNotEmpty()) append("\n\n").append(demCheck)
                     }
                 }
                 AlertDialog.Builder(this@WideAreaSearchActivity)
@@ -770,6 +805,8 @@ class WideAreaSearchActivity : AppCompatActivity() {
                     append("they are cleared from the tiles.\n")
                     append("- If the cause is not fixed first, the same tiles will simply fail again.\n\n")
                     append(formatFailureGroups(result.optJSONArray("groups")).trimEnd())
+                    val demCheck = formatDemCheck(result.optJSONObject("dem_check")).trimEnd()
+                    if (demCheck.isNotEmpty()) append("\n\n").append(demCheck)
                 }
                 AlertDialog.Builder(this@WideAreaSearchActivity)
                     .setTitle("Retry failed tiles -- $title")
