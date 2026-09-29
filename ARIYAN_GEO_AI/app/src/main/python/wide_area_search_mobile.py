@@ -367,6 +367,173 @@ def list_tiles_for_job_json(db_root: str, job_id: str) -> str:
     return json.dumps(rows)
 
 
+# ============== TILE FAILURE REASONS + EXPLICIT RETRY (ADDED 2026-09-29) ==============
+#
+# Why this exists: every FAILED tile has always stored its real reason in
+# wide_area_search_tile.error_message (see _run_wide_area_search_job_impl's
+# except-branch: "<ExceptionType>: <message>"), but no screen ever showed it,
+# so a job like 273d33 (120/120 tiles FAILED) could only be diagnosed by
+# guessing. These two functions are the read side and the explicit,
+# human-requested retry side. Neither runs any evidence; neither is ever
+# called automatically.
+
+_FAILURE_EXAMPLE_MAX_CHARS = 1200
+_FAILURE_TIMELINE_EXAMPLE_MAX_CHARS = 300
+
+
+def _failure_group_key(message: str) -> str:
+    """Grouping key only: the same failure repeated across tiles often
+    differs only in numbers (e.g. "1250 of 2500 DEM grid points", a
+    coordinate, a wait time in seconds), which would otherwise split one
+    real cause into dozens of groups. Every run of digits (with an optional
+    decimal part) becomes '#'. The key is never shown -- each group shows
+    one REAL, unmodified message as its example."""
+    return re.sub(r"\d+(?:\.\d+)?", "#", message.strip())
+
+
+def _compress_tile_numbers(numbers: List[int]) -> str:
+    """[1,2,3,5,7,8] -> "1-3, 5, 7-8". 1-based tile numbers, as the job
+    screen already shows them ("tile 12/120")."""
+    if not numbers:
+        return ""
+    ordered = sorted(set(numbers))
+    parts: List[str] = []
+    start = prev = ordered[0]
+    for n in ordered[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        parts.append(str(start) if start == prev else f"{start}-{prev}")
+        start = prev = n
+    parts.append(str(start) if start == prev else f"{start}-{prev}")
+    return ", ".join(parts)
+
+
+def _group_tile_failures(failed_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Groups FAILED tile rows by _failure_group_key(error_message), largest
+    group first (ties: earliest tile first). Each group:
+    {"count", "tiles" (compressed 1-based numbers), "example" (the real
+    message of the group's first tile, truncated only if very long, with
+    the truncation stated)}. A FAILED row with no stored message (should
+    not happen, but never assumed) is grouped under an explicit
+    "(no error message was stored for this tile)" example."""
+    groups: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for row in failed_rows:
+        raw = row.get("error_message")
+        message = str(raw).strip() if raw else ""
+        if not message:
+            message = "(no error message was stored for this tile)"
+        key = _failure_group_key(message)
+        if key not in groups:
+            groups[key] = {"count": 0, "tile_numbers": [], "example": message}
+            order.append(key)
+        groups[key]["count"] += 1
+        groups[key]["tile_numbers"].append(int(row.get("tile_index", 0)) + 1)
+
+    out: List[Dict[str, Any]] = []
+    for key in order:
+        g = groups[key]
+        example = g["example"]
+        if len(example) > _FAILURE_EXAMPLE_MAX_CHARS:
+            example = (example[:_FAILURE_EXAMPLE_MAX_CHARS]
+                       + f" ... [truncated for display; full text is "
+                       f"{len(g['example'])} characters]")
+        out.append({
+            "count": g["count"],
+            "first_tile": min(g["tile_numbers"]),
+            "tiles": _compress_tile_numbers(g["tile_numbers"]),
+            "example": example,
+        })
+    out.sort(key=lambda g: (-g["count"], g["first_tile"]))
+    return out
+
+
+def summarize_tile_failures_json(db_root: str, job_id: str) -> str:
+    """Read-only. Returns {"job": {...} | null, "progress": {...},
+    "failed": <int>, "groups": [...]} for the "Why did tiles fail?"
+    button: every FAILED tile's real stored error_message, grouped (see
+    _group_tile_failures()). Changes nothing."""
+    job = db.get_wide_area_search_job(db_root, job_id)
+    progress = db.get_wide_area_search_job_progress(db_root, job_id)
+    failed_rows = [t for t in db.list_tiles_for_job(db_root, job_id) if t.get("status") == "FAILED"]
+    return json.dumps({
+        "job": job,
+        "progress": progress,
+        "failed": len(failed_rows),
+        "groups": _group_tile_failures(failed_rows),
+    })
+
+
+def retry_failed_tiles_json(db_root: str, job_id: str) -> str:
+    """The explicit, human-requested retry (never automatic). Puts every
+    FAILED tile of this job back to PENDING via
+    grand_project_db.reset_failed_tiles_to_pending(); nothing runs until
+    the user taps Start / Resume, which then processes exactly those
+    tiles (plus any already PENDING) through the unchanged runner. DONE
+    tiles and their candidates are untouched, and the job keeps its id.
+
+    Provenance: the old failure reasons are cleared from the tile rows
+    (so a tile that later finishes DONE carries no stale reason), but
+    BEFORE that they are preserved in the append-only timeline as one
+    WIDE_AREA_SEARCH_TILES_RETRY_REQUESTED event (count + grouped reasons,
+    each example shortened for the log). The job's status is then set to
+    PENDING (itself a logged status change), since a COMPLETE_WITH_ERRORS
+    job that has PENDING tiles again is no longer complete.
+
+    The caller (WideAreaSearchActivity.kt) refuses to call this while
+    WideAreaSearchService is running: a running job only works through
+    the PENDING list it read when it started, so tiles reset mid-run
+    would stay PENDING and the run's final status would misreport them.
+
+    Also removes the job's stale live status file (see the comment at
+    the removal below) so the job dialog shows the true PENDING counts.
+
+    Raises WideAreaSearchError if job_id doesn't resolve to a real job.
+    Returns {"reset": <int>, "groups": [...], "progress": {...}}."""
+    job = db.get_wide_area_search_job(db_root, job_id)
+    if job is None:
+        raise WideAreaSearchError(f"No wide-area search job with id {job_id!r} was found.")
+
+    before = db.reset_failed_tiles_to_pending(db_root, job_id)
+    groups = _group_tile_failures(before)
+
+    if before:
+        lines = [
+            f"User asked to retry {len(before)} FAILED tile(s) of wide-area "
+            f"search job '{job['title']}'; they are now PENDING and run on "
+            f"the next Start / Resume. Their failure reasons before the "
+            f"reset (grouped; numbers ignored when grouping; one real "
+            f"example per group):"
+        ]
+        for g in groups:
+            example = g["example"]
+            if len(example) > _FAILURE_TIMELINE_EXAMPLE_MAX_CHARS:
+                example = example[:_FAILURE_TIMELINE_EXAMPLE_MAX_CHARS] + " ..."
+            lines.append(f"- {g['count']} tile(s) [{g['tiles']}]: {example}")
+        db.log_timeline_event(
+            db_root, job["grand_project_id"], "WIDE_AREA_SEARCH_TILES_RETRY_REQUESTED",
+            related_entity_type="wide_area_search_job", related_entity_id=job_id,
+            description="\n".join(lines),
+        )
+        db.update_wide_area_search_job_status(db_root, job["grand_project_id"], job_id, "PENDING")
+        # The job's live status file still describes the finished run
+        # ("done, N tile(s) failed"), and the job dialog prefers that file
+        # over the database while it exists -- so it would keep showing the
+        # old failures for tiles that are now PENDING. It is only a live
+        # display file (the next Start / Resume overwrites it anyway); the
+        # real failure reasons were preserved in the timeline just above.
+        # Removing it makes the dialog fall back to the true database
+        # counts. Best-effort: a failure here never undoes the retry.
+        try:
+            os.remove(_status_path(db_root, job_id))
+        except OSError:
+            pass
+
+    progress = db.get_wide_area_search_job_progress(db_root, job_id)
+    return json.dumps({"reset": len(before), "groups": groups, "progress": progress})
+
+
 # ============== AOI MECHANISM (c): GEOGRAPHIC_SUGGESTION -> JOB (ADDED 2026-09-17) ==============
 
 def create_wide_area_search_job_from_suggestion_json(
