@@ -1170,10 +1170,19 @@ appendReviewSection(sb, detail)
             text = "Job trust..."
             setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginEnd = (8 * density).toInt() }
             setOnClickListener { showJobTrustStart() }
+        }
+        // F2 early self-calibration (added 2026-09-29).
+        val calibrateButton = MaterialButton(this).apply {
+            text = "Calibrate..."
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { showCalibrationStart() }
         }
         bar.addView(hideButton)
         bar.addView(trustButton)
+        bar.addView(calibrateButton)
         binding.containerCandidateRows.addView(bar)
     }
 
@@ -1328,6 +1337,47 @@ appendReviewSection(sb, detail)
                     }
                     .setNegativeButton("Cancel", null)
                     .show()
+            }
+        }
+    }
+
+    /** F2 early self-calibration (added 2026-09-29): asks for a job id,
+     * runs grand_project_calibration.py (read-only apart from one
+     * CALIBRATION_RUN timeline event) and shows its report. */
+    private fun showCalibrationStart() {
+        promptText(
+            "Calibrate a job", "job id, first 6+ characters, e.g. a1f509", "Run",
+            "Measures how many recorded sites inside the job's scanned tiles have a candidate nearby, " +
+                "compared with what chance alone would give. Changes nothing."
+        ) { jobRef ->
+            setLoading(true)
+            lifecycleScope.launch {
+                try {
+                    val jsonText = withContext(Dispatchers.Default) {
+                        python.getModule("grand_project_query_mobile")
+                            .callAttr("calibrate_job_json", offlineDataRoot, jobRef).toString()
+                    }
+                    val result = JSONObject(jsonText)
+                    if (result.has("error")) {
+                        Toast.makeText(this@GrandProjectActivity, result.optString("error"), Toast.LENGTH_LONG).show()
+                    } else {
+                        AlertDialog.Builder(this@GrandProjectActivity)
+                            .setTitle("Calibration: job " + result.optString("job_id").take(6))
+                            .setMessage(result.optString("report_text"))
+                            .setPositiveButton("Close", null)
+                            .show()
+                    }
+                } catch (e: PyException) {
+                    Toast.makeText(
+                        this@GrandProjectActivity,
+                        "Calibration failed: ${cleanErrorMessage(e.message)}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this@GrandProjectActivity, "Calibration failed: ${e.message}", Toast.LENGTH_LONG).show()
+                } finally {
+                    setLoading(false)
+                }
             }
         }
     }
