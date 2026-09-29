@@ -1409,3 +1409,42 @@ def get_wide_area_search_job_progress(db_root: str, job_id: str) -> Dict[str, in
         return counts
     finally:
         conn.close()
+
+
+def reset_failed_tiles_to_pending(db_root: str, job_id: str) -> List[Dict[str, Any]]:
+    """The explicit, human-requested retry that mark_tile_failed()'s own
+    docstring above has always promised ("a failed tile stays FAILED until
+    a human explicitly asks for it to be retried") but that had no caller
+    until 2026-09-29. Only ever called from the "Retry failed tiles" button
+    (wide_area_search_mobile.retry_failed_tiles_json()), never
+    automatically -- the resumability logic itself is unchanged and still
+    only processes 'PENDING' tiles.
+
+    In ONE transaction: reads every FAILED tile of this job (with its real
+    error_message, so the caller can preserve it in the timeline before it
+    is cleared), then sets those tiles back to 'PENDING' and clears
+    error_message/started_at/completed_at/investigation_id -- so a tile
+    that later finishes DONE never carries a stale failure reason. Tiles
+    that are DONE or PENDING are never touched.
+
+    Returns the FAILED rows exactly as they were BEFORE the reset (empty
+    list if there were none)."""
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        with conn:
+            rows = conn.execute(
+                "SELECT * FROM wide_area_search_tile WHERE job_id = ? AND status = 'FAILED' ORDER BY tile_index ASC",
+                (job_id,),
+            ).fetchall()
+            before = [dict(r) for r in rows]
+            if before:
+                conn.execute(
+                    "UPDATE wide_area_search_tile SET status = 'PENDING', error_message = NULL, "
+                    "started_at = NULL, completed_at = NULL, investigation_id = NULL "
+                    "WHERE job_id = ? AND status = 'FAILED'",
+                    (job_id,),
+                )
+        return before
+    finally:
+        conn.close()
