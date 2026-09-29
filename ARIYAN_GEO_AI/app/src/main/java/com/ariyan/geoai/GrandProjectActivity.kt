@@ -4,6 +4,8 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -180,7 +182,12 @@ class GrandProjectActivity : AppCompatActivity() {
      * in each row is therefore the RANK in this list, not the order
      * the candidate was created. Each row also shows its stored DEM
      * z-score so the ordering can be checked by eye. Nothing about
-     * the data changes, only the order the rows are shown in. */
+     * the data changes, only the order the rows are shown in.
+     *
+     * GROUPING + SEARCH (added 2026-09-29, R2 step 1): rows are shown
+     * under one collapsible header per Wide-Area Search job, and a
+     * search box finds a candidate by id or "lat, lon" -- see
+     * renderGroupedByJob() / renderSearchResults() below. */
     private fun renderCandidateRows(jsonText: String) {
         val array = try {
             JSONArray(jsonText)
@@ -203,69 +210,345 @@ class GrandProjectActivity : AppCompatActivity() {
         binding.containerHypotheses.visibility = View.GONE
         binding.containerCandidateRows.visibility = View.VISIBLE
         binding.containerCandidateRows.removeAllViews()
-lastCandidatesJson = jsonText
+        lastCandidatesJson = jsonText
         addCandidateControls()
-        val tapBackground = TypedValue()
-        theme.resolveAttribute(android.R.attr.selectableItemBackground, tapBackground, true)
-        val density = resources.displayMetrics.density
+        addCandidateSearchBar()
 
-        val sortedRows = ArrayList<JSONObject>(array.length())
-        for (k in 0 until array.length()) {
-            val c = array.getJSONObject(k)
-            if (hideRejected && c.optString("status") == "REJECTED") continue
-            sortedRows.add(c)
+        val allRows = ArrayList<JSONObject>(array.length())
+        for (k in 0 until array.length()) allRows.add(array.getJSONObject(k))
+
+        if (candidateSearchQuery.isNotEmpty()) {
+            renderSearchResults(allRows, candidateSearchQuery)
+        } else {
+            renderGroupedByJob(allRows)
         }
-        sortedRows.sortWith(
-            compareByDescending<JSONObject> { c ->
-                if (c.isNull("confidence_numeric")) -1.0 else c.optDouble("confidence_numeric", -1.0)
-            }.thenByDescending { c ->
-                if (c.isNull("score")) -1.0 else Math.abs(c.optDouble("score", 0.0))
+    }
+
+    // ---------------------------------------------------------------
+    // R2 step 1 (2026-09-29): candidate organisation.
+    // The Candidates tab is grouped under one tappable header per
+    // Wide-Area Search job (candidates from single-point runs get their
+    // own group), and a search box finds a candidate by id (or part of
+    // it) or by "lat, lon". Grouping and search change only how rows
+    // are SHOWN; no data is changed. Inside a group the order is the
+    // same as before (confidence, then |DEM z-score|), and #N is the
+    // rank inside that group.
+    // ---------------------------------------------------------------
+
+    private val expandedGroups = mutableSetOf<String>()
+    private val groupShowLimit = mutableMapOf<String, Int>()
+    private var candidateSearchQuery = ""
+
+    private val noJobGroupKey = "__no_job__"
+    private val rowsPerPage = 200
+    private val nearbySearchRadiusM = 2000.0
+    private val maxSearchResults = 50
+
+    private fun rankComparator(): Comparator<JSONObject> =
+        compareByDescending<JSONObject> { c ->
+            if (c.isNull("confidence_numeric")) -1.0 else c.optDouble("confidence_numeric", -1.0)
+        }.thenByDescending { c ->
+            if (c.isNull("score")) -1.0 else Math.abs(c.optDouble("score", 0.0))
+        }
+
+    /** Search box + Search/Clear buttons, placed under the Hide
+     * rejected / Job trust bar. */
+    private fun addCandidateSearchBar() {
+        val density = resources.displayMetrics.density
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding((8 * density).toInt(), (2 * density).toInt(), (8 * density).toInt(), (6 * density).toInt())
+        }
+        val input = EditText(this).apply {
+            hint = "id (6+ chars) or lat, lon"
+            setText(candidateSearchQuery)
+            setSingleLine(true)
+            textSize = 14f
+            setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val runSearch = {
+            candidateSearchQuery = input.text.toString().trim()
+            hideKeyboard(input)
+            lastCandidatesJson?.let { renderCandidateRows(it) }
+        }
+        input.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
+                runSearch()
+                true
+            } else {
+                false
+            }
+        }
+        val searchButton = MaterialButton(this).apply {
+            text = "Find"
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { marginStart = (6 * density).toInt() }
+            setOnClickListener { runSearch() }
+        }
+        bar.addView(input)
+        bar.addView(searchButton)
+        if (candidateSearchQuery.isNotEmpty()) {
+            val clearButton = MaterialButton(this).apply {
+                text = "Clear"
+                setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { marginStart = (6 * density).toInt() }
+                setOnClickListener {
+                    candidateSearchQuery = ""
+                    hideKeyboard(input)
+                    lastCandidatesJson?.let { renderCandidateRows(it) }
+                }
+            }
+            bar.addView(clearButton)
+        }
+        binding.containerCandidateRows.addView(bar)
+    }
+
+    private fun hideKeyboard(view: View) {
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.hideSoftInputFromWindow(view.windowToken, 0)
+    }
+
+    /** One collapsible group per job, then one for single-point runs.
+     * Order: jobs not marked CORRUPTED first, newest first; corrupted
+     * jobs last; single-point candidates at the very end. */
+    private fun renderGroupedByJob(allRows: List<JSONObject>) {
+        val groups = LinkedHashMap<String, MutableList<JSONObject>>()
+        for (row in allRows) {
+            val jobId = row.optString("job_id", "")
+            val key = if (jobId.isEmpty() || jobId == "null") noJobGroupKey else jobId
+            groups.getOrPut(key) { mutableListOf() }.add(row)
+        }
+        val orderedKeys = groups.keys.sortedWith(
+            compareBy<String> { key ->
+                when {
+                    key == noJobGroupKey -> 2
+                    groups[key]!!.first().optString("job_trust") == "CORRUPTED" -> 1
+                    else -> 0
+                }
+            }.thenByDescending { key ->
+                if (key == noJobGroupKey) "" else groups[key]!!.first().optString("job_created_at", "")
             }
         )
+        for (key in orderedKeys) {
+            val rows = groups[key]!!
+            addGroupHeader(key, rows)
+            if (key !in expandedGroups) continue
+            val visible = rows.filter { !(hideRejected && it.optString("status") == "REJECTED") }
+                .sortedWith(rankComparator())
+            if (visible.isEmpty()) {
+                addNoteRow("  (every candidate in this group is Rejected and hidden)")
+                continue
+            }
+            val limit = groupShowLimit[key] ?: rowsPerPage
+            val shown = minOf(limit, visible.size)
+            for (i in 0 until shown) {
+                binding.containerCandidateRows.addView(makeCandidateRowView(visible[i], "#" + (i + 1)))
+            }
+            if (visible.size > shown) {
+                addShowMoreButton(key, shown, visible.size)
+            }
+        }
+    }
 
-        for (i in 0 until sortedRows.size) {
-            val row = sortedRows[i]
-            val candidateId = row.optString("id")
-            val rowText = buildString {
-                append("#").append(i + 1).append("  ").append(row.optString("created_at")).append("\n")
-                append(String.format("lat=%.6f  lon=%.6f\n", row.optDouble("lat"), row.optDouble("lon")))
-                if (!row.isNull("score")) {
-                    append(String.format("DEM z-score: %+.2f\n", row.optDouble("score")))
-                }
-                append("status: ").append(row.optString("status_label", row.optString("status")))
-                val band = row.optString("confidence_band", "")
-                if (band.isNotEmpty()) {
-                    append("   confidence: ").append(band)
-                    if (!row.isNull("confidence_numeric")) {
-                        append(String.format(" (%.2f)", row.optDouble("confidence_numeric")))
-                    }
-                }
-if (row.optString("job_trust") == "CORRUPTED") {
-                    append("\n!! JOB ").append(row.optString("job_id").take(6)).append(" MARKED CORRUPTED - ignore")
-                }
-                val lastReason = row.optString("last_review_reason", "")
-                if (lastReason.isNotEmpty() && lastReason != "null") {
-                    append("\nreview: ").append(lastReason)
-                }
-                // F1 Known-Site Layer (2026-09-24): gazetteer context, not evidence.
-                val knownSiteText = row.optString("known_site_text", "")
-                if (knownSiteText.isNotEmpty() && knownSiteText != "null") {
-                    append("\nknown site: ").append(knownSiteText)
-                }
-                append("\n(tap for confidence history + evidence)")
+    private fun addGroupHeader(key: String, rows: List<JSONObject>) {
+        val density = resources.displayMetrics.density
+        var supported = 0
+        var inconclusive = 0
+        var open = 0
+        var rejected = 0
+        for (r in rows) {
+            when (r.optString("status")) {
+                "SUPPORTED" -> supported++
+                "INCONCLUSIVE" -> inconclusive++
+                "REJECTED" -> rejected++
+                else -> open++
             }
-            val rowView = TextView(this).apply {
-                text = rowText
-                typeface = Typeface.MONOSPACE
-                textSize = 12f
-                setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
-                setPadding((12 * density).toInt(), (10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
-                isClickable = true
-                isFocusable = true
-                setBackgroundResource(tapBackground.resourceId)
-                setOnClickListener { showCandidateDetail(candidateId) }
+        }
+        val expanded = key in expandedGroups
+        val arrow = if (expanded) "[-]" else "[+]"
+        val first = rows.first()
+        val headerText = buildString {
+            if (key == noJobGroupKey) {
+                append(arrow).append(" Single-point investigations (no job)")
+            } else {
+                append(arrow).append(" JOB ").append(key.take(6))
+                val created = first.optString("job_created_at", "")
+                if (created.isNotEmpty() && created != "null") {
+                    append("  ").append(created.take(19).replace('T', ' '))
+                }
+                val title = first.optString("job_title", "")
+                if (title.isNotEmpty() && title != "null") {
+                    append("\n").append(if (title.length > 60) title.take(60) + "..." else title)
+                }
+                val trust = first.optString("job_trust", "")
+                if (trust.isNotEmpty() && trust != "null") {
+                    append("\ntrust: ").append(trust)
+                }
             }
-            binding.containerCandidateRows.addView(rowView)
+            append("\n").append(rows.size).append(" candidates:  ")
+            append("Supported ").append(supported)
+            append(" / Inconclusive ").append(inconclusive)
+            append(" / Open ").append(open)
+            append(" / Rejected ").append(rejected)
+        }
+        val tapBackground = TypedValue()
+        theme.resolveAttribute(android.R.attr.selectableItemBackground, tapBackground, true)
+        val header = TextView(this).apply {
+            text = headerText
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            textSize = 13f
+            setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            setPadding((10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt(), (8 * density).toInt())
+            isClickable = true
+            isFocusable = true
+            setBackgroundResource(tapBackground.resourceId)
+            setOnClickListener {
+                if (key in expandedGroups) expandedGroups.remove(key) else expandedGroups.add(key)
+                lastCandidatesJson?.let { renderCandidateRows(it) }
+            }
+        }
+        binding.containerCandidateRows.addView(header)
+    }
+
+    private fun addShowMoreButton(key: String, shown: Int, total: Int) {
+        val density = resources.displayMetrics.density
+        val button = MaterialButton(this).apply {
+            text = "Show more (" + shown + " of " + total + " shown)"
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                marginStart = (12 * density).toInt()
+                marginEnd = (12 * density).toInt()
+            }
+            setOnClickListener {
+                groupShowLimit[key] = shown + rowsPerPage
+                lastCandidatesJson?.let { renderCandidateRows(it) }
+            }
+        }
+        binding.containerCandidateRows.addView(button)
+    }
+
+    private fun addNoteRow(text: String) {
+        val density = resources.displayMetrics.density
+        val note = TextView(this).apply {
+            this.text = text
+            typeface = Typeface.MONOSPACE
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
+            setPadding((12 * density).toInt(), (6 * density).toInt(), (12 * density).toInt(), (6 * density).toInt())
+        }
+        binding.containerCandidateRows.addView(note)
+    }
+
+    /** Search ignores the groups and the Hide rejected toggle, so a
+     * candidate can always be found. "lat, lon" (or "lat lon") lists the
+     * nearest candidates within nearbySearchRadiusM, nearest first;
+     * anything else is matched against candidate ids (case-insensitive,
+     * anywhere in the id). */
+    private fun renderSearchResults(allRows: List<JSONObject>, query: String) {
+        val coordMatch = Regex("""^\s*(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)\s*$""").find(query)
+        if (coordMatch != null) {
+            val qLat = coordMatch.groupValues[1].toDouble()
+            val qLon = coordMatch.groupValues[2].toDouble()
+            val hits = allRows.mapNotNull { r ->
+                if (r.isNull("lat") || r.isNull("lon")) null
+                else Pair(r, distanceM(qLat, qLon, r.optDouble("lat"), r.optDouble("lon")))
+            }.filter { it.second <= nearbySearchRadiusM }.sortedBy { it.second }
+            addNoteRow(
+                "Search " + String.format("%.6f, %.6f", qLat, qLon) + ": " + hits.size +
+                    " candidate(s) within " + nearbySearchRadiusM.toInt() + " m" +
+                    (if (hits.size > maxSearchResults) " (nearest $maxSearchResults shown)" else "")
+            )
+            for (hit in hits.take(maxSearchResults)) {
+                binding.containerCandidateRows.addView(
+                    makeCandidateRowView(hit.first, String.format("%.0f m", hit.second))
+                )
+            }
+            return
+        }
+        val needle = query.lowercase()
+        if (needle.length < 6) {
+            addNoteRow("Type at least 6 characters of an id, or \"lat, lon\".")
+            return
+        }
+        val hits = allRows.filter { it.optString("id").lowercase().contains(needle) }
+            .sortedWith(rankComparator())
+        addNoteRow(
+            "Search \"" + query + "\": " + hits.size + " candidate(s)" +
+                (if (hits.size > maxSearchResults) " (first $maxSearchResults shown)" else "")
+        )
+        for (i in 0 until minOf(hits.size, maxSearchResults)) {
+            binding.containerCandidateRows.addView(makeCandidateRowView(hits[i], "match"))
+        }
+    }
+
+    private fun distanceM(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val r = 6371000.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2)
+        return 2 * r * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    }
+
+    /** One tappable candidate row. `tag` is shown first: the rank (#N)
+     * inside a group, a distance in a coordinate search, or "match".
+     * Search results also show the job the candidate belongs to. */
+    private fun makeCandidateRowView(row: JSONObject, tag: String): TextView {
+        val density = resources.displayMetrics.density
+        val tapBackground = TypedValue()
+        theme.resolveAttribute(android.R.attr.selectableItemBackground, tapBackground, true)
+        val candidateId = row.optString("id")
+        val rowText = buildString {
+            append(tag).append("  id ").append(candidateId.take(8)).append("  ").append(row.optString("created_at").take(19)).append("\n")
+            if (tag == "match" || tag.endsWith(" m")) {
+                val jobId = row.optString("job_id", "")
+                append("job: ").append(if (jobId.isEmpty() || jobId == "null") "none (single-point)" else jobId.take(6)).append("\n")
+            }
+            append(String.format("lat=%.6f  lon=%.6f\n", row.optDouble("lat"), row.optDouble("lon")))
+            if (!row.isNull("score")) {
+                append(String.format("DEM z-score: %+.2f\n", row.optDouble("score")))
+            }
+            append("status: ").append(row.optString("status_label", row.optString("status")))
+            val band = row.optString("confidence_band", "")
+            if (band.isNotEmpty()) {
+                append("   confidence: ").append(band)
+                if (!row.isNull("confidence_numeric")) {
+                    append(String.format(" (%.2f)", row.optDouble("confidence_numeric")))
+                }
+            }
+            if (row.optString("job_trust") == "CORRUPTED") {
+                append("\n!! JOB ").append(row.optString("job_id").take(6)).append(" MARKED CORRUPTED - ignore")
+            }
+            val lastReason = row.optString("last_review_reason", "")
+            if (lastReason.isNotEmpty() && lastReason != "null") {
+                append("\nreview: ").append(lastReason)
+            }
+            // F1 Known-Site Layer (2026-09-24): gazetteer context, not evidence.
+            val knownSiteText = row.optString("known_site_text", "")
+            if (knownSiteText.isNotEmpty() && knownSiteText != "null") {
+                append("\nknown site: ").append(knownSiteText)
+            }
+            append("\n(tap for confidence history + evidence)")
+        }
+        return TextView(this).apply {
+            text = rowText
+            typeface = Typeface.MONOSPACE
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
+            setPadding((12 * density).toInt(), (10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
+            isClickable = true
+            isFocusable = true
+            setBackgroundResource(tapBackground.resourceId)
+            setOnClickListener { showCandidateDetail(candidateId) }
         }
     }
 
