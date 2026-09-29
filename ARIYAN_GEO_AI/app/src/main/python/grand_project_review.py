@@ -37,12 +37,54 @@ candidate.confidence_band.
 Kotlin-facing *_json functions at the bottom return JSON strings and
 report expected problems as {"error": "..."} instead of raising, the
 same convention as grand_project_query_mobile.py.
+
+CHANGELOG
+- 2026-09-29 (roadmap R1, AUTO-REVIEW, user's request of 2026-09-24:
+  the manual review process was too much to keep up with by hand).
+  auto_review_project() now sets candidate status ITSELF from measured
+  rules that are already stored in the database, in this order (the
+  first rule that applies wins):
+    1. the candidate's Wide-Area Search job is currently marked
+       CORRUPTED (job_trust)                              -> Rejected
+    2. the candidate is land-cover flagged (water, or trees/buildings
+       >= 20 % within ~60 m; land_cover_flags.flag_reason() -- the SAME
+       rule Pass 2 uses, not a copy)                       -> Rejected
+    3. Pass 2 refinement markers exist and at least one was a LIVE DEM
+       fetch that reproduced the anomaly                  -> Supported
+    4. Pass 2 markers exist but none is a live reproduction (offline
+       reproduction only, live not reproduced, or DEM source not
+       recorded)                                          -> Inconclusive
+    5. none of the above                                   -> Open
+  Rule 4 is deliberately fail-closed: a marker written before
+  2026-09-23 has no dem_source, so a reproduction it records cannot be
+  counted as a live check (grand_project_refinement._refinement_history
+  reports it as NOT_RECORDED); it stays Inconclusive until a new live
+  refinement or a user review says otherwise.
+  Guarantees:
+  - A candidate that has EVER been reviewed by the user is never
+    touched again by the automatic pass (user choices always win and
+    are never overwritten). Rows written before this change are all
+    user rows, so candidate_review gains a reviewed_by column
+    ('user' / 'auto', default 'user') via ALTER TABLE ADD COLUMN.
+  - Auto rows are ordinary append-only candidate_review rows with
+    reviewed_by='auto' and a reason starting "[auto] ", so the existing
+    screens show the tag without any Kotlin change. status_label gets
+    " (auto)" appended when the current status came from the automatic
+    pass.
+  - A row is written only when the status (or, for an earlier auto row,
+    its reason) actually changes -- never one per candidate per load.
+    An untouched Open candidate that stays Open writes nothing.
+  - One summary timeline event (AUTO_REVIEW) per run that changed
+    anything, instead of one event per candidate.
+  - Still never changes Steward confidence and never deletes anything.
+  - Satellite visual checks stay optional human calls (no rule reads
+    imagery).
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import grand_project_db as db
 
@@ -81,6 +123,16 @@ _TRUST_VALUES = (TRUST_TRUSTED, TRUST_CORRUPTED, TRUST_UNVERIFIED)
 MIN_REASON_CHARS = 3
 MIN_ID_PREFIX_CHARS = 6
 
+REVIEWED_BY_USER = "user"
+REVIEWED_BY_AUTO = "auto"
+AUTO_REASON_PREFIX = "[auto] "
+
+# Must match grand_project_refinement.REFINEMENT_RELATION and its
+# DEM_SOURCE_LIVE (copied, not imported, so this cheap query never has to
+# load the heavy refinement module unless markers actually exist).
+_REFINEMENT_RELATION = "refinement_dem_check"
+_DEM_SOURCE_LIVE = "LIVE"
+
 
 class ReviewError(ValueError):
     """Bad input (unknown status, empty reason, unknown/ambiguous id)."""
@@ -99,6 +151,7 @@ _REVIEW_SCHEMA = [
         new_status       TEXT NOT NULL,
         reason           TEXT NOT NULL,
         reviewed_at      TEXT NOT NULL,
+        reviewed_by      TEXT NOT NULL DEFAULT 'user',
         FOREIGN KEY (candidate_id) REFERENCES candidate(id)
     )
     """,
@@ -121,6 +174,14 @@ def _connect(db_root: str):
     with conn:
         for statement in _REVIEW_SCHEMA:
             conn.execute(statement)
+        # 2026-09-29 (R1): tables created before auto-review lack
+        # reviewed_by. Every existing row was written by the user, so the
+        # default 'user' is exactly right for them.
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(candidate_review)")}
+        if "reviewed_by" not in columns:
+            conn.execute(
+                "ALTER TABLE candidate_review "
+                "ADD COLUMN reviewed_by TEXT NOT NULL DEFAULT 'user'")
     return conn
 
 
@@ -186,10 +247,11 @@ def set_candidate_status(
             conn.execute(
                 """
                 INSERT INTO candidate_review
-                    (candidate_id, previous_status, new_status, reason, reviewed_at)
-                VALUES (?, ?, ?, ?, ?)
+                    (candidate_id, previous_status, new_status, reason,
+                     reviewed_at, reviewed_by)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (candidate_id, previous, status, text, now),
+                (candidate_id, previous, status, text, now, REVIEWED_BY_USER),
             )
             conn.execute(
                 "UPDATE candidate SET status = ?, last_updated_at = ? WHERE id = ?",
@@ -225,7 +287,8 @@ def get_candidate_review_history(db_root: str, candidate_ref: str) -> List[Dict[
         candidate_id = _resolve_id(conn, "candidate", candidate_ref)
         rows = conn.execute(
             """
-            SELECT id, candidate_id, previous_status, new_status, reason, reviewed_at
+            SELECT id, candidate_id, previous_status, new_status, reason,
+                   reviewed_at, reviewed_by
             FROM candidate_review WHERE candidate_id = ? ORDER BY id
             """,
             (candidate_id,),
@@ -296,6 +359,21 @@ def list_job_trust(db_root: str) -> List[Dict[str, Any]]:
         conn.close()
 
 
+def _latest_reviews(conn) -> Dict[str, Dict[str, Any]]:
+    """candidate_id -> newest candidate_review row as {"new_status",
+    "reason", "reviewed_by"}."""
+    rows = conn.execute(
+        """
+        SELECT r.candidate_id, r.new_status, r.reason, r.reviewed_by
+        FROM candidate_review r
+        JOIN (SELECT candidate_id, MAX(id) AS max_id
+              FROM candidate_review GROUP BY candidate_id) m
+          ON r.id = m.max_id
+        """
+    ).fetchall()
+    return {r["candidate_id"]: dict(r) for r in rows}
+
+
 # ---------------------------------------------------------------------------
 # Per-candidate review summary (for the Candidates tab)
 # ---------------------------------------------------------------------------
@@ -319,32 +397,224 @@ def review_summary_for_project(db_root: str, grand_project_id: str) -> Dict[str,
             """,
             (grand_project_id,),
         ).fetchall()
-        last_reason = {
-            r["candidate_id"]: r["reason"]
-            for r in conn.execute(
-                """
-                SELECT r.candidate_id, r.reason FROM candidate_review r
-                JOIN (SELECT candidate_id, MAX(id) AS max_id
-                      FROM candidate_review GROUP BY candidate_id) m
-                  ON r.id = m.max_id
-                """
-            ).fetchall()
-        }
+        latest = _latest_reviews(conn)
         out: Dict[str, Dict[str, Any]] = {}
         for r in rows:
             job_id = r["job_id"]
             t = trust.get(job_id) if job_id else None
+            last = latest.get(r["id"])
+            source = last["reviewed_by"] if last else None
+            label = STATUS_LABELS.get(r["status"], r["status"])
+            if source == REVIEWED_BY_AUTO:
+                label += " (auto)"
             out[r["id"]] = {
                 "status": r["status"],
-                "status_label": STATUS_LABELS.get(r["status"], r["status"]),
+                "status_label": label,
+                "review_source": source,
                 "job_id": job_id,
                 "job_trust": t["trust"] if t else None,
                 "job_trust_reason": t["reason"] if t else None,
-                "last_review_reason": last_reason.get(r["id"]),
+                "last_review_reason": last["reason"] if last else None,
             }
         return out
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Automatic review (roadmap R1, 2026-09-29) -- see CHANGELOG at the top
+# ---------------------------------------------------------------------------
+
+_LAND_COVER_TEXT = {
+    "water": "open water within ~60 m (ESA WorldCover 2021)",
+    "tree_or_built": "trees or buildings cover at least 20 % within ~60 m (ESA WorldCover 2021)",
+}
+
+
+def _land_cover_reasons(conn, candidate_ids: set) -> Optional[Dict[str, str]]:
+    """candidate_id -> flag reason for flagged candidates, using
+    land_cover_flags.flag_reason() itself. None if the land-cover table or
+    module is unavailable (then rule 2 is simply not applied)."""
+    try:
+        import land_cover_flags
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='candidate_land_cover'"
+        ).fetchone()
+        if not has_table:
+            return {}
+        rows = conn.execute(
+            "SELECT candidate_id, center_class, frac_tree, frac_built, frac_water "
+            "FROM candidate_land_cover"
+        ).fetchall()
+        out: Dict[str, str] = {}
+        for row in rows:
+            if row["candidate_id"] not in candidate_ids:
+                continue
+            reason = land_cover_flags.flag_reason(row)
+            if reason:
+                out[row["candidate_id"]] = reason
+        return out
+    except Exception:
+        return None
+
+
+def _refinement_verdicts(db_root: str, conn, candidate_ids: set
+                         ) -> Tuple[Dict[str, Tuple[str, str]], set]:
+    """(verdicts, unreadable). verdicts: candidate_id -> (status, reason)
+    for candidates with Pass 2 markers. unreadable: candidates that HAVE
+    markers but whose history could not be read -- the automatic pass
+    leaves those untouched rather than guessing."""
+    refined = {
+        r["candidate_id"] for r in conn.execute(
+            "SELECT DISTINCT candidate_id FROM evidence_link WHERE relation = ?",
+            (_REFINEMENT_RELATION,),
+        ).fetchall()
+    } & candidate_ids
+    if not refined:
+        return {}, set()
+    try:
+        # Imported only here: heavy module, needed only when markers exist.
+        # Using its own reader keeps ONE definition of "which DEM source".
+        import grand_project_refinement as refinement
+    except Exception:
+        return {}, refined
+
+    verdicts: Dict[str, Tuple[str, str]] = {}
+    unreadable: set = set()
+    for cid in sorted(refined):
+        history = refinement._refinement_history(db_root, cid)
+        if not history:
+            unreadable.add(cid)
+            continue
+        live_hits = [h for h in history
+                     if h.get("reproduced") and h.get("dem_source") == _DEM_SOURCE_LIVE]
+        if live_hits:
+            d = live_hits[-1].get("match_distance_m")
+            where = f" {d:.0f} m from the original position" if isinstance(d, (int, float)) else ""
+            verdicts[cid] = (STATUS_SUPPORTED,
+                             f"Pass 2 with a LIVE DEM fetch reproduced the anomaly{where}.")
+            continue
+        last = history[-1]
+        src = last.get("dem_source") or "NOT_RECORDED"
+        if last.get("reproduced"):
+            if src == "NOT_RECORDED":
+                why = ("Pass 2 reproduced the anomaly, but the DEM source was not "
+                       "recorded (marker from before 2026-09-23), so it cannot count "
+                       "as a live check.")
+            else:
+                why = (f"Pass 2 reproduced the anomaly only from the {src} DEM "
+                       "(offline self-agreement, not an independent live check).")
+        else:
+            if src == _DEM_SOURCE_LIVE:
+                why = ("Live SRTM did not reproduce the anomaly; SRTM (~30 m, year "
+                       "2000) may be too coarse -- not evidence against.")
+            else:
+                why = f"Pass 2 ({src} DEM) did not reproduce the anomaly -- not evidence against."
+        verdicts[cid] = (STATUS_INCONCLUSIVE, why)
+    return verdicts, unreadable
+
+
+def auto_review_project(db_root: str, grand_project_id: str) -> Dict[str, Any]:
+    """Applies the R1 rules to every candidate of the project that the
+    user has never reviewed. Writes only real changes. Returns counts:
+    {"checked", "user_owned", "changed", "by_status": {...},
+     "skipped_unreadable", "land_cover_available"}."""
+    conn = _connect(db_root)
+    try:
+        trust = _current_job_trust(conn)
+        rows = conn.execute(
+            """
+            SELECT c.id, c.status, t.job_id
+            FROM candidate c
+            LEFT JOIN wide_area_search_tile t ON t.investigation_id = c.investigation_id
+            WHERE c.grand_project_id = ?
+            """,
+            (grand_project_id,),
+        ).fetchall()
+        candidates: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            candidates.setdefault(r["id"], {"status": r["status"], "job_id": r["job_id"]})
+        ids = set(candidates)
+
+        user_owned = {
+            r["candidate_id"] for r in conn.execute(
+                "SELECT DISTINCT candidate_id FROM candidate_review WHERE reviewed_by = ?",
+                (REVIEWED_BY_USER,),
+            ).fetchall()
+        } & ids
+        latest = _latest_reviews(conn)
+        land = _land_cover_reasons(conn, ids)
+        refine, unreadable = _refinement_verdicts(db_root, conn, ids - user_owned)
+
+        now = db._now_iso()
+        writes: List[Tuple] = []
+        by_status: Dict[str, int] = {}
+        for cid, info in candidates.items():
+            if cid in user_owned or cid in unreadable:
+                continue
+            job_id = info["job_id"]
+            t = trust.get(job_id) if job_id else None
+            if t and t["trust"] == TRUST_CORRUPTED:
+                status = STATUS_REJECTED
+                why = f"Job {job_id[:6]} is marked CORRUPTED ({t['reason']})."
+            elif land is not None and cid in land:
+                status = STATUS_REJECTED
+                why = "Land cover: " + _LAND_COVER_TEXT.get(land[cid], land[cid]) + "."
+            elif cid in refine:
+                status, why = refine[cid]
+            else:
+                status = STATUS_OPEN
+                why = "No rule applies (not refined, not flagged, job not marked corrupted)."
+            reason = AUTO_REASON_PREFIX + why
+
+            previous = info["status"]
+            last = latest.get(cid)
+            if previous == status:
+                # Same status: write only to refresh an earlier AUTO reason
+                # that no longer describes the situation.
+                if not (last and last["reviewed_by"] == REVIEWED_BY_AUTO
+                        and last["reason"] != reason):
+                    continue
+            writes.append((cid, previous, status, reason, now, REVIEWED_BY_AUTO))
+            by_status[status] = by_status.get(status, 0) + 1
+
+        if writes:
+            with conn:
+                conn.executemany(
+                    """
+                    INSERT INTO candidate_review
+                        (candidate_id, previous_status, new_status, reason,
+                         reviewed_at, reviewed_by)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    writes,
+                )
+                conn.executemany(
+                    "UPDATE candidate SET status = ?, last_updated_at = ? WHERE id = ?",
+                    [(w[2], now, w[0]) for w in writes],
+                )
+    finally:
+        conn.close()
+
+    if writes:
+        parts = ", ".join(f"{STATUS_LABELS[k]} {v}" for k, v in sorted(by_status.items()))
+        try:
+            db.log_timeline_event(
+                db_root, grand_project_id, "AUTO_REVIEW",
+                description=(f"Automatic review changed {len(writes)} candidate(s): {parts}. "
+                             f"User-reviewed candidates left untouched: {len(user_owned)}."),
+            )
+        except Exception:
+            pass
+
+    return {
+        "checked": len(candidates),
+        "user_owned": len(user_owned),
+        "changed": len(writes),
+        "by_status": {STATUS_LABELS[k]: v for k, v in by_status.items()},
+        "skipped_unreadable": len(unreadable),
+        "land_cover_available": land is not None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -376,3 +646,7 @@ def list_job_trust_json(db_root: str) -> str:
 
 def review_summary_for_project_json(db_root: str, grand_project_id: str) -> str:
     return _json_call(review_summary_for_project, db_root, grand_project_id)
+
+
+def auto_review_project_json(db_root: str, grand_project_id: str) -> str:
+    return _json_call(auto_review_project, db_root, grand_project_id)
