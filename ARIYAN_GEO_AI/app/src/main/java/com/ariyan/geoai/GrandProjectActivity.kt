@@ -1268,15 +1268,20 @@ appendReviewSection(sb, detail)
 
     /** Candidate review: pick a status, then write a reason. */
     private fun showReviewPicker(candidateId: String) {
-        val labels: Array<CharSequence> = arrayOf("Open", "Supported", "Rejected", "Inconclusive")
-        val values = arrayOf("OPEN", "SUPPORTED", "REJECTED", "INCONCLUSIVE")
+        // "Return to automatic" (added 2026-09-29): hands a candidate the
+        // user reviewed back to the automatic rules (grand_project_review.py,
+        // status "AUTO"). The history keeps every step.
+        val labels: Array<CharSequence> = arrayOf("Open", "Supported", "Rejected", "Inconclusive", "Return to automatic")
+        val values = arrayOf("OPEN", "SUPPORTED", "REJECTED", "INCONCLUSIVE", "AUTO")
         AlertDialog.Builder(this)
             .setTitle("Review candidate " + candidateId.take(8))
             .setItems(labels) { _, which ->
-                promptText("Reason for " + labels[which], "e.g. satellite shows fish pond", "Save") { reason ->
+                val isAuto = values[which] == "AUTO"
+                val hint = if (isAuto) "e.g. my earlier review was only a test" else "e.g. satellite shows fish pond"
+                promptText("Reason for " + labels[which], hint, "Save") { reason ->
                     callReviewWrite(
                         "set_candidate_status_json", listOf(candidateId, values[which], reason),
-                        "Candidate marked " + labels[which]
+                        if (isAuto) "Candidate returned to automatic review" else "Candidate marked " + labels[which]
                     )
                 }
             }
