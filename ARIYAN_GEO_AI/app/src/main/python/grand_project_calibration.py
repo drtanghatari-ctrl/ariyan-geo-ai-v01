@@ -25,6 +25,18 @@ WHAT THIS MEASURES (one Wide-Area Search job at a time, read-only)
    probability of getting at least the observed hits by chance is
    reported, with an explicit small-sample warning.
 
+4. DISTANCE TEST (added 2026-09-29, method fixed BEFORE it was run on any
+   further job, after the a1f509 run showed a 500 m hit rate cannot
+   separate skill from luck when candidates are dense). For each site:
+   d = distance to the nearest candidate; p_site = share of the scanned
+   area (same sample grid) whose nearest candidate is at most d away,
+   i.e. how often a randomly placed site would do at least this well.
+   It uses the job's real candidate layout, so clustering is included.
+   p_site is floored at 1/(samples+1) so it never reads as impossible.
+   Sites are combined with Fisher's method (X = -2 sum ln p, chi-square
+   with 2k degrees of freedom). This is the primary skill figure; the
+   radius hit rates stay for context.
+
 WHAT THIS DOES NOT MEASURE
 - A false-alarm rate. That needs places VERIFIED to hold no site; the
   gazetteer cannot provide them ("not in gazetteer" is not "no site").
@@ -60,6 +72,7 @@ MAX_SAMPLES = 200000          # cap on baseline sample points (phone speed)
 MIN_SAMPLE_STEP_M = 50.0
 SMALL_SAMPLE_SITES = 20       # below this, results are indicative only
 FAR_FROM_SITE_M = 2000.0
+DIST_SEARCH_STEPS_M = (500.0, 1000.0, 2000.0, 5000.0)   # nearest-candidate search, widening
 
 _M_PER_DEG_LAT = 111320.0
 
@@ -98,6 +111,28 @@ class _CandidateIndex:
                     if d2 <= r2 and (best is None or d2 < best):
                         best = d2
         return None if best is None else math.sqrt(best)
+
+
+def _nearest(idx: "_CandidateIndex", x: float, y: float):
+    """Distance to the nearest candidate, searching outward in steps;
+    None if none within the last step."""
+    for r in DIST_SEARCH_STEPS_M:
+        d = idx.nearest_within(x, y, r)
+        if d is not None:
+            return d
+    return None
+
+
+def _fisher_combined(ps: List[float]) -> float:
+    """Fisher's method: P(chi2 with 2k dof >= -2 sum ln p). Exact closed
+    form for even degrees of freedom."""
+    k = len(ps)
+    half_x = -sum(math.log(p) for p in ps)
+    term, total = 1.0, 1.0
+    for i in range(1, k):
+        term *= half_x / i
+        total += term
+    return min(1.0, math.exp(-half_x) * total)
 
 
 def _binom_tail(n: int, k: int, p: float) -> float:
@@ -193,13 +228,46 @@ def calibrate_job(db_root: str, job_ref: str) -> Dict[str, Any]:
                 "sample_points": total,
                 "sample_step_m": round(2 * half / n_side, 1),
             }
+        # Distance test: nearest-candidate distance at every sample point.
+        sample_d = []
+        for tx, ty in tile_xy:
+            for ox in offs:
+                for oy in offs:
+                    d = _nearest(idx, tx + ox, ty + oy)
+                    sample_d.append(float("inf") if d is None else d)
+        sample_d.sort()
+        n_samp = len(sample_d)
+        dist_sites = []
+        for s in sites:
+            d = _nearest(idx, s["x"], s["y"])
+            if d is None:
+                p_site = 1.0
+            else:
+                # share of samples with nearest distance <= d (binary search)
+                lo, hi = 0, n_samp
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if sample_d[mid] <= d:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                p_site = max(lo / n_samp, 1.0 / (n_samp + 1)) if n_samp else 1.0
+            dist_sites.append({"name": s.get("display_name") or s.get("name"),
+                               "nearest_candidate_m": None if d is None else round(d, 1),
+                               "p_chance_this_close": p_site})
+        distance_test = {
+            "sites": dist_sites,
+            "combined_p": _fisher_combined([x["p_chance_this_close"] for x in dist_sites]) if dist_sites else None,
+            "sample_points": n_samp,
+            "sample_step_m": round(2 * half / n_side, 1),
+        }
         far = 0
         site_idx = _CandidateIndex([(s["x"], s["y"]) for s in sites], 1000.0)
         for x, y in pts:
             if site_idx.nearest_within(x, y, FAR_FROM_SITE_M) is None:
                 far += 1
         return {"label": label, "candidates": len(subset), "far_from_any_site": far,
-                "by_radius": per_radius, "_idx": idx}
+                "by_radius": per_radius, "distance_test": distance_test, "_idx": idx}
 
     all_res = run_subset("all candidates", cands)
     kept = [c for c in cands if c["status"] != "REJECTED"]
@@ -249,10 +317,13 @@ def calibrate_job(db_root: str, job_ref: str) -> Dict[str, Any]:
             db_root, gp, "CALIBRATION_RUN",
             related_entity_type="wide_area_search_job", related_entity_id=job_id,
             description=("F2 calibration: %d/%d tiles scanned, %d gazetteer sites in coverage, "
-                         "%d hit within 500 m (chance expectation %.2f, p=%s)."
+                         "%d hit within 500 m (chance expectation %.2f, p=%s); "
+                         "distance test combined p=%s."
                          % (len(done), len(tiles), p["sites"], p["hits"], p["expected_hits_by_chance"],
                             "n/a" if p["p_at_least_this_many_by_chance"] is None
-                            else "%.3g" % p["p_at_least_this_many_by_chance"])))
+                            else "%.3g" % p["p_at_least_this_many_by_chance"],
+                            "n/a" if all_res["distance_test"]["combined_p"] is None
+                            else "%.3g" % all_res["distance_test"]["combined_p"])))
     except Exception:
         pass
     return result
@@ -274,6 +345,16 @@ def _report_text(r: Dict[str, Any]) -> str:
     for key in ("all", "not_rejected"):
         res = r[key]
         L.append("[%s: %d candidates]" % (res["label"], res["candidates"]))
+        dt = res["distance_test"]
+        if dt["sites"]:
+            L.append("  DISTANCE TEST (primary):")
+            for s in dt["sites"]:
+                dist = "none within 5 km" if s["nearest_candidate_m"] is None else "%.0f m" % s["nearest_candidate_m"]
+                L.append("    %s: nearest %s, chance this close %.3g"
+                         % (s["name"], dist, s["p_chance_this_close"]))
+            L.append("    combined chance with no real skill: %.3g (Fisher, %d sites)"
+                     % (dt["combined_p"], len(dt["sites"])))
+            L.append("    (sample grid %d points, step %.0f m)" % (dt["sample_points"], dt["sample_step_m"]))
         for rad in ("500", "1000"):
             b = res["by_radius"][rad]
             if not b["sites"]:
