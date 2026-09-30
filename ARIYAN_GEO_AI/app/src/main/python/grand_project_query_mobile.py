@@ -261,6 +261,19 @@ def list_job_trust_json(db_root: str) -> str:
     return review.list_job_trust_json(db_root)
 
 
+# Job target (added 2026-10-01): MOUND_TELL / OTHER / NOT_SET. Only
+# MOUND_TELL switches on the f3-v2 Hillside auto-reject rule in
+# grand_project_review.auto_review_project(). Rows in list_candidates_json
+# and the detail "review" entry now also carry job_target and
+# job_target_label (extra keys only).
+def set_job_target_json(db_root: str, job_ref: str, target: str, reason: str) -> str:
+    return review.set_job_target_json(db_root, job_ref, target, reason)
+
+
+def list_job_target_json(db_root: str) -> str:
+    return review.list_job_target_json(db_root)
+
+
 # F2 early self-calibration (added 2026-09-29): read-only measurement of
 # one job's hit rate against the gazetteer, with a chance baseline. See
 # grand_project_calibration.py. Imported here so the Activity still talks
