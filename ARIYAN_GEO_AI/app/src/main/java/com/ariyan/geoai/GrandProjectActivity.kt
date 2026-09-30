@@ -1408,7 +1408,8 @@ appendReviewSection(sb, detail)
             "Terrain labels (F3)", "job id, first 6+ characters, e.g. 273d33", "Run",
             "Reads the ground around every candidate of the job from the offline DEM (no network) and " +
                 "labels its shape (Mound / Depression / Linear / Ring / Too small to shape / No shape) " +
-                "and a Mountain flag. Adds a neutral TERRAIN_CONTEXT entry to each candidate's evidence; " +
+                "plus Hillside (steep ground within 250 m) and Near mountains (context only). " +
+                "Adds a neutral TERRAIN_CONTEXT entry to each candidate's evidence; " +
                 "changes no status or confidence. Candidates already labelled are skipped. " +
                 "A large job can take a minute or two."
         ) { jobRef ->
