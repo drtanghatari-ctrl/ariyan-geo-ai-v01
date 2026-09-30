@@ -88,6 +88,32 @@ CHANGELOG
   newest user-side row (reviewed_by 'user' or 'user_handback') is a
   'user' row -- so any later user review takes ownership again, and the
   history keeps every step. Rows are still never updated or deleted.
+- 2026-10-01 (f3-v2 HILLSIDE RULE, activated with the user's approval of
+  2026-10-01 after BOTH pre-registered test jobs passed check 1:
+  Kangavar f89dfe 0 of 8 sites, Susiana ca77c0 0 of 22 sites).
+  The pre-registration limits the rule to MOUND/TELL searches, so a job
+  now carries a TARGET, stored in a NEW append-only table job_target
+  (same pattern as job_trust; the current target is the newest row):
+    MOUND_TELL -- mound / tell search: the Hillside rule applies
+    OTHER      -- fortress, cliff tomb, rock relief or anything else that
+                  really sits on hillsides: the rule NEVER applies
+    NOT_SET    -- the default for every job: the rule does not apply
+  New auto-review rule, placed after the land-cover rule and before the
+  Pass 2 rules (so it is rule 3, and the old 3-5 become 4-6):
+    3. the candidate's job target is MOUND_TELL and its f3-v2
+       TERRAIN_CONTEXT entry says Hillside = Yes          -> Rejected
+  Only an f3-v2 entry counts (the f3-v1 Mountain flag never does), only
+  the value "Yes" counts (No and Unknown never reject), and a candidate
+  with no f3-v2 entry is simply not judged by this rule -- run Terrain
+  labels (F3) on the job first. The reason text quotes the stored median
+  slope and the frozen threshold. Changing a job's target away from
+  MOUND_TELL is picked up by the next automatic pass (the candidates go
+  back to whatever the remaining rules say). User reviews still always
+  win, and nothing is ever deleted; a Hillside-rejected candidate keeps
+  every row and can be shown again with "Show rejected".
+  The f3-v2 numbers themselves (250 m, 10 deg, 90 % coverage) are NOT
+  copied or changed here: the rule reads the label terrain_context_labels
+  stored, so there is one definition only.
 """
 
 from __future__ import annotations
@@ -144,6 +170,24 @@ AUTO_REASON_PREFIX = "[auto] "
 _REFINEMENT_RELATION = "refinement_dem_check"
 _DEM_SOURCE_LIVE = "LIVE"
 
+# Job target (2026-10-01, see CHANGELOG). Only MOUND_TELL switches the
+# Hillside rule on.
+TARGET_MOUND_TELL = "MOUND_TELL"
+TARGET_OTHER = "OTHER"
+TARGET_NOT_SET = "NOT_SET"
+_TARGET_VALUES = (TARGET_MOUND_TELL, TARGET_OTHER, TARGET_NOT_SET)
+TARGET_LABELS = {
+    TARGET_MOUND_TELL: "Mound / tell",
+    TARGET_OTHER: "Other (fortress, cliff tomb, rock relief ...)",
+    TARGET_NOT_SET: "Not set",
+}
+
+# Must match terrain_context_labels.EVIDENCE_TYPE and METHOD_VERSION
+# (copied, not imported: that module loads numpy and the DEM readers,
+# and it imports THIS module, so importing it here would be circular).
+_TERRAIN_EVIDENCE_TYPE = "TERRAIN_CONTEXT"
+_TERRAIN_RULE_METHOD = "f3-v2"
+
 
 class ReviewError(ValueError):
     """Bad input (unknown status, empty reason, unknown/ambiguous id)."""
@@ -171,6 +215,16 @@ _REVIEW_SCHEMA = [
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id       TEXT NOT NULL,
         trust        TEXT NOT NULL,
+        reason       TEXT NOT NULL,
+        recorded_at  TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES wide_area_search_job(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS job_target (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id       TEXT NOT NULL,
+        target       TEXT NOT NULL,
         reason       TEXT NOT NULL,
         recorded_at  TEXT NOT NULL,
         FOREIGN KEY (job_id) REFERENCES wide_area_search_job(id)
@@ -438,6 +492,119 @@ def list_job_trust(db_root: str) -> List[Dict[str, Any]]:
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Job target (2026-10-01, f3-v2 Hillside rule) -- see CHANGELOG
+# ---------------------------------------------------------------------------
+
+def set_job_target(db_root: str, job_ref: str, target: str, reason: str) -> Dict[str, Any]:
+    """Records what a Wide-Area Search job is looking for (append-only).
+    Returns {"job_id", "target", "target_label", "recorded_at"}."""
+    value = str(target or "").strip().upper()
+    if value not in _TARGET_VALUES:
+        raise ReviewError(f"Unknown target {target!r}; use Mound / tell, Other or Not set.")
+    text = _clean_reason(reason)
+
+    conn = _connect(db_root)
+    try:
+        job_id = _resolve_id(conn, "wide_area_search_job", job_ref)
+        grand_project_id = conn.execute(
+            "SELECT grand_project_id FROM wide_area_search_job WHERE id = ?", (job_id,)
+        ).fetchone()["grand_project_id"]
+        now = db._now_iso()
+        with conn:
+            conn.execute(
+                "INSERT INTO job_target (job_id, target, reason, recorded_at) VALUES (?, ?, ?, ?)",
+                (job_id, value, text, now),
+            )
+    finally:
+        conn.close()
+
+    try:
+        db.log_timeline_event(
+            db_root, grand_project_id, "JOB_TARGET_SET",
+            related_entity_type="wide_area_search_job", related_entity_id=job_id,
+            description=(f"User set the target of job {job_id[:6]} to {TARGET_LABELS[value]}"
+                         + (" (f3-v2 Hillside rule ON for this job)" if value == TARGET_MOUND_TELL
+                            else " (f3-v2 Hillside rule OFF for this job)")
+                         + f". Reason: {text}"),
+        )
+    except Exception:
+        pass
+
+    return {"job_id": job_id, "target": value, "target_label": TARGET_LABELS[value],
+            "recorded_at": now}
+
+
+def _current_job_target(conn) -> Dict[str, Dict[str, Any]]:
+    """job_id -> newest job_target row (as dict). Jobs never set are absent
+    (= NOT_SET)."""
+    rows = conn.execute(
+        """
+        SELECT t.job_id, t.target, t.reason, t.recorded_at
+        FROM job_target t
+        JOIN (SELECT job_id, MAX(id) AS max_id FROM job_target GROUP BY job_id) m
+          ON t.id = m.max_id
+        """
+    ).fetchall()
+    return {r["job_id"]: dict(r) for r in rows}
+
+
+def list_job_target(db_root: str) -> List[Dict[str, Any]]:
+    """Current target of every job that has ever been set."""
+    conn = _connect(db_root)
+    try:
+        out = sorted(_current_job_target(conn).values(), key=lambda r: r["recorded_at"])
+        for r in out:
+            r["target_label"] = TARGET_LABELS.get(r["target"], r["target"])
+        return out
+    finally:
+        conn.close()
+
+
+def _hillside_reasons(conn, candidate_ids: set) -> Optional[Dict[str, str]]:
+    """candidate_id -> reason text for candidates whose NEWEST f3-v2
+    TERRAIN_CONTEXT entry says Hillside = Yes. Only candidates in
+    candidate_ids are considered. One scan of the TERRAIN_CONTEXT rows
+    (evidence_link has no candidate index). None if the rows cannot be
+    read (then the rule is simply not applied)."""
+    if not candidate_ids:
+        return {}
+    try:
+        rows = conn.execute(
+            "SELECT candidate_id, detail_json FROM evidence_link "
+            "WHERE evidence_type = ? ORDER BY id",
+            (_TERRAIN_EVIDENCE_TYPE,),
+        ).fetchall()
+    except Exception:
+        return None
+    newest: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        cid = r["candidate_id"]
+        if cid not in candidate_ids:
+            continue
+        try:
+            d = json.loads(r["detail_json"] or "{}")
+        except ValueError:
+            continue
+        if d.get("method_version") == _TERRAIN_RULE_METHOD:
+            newest[cid] = d  # ORDER BY id -> the last one kept is the newest
+    out: Dict[str, str] = {}
+    for cid, d in newest.items():
+        if d.get("hillside") != "Yes":
+            continue
+        slope = d.get("median_slope_within_250m_deg")
+        params = d.get("parameters") or {}
+        limit = params.get("hillside_median_slope_deg")
+        radius = params.get("hillside_radius_m")
+        measured = f"median slope {slope:.1f} deg" if isinstance(slope, (int, float)) else "median slope"
+        rule = (f" within {radius:.0f} m is above {limit:.0f} deg"
+                if isinstance(limit, (int, float)) and isinstance(radius, (int, float))
+                else " is above the f3-v2 limit")
+        out[cid] = (f"Hillside (f3-v2): {measured}{rule}, and this job's target is "
+                    "mound/tell (a tell does not stand on a hillside).")
+    return out
+
+
 def _latest_reviews(conn) -> Dict[str, Dict[str, Any]]:
     """candidate_id -> newest candidate_review row as {"new_status",
     "reason", "reviewed_by"}."""
@@ -467,6 +634,7 @@ def review_summary_for_project(db_root: str, grand_project_id: str) -> Dict[str,
     conn = _connect(db_root)
     try:
         trust = _current_job_trust(conn)
+        targets = _current_job_target(conn)
         rows = conn.execute(
             """
             SELECT c.id, c.status, t.job_id
@@ -493,6 +661,11 @@ def review_summary_for_project(db_root: str, grand_project_id: str) -> Dict[str,
                 "job_id": job_id,
                 "job_trust": t["trust"] if t else None,
                 "job_trust_reason": t["reason"] if t else None,
+                "job_target": (targets[job_id]["target"] if job_id in targets
+                               else TARGET_NOT_SET) if job_id else None,
+                "job_target_label": TARGET_LABELS.get(
+                    targets[job_id]["target"] if job_id in targets else TARGET_NOT_SET)
+                    if job_id else None,
                 "last_review_reason": last["reason"] if last else None,
             }
         return out
@@ -601,6 +774,7 @@ def auto_review_project(db_root: str, grand_project_id: str) -> Dict[str, Any]:
     conn = _connect(db_root)
     try:
         trust = _current_job_trust(conn)
+        targets = _current_job_target(conn)
         rows = conn.execute(
             """
             SELECT c.id, c.status, t.job_id
@@ -618,6 +792,10 @@ def auto_review_project(db_root: str, grand_project_id: str) -> Dict[str, Any]:
         user_owned = _user_owned_ids(conn) & ids
         latest = _latest_reviews(conn)
         land = _land_cover_reasons(conn, ids)
+        mound_jobs = {j for j, t in targets.items() if t["target"] == TARGET_MOUND_TELL}
+        mound_ids = {cid for cid, info in candidates.items()
+                     if info["job_id"] in mound_jobs} - user_owned
+        hillside = _hillside_reasons(conn, mound_ids)
         refine, unreadable = _refinement_verdicts(db_root, conn, ids - user_owned)
 
         now = db._now_iso()
@@ -634,6 +812,9 @@ def auto_review_project(db_root: str, grand_project_id: str) -> Dict[str, Any]:
             elif land is not None and cid in land:
                 status = STATUS_REJECTED
                 why = "Land cover: " + _LAND_COVER_TEXT.get(land[cid], land[cid]) + "."
+            elif hillside and cid in hillside:
+                status = STATUS_REJECTED
+                why = hillside[cid]
             elif cid in refine:
                 status, why = refine[cid]
             else:
@@ -691,6 +872,8 @@ def auto_review_project(db_root: str, grand_project_id: str) -> Dict[str, Any]:
         "by_status": {STATUS_LABELS[k]: v for k, v in by_status.items()},
         "skipped_unreadable": len(unreadable),
         "land_cover_available": land is not None,
+        "mound_tell_jobs": len(mound_jobs),
+        "hillside_rejected_candidates": len(hillside or {}),
     }
 
 
@@ -719,6 +902,14 @@ def set_job_trust_json(db_root: str, job_ref: str, trust: str, reason: str) -> s
 
 def list_job_trust_json(db_root: str) -> str:
     return _json_call(list_job_trust, db_root)
+
+
+def set_job_target_json(db_root: str, job_ref: str, target: str, reason: str) -> str:
+    return _json_call(set_job_target, db_root, job_ref, target, reason)
+
+
+def list_job_target_json(db_root: str) -> str:
+    return _json_call(list_job_target, db_root)
 
 
 def review_summary_for_project_json(db_root: str, grand_project_id: str) -> str:
