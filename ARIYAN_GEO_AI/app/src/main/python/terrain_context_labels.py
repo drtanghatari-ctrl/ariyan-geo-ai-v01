@@ -4,6 +4,41 @@ terrain_context_labels.py
 Part of ARIYAN GEO AI -- F3 terrain context labels (added 2026-09-30,
 parameters approved by the user BEFORE any known site was looked at).
 
+VERSIONS
+- f3-v1 (2026-09-30): shape + Mountain flag. Tested on job 273d33
+  (Persepolis cluster): the Mountain flag fired on 317 of 782 candidates
+  and on 6 of 7 recorded sites, including the flat-plain Bakun mounds
+  (median slope 0.4 deg) -- because "range > 150 m within 2 km" catches
+  anything near a mountain edge. So it can never be a rejection rule.
+  f3-v1 rows already in the database are kept untouched.
+- f3-v2 (THIS VERSION, parameters APPROVED and FROZEN by the user on
+  2026-09-30 before any data of its test job was seen): shape rules are
+  unchanged; the Mountain flag is replaced by two separate labels:
+    * HILLSIDE: median Horn slope within HILLSIDE_RADIUS_M (250 m) >
+      HILLSIDE_MEDIAN_SLOPE_DEG (10 deg). Unknown if less than
+      HILLSIDE_MIN_VALID_FRACTION (90%) of the 250 m disc has DEM data.
+      The candidate for a future auto-Rejected rule -- but ONLY after it
+      passes the pre-registered tests below. Until then a label only.
+    * NEAR MOUNTAINS: exactly the old f3-v1 Mountain rule (range > 150 m
+      or median slope > 15 deg within 2 km). Context only, never a rule.
+  PRE-REGISTERED TEST (fixed before any data was seen):
+    test job = Kangavar valley, 34.430-34.555 N / 47.990-48.090 E, 1000 m
+    tiles, DEM-only offline-first (offline tiles N34_E047, N34_E048).
+    1. PRIMARY: Hillside = Yes at <= 1 of the recorded gazetteer site
+       points inside the scanned area -> PASS; otherwise FAIL and Hillside
+       stays a label only permanently.
+    2. USEFULNESS: share of candidates with Hillside = Yes is reported
+       (< 5% = harmless but not worth automating).
+    3. COMPARISON: the Near-mountains rate on the same sites and
+       candidates is reported beside it.
+    4. Even on PASS, Hillside becomes an auto-rule only after a second
+       fresh job (Susiana plain, 32.12-32.28 N / 48.38-48.60 E), and only
+       for mound/tell searches -- never fortress/cliff/rock-relief ones.
+    5. Bonus: Calibrate... on the Kangavar job, pre-registered p < 0.05.
+  The report prints the check-1 count on EVERY job for information; it is
+  the pre-registered decision only on the Kangavar job. Any further change
+  = f3-v3, tested on another new job.
+
 WHAT THIS DOES
 For every candidate on the DONE tiles of one Wide-Area Search job it reads
 the surrounding ground from the OFFLINE Copernicus DEM GLO-30 library only
@@ -30,13 +65,17 @@ the surrounding ground from the OFFLINE Copernicus DEM GLO-30 library only
    Elongation = sqrt(largest / smallest second moment of the patch treated
    as an AREA (each cell adds its own dx^2/12, dy^2/12)), so a solid L x W
    rectangle reads exactly L/W.
-2. MOUNTAIN FLAG, within MOUNTAIN_RADIUS_M of the candidate:
-   Yes if elevation range > MOUNTAIN_RELIEF_M or median slope (Horn 1981,
-   the same formula terrain_derivatives.py uses) > MOUNTAIN_MEDIAN_SLOPE_DEG;
-   No if neither and at least MIN_VALID_FRACTION of the disc has DEM data;
-   Unknown otherwise. A LABEL ONLY: it never rejects anything. It may
-   become an auto-Rejected rule only with the user's approval after
-   calibration.
+2. HILLSIDE (f3-v2), within HILLSIDE_RADIUS_M of the candidate:
+   Yes if the median slope (Horn 1981, the same formula
+   terrain_derivatives.py uses) > HILLSIDE_MEDIAN_SLOPE_DEG; No if not;
+   Unknown if less than HILLSIDE_MIN_VALID_FRACTION of the disc has DEM
+   data. A LABEL ONLY for now (see VERSIONS).
+3. NEAR MOUNTAINS (the f3-v1 Mountain flag, unchanged), within
+   NEAR_MOUNTAINS_RADIUS_M of the candidate:
+   Yes if elevation range > NEAR_MOUNTAINS_RELIEF_M or median slope >
+   NEAR_MOUNTAINS_MEDIAN_SLOPE_DEG; No if neither and at least
+   MIN_VALID_FRACTION of the disc has DEM data; Unknown otherwise.
+   Context only: it never rejects anything and never will.
 
 WHAT THIS IS NOT
 - Not evidence of a site. It is DERIVED from the same DEM the detector
@@ -66,6 +105,8 @@ new entry beside the old one (history is never overwritten).
 Writes: one TERRAIN_CONTEXT evidence_link per newly labelled candidate
 (one transaction) and exactly one timeline_event
 (TERRAIN_CONTEXT_LABELS_RUN). Refuses jobs marked CORRUPTED.
+Existing entries of an older method version (f3-v1) are neither changed
+nor counted as "already labelled"; f3-v2 adds its own entry beside them.
 """
 
 from __future__ import annotations
@@ -84,10 +125,10 @@ import known_sites
 import offline_country_registry as countries
 import offline_dem_store
 
-METHOD_VERSION = "f3-v1"
+METHOD_VERSION = "f3-v2"
 EVIDENCE_TYPE = "TERRAIN_CONTEXT"
 
-# ---- Parameters approved 2026-09-30, fixed before any known site was run ----
+# ---- Shape parameters approved 2026-09-30 (f3-v1), unchanged in f3-v2 ----
 SHAPE_HALF_WINDOW_M = 300.0        # ~600 x 600 m shape window
 LOCAL_RELIEF_RADIUS_M = 150.0      # mean-elevation disc radius
 RELIEF_THRESHOLD_M = 1.5           # |local relief| needed to count as shape
@@ -97,10 +138,18 @@ RING_INNER_M = 45.0                # ring search annulus
 RING_OUTER_M = 250.0
 RING_MIN_SECTORS = 6               # of 8 compass sectors
 SEED_SEARCH_CELLS = 1              # candidate cell + its 8 neighbours
-MOUNTAIN_RADIUS_M = 2000.0
-MOUNTAIN_RELIEF_M = 150.0
-MOUNTAIN_MEDIAN_SLOPE_DEG = 15.0
+# ---- Near mountains = the f3-v1 Mountain flag, unchanged; context only ----
+NEAR_MOUNTAINS_RADIUS_M = 2000.0
+NEAR_MOUNTAINS_RELIEF_M = 150.0
+NEAR_MOUNTAINS_MEDIAN_SLOPE_DEG = 15.0
 MIN_VALID_FRACTION = 0.9           # DEM coverage needed to say "No"
+# ---- Hillside, NEW in f3-v2, approved and frozen 2026-09-30 ----
+HILLSIDE_RADIUS_M = 250.0
+HILLSIDE_MEDIAN_SLOPE_DEG = 10.0   # Yes when the median slope is ABOVE this
+HILLSIDE_MIN_VALID_FRACTION = 0.9  # below this DEM coverage -> Unknown
+# ---- Pre-registered f3-v2 decision numbers (reported, never auto-applied) ----
+PREREG_MAX_HILLSIDE_SITES = 1      # PASS if Hillside=Yes at <= 1 site point
+PREREG_MIN_USEFUL_SHARE = 0.05     # < 5% of candidates = not worth automating
 MIN_DISC_FRACTION = 0.5            # local relief needs half its disc present
 NODATA_BELOW_M = -1000.0           # below the lowest land on Earth -> NoData
 
@@ -124,9 +173,12 @@ def parameters() -> Dict[str, Any]:
         "ring_annulus_m": [RING_INNER_M, RING_OUTER_M],
         "ring_min_sectors_of_8": RING_MIN_SECTORS,
         "seed_search_cells": SEED_SEARCH_CELLS,
-        "mountain_radius_m": MOUNTAIN_RADIUS_M,
-        "mountain_relief_m": MOUNTAIN_RELIEF_M,
-        "mountain_median_slope_deg": MOUNTAIN_MEDIAN_SLOPE_DEG,
+        "hillside_radius_m": HILLSIDE_RADIUS_M,
+        "hillside_median_slope_deg": HILLSIDE_MEDIAN_SLOPE_DEG,
+        "hillside_min_valid_fraction": HILLSIDE_MIN_VALID_FRACTION,
+        "near_mountains_radius_m": NEAR_MOUNTAINS_RADIUS_M,
+        "near_mountains_relief_m": NEAR_MOUNTAINS_RELIEF_M,
+        "near_mountains_median_slope_deg": NEAR_MOUNTAINS_MEDIAN_SLOPE_DEG,
         "min_valid_fraction": MIN_VALID_FRACTION,
     }
 
@@ -342,34 +394,64 @@ def horn_slope_deg(z: np.ndarray, dx: float, dy: float) -> np.ndarray:
     return np.degrees(np.arctan(np.hypot(dzdx, dzdy)))
 
 
-def mountain_flag(z: np.ndarray, ci: int, cj: int, dx: float, dy: float) -> Dict[str, Any]:
-    h, w = z.shape
+def _disc(shape: Tuple[int, int], ci: int, cj: int, dx: float, dy: float, radius_m: float) -> np.ndarray:
+    h, w = shape
     ii, jj = np.mgrid[0:h, 0:w]
-    disc = np.hypot((ii - ci) * dy, (jj - cj) * dx) <= MOUNTAIN_RADIUS_M
+    return np.hypot((ii - ci) * dy, (jj - cj) * dx) <= radius_m
+
+
+def near_mountains(z: np.ndarray, slope: np.ndarray, ci: int, cj: int,
+                   dx: float, dy: float) -> Dict[str, Any]:
+    """The f3-v1 Mountain flag, unchanged, renamed Near mountains in f3-v2.
+    Context only -- never a rule."""
+    disc = _disc(z.shape, ci, cj, dx, dy, NEAR_MOUNTAINS_RADIUS_M)
     zd = z[disc]
     valid = ~np.isnan(zd)
     frac = float(valid.mean()) if zd.size else 0.0
     if not valid.any():
-        return {"mountain_flag": "Unknown", "dem_coverage_2km": 0.0}
+        return {"near_mountains": "Unknown", "dem_coverage_2km": 0.0}
     rng = float(np.nanmax(zd) - np.nanmin(zd))
-    sl = horn_slope_deg(z, dx, dy)[disc]
+    sl = slope[disc]
     sl = sl[~np.isnan(sl)]
     med = float(np.median(sl)) if sl.size else float("nan")
-    yes = rng > MOUNTAIN_RELIEF_M or (not math.isnan(med) and med > MOUNTAIN_MEDIAN_SLOPE_DEG)
+    yes = rng > NEAR_MOUNTAINS_RELIEF_M or (not math.isnan(med) and med > NEAR_MOUNTAINS_MEDIAN_SLOPE_DEG)
     flag = "Yes" if yes else ("No" if frac >= MIN_VALID_FRACTION else "Unknown")
-    return {"mountain_flag": flag,
+    return {"near_mountains": flag,
             "relief_within_2km_m": round(rng, 1),
             "median_slope_within_2km_deg": None if math.isnan(med) else round(med, 1),
             "dem_coverage_2km": round(frac, 3)}
 
 
+def hillside(z: np.ndarray, slope: np.ndarray, ci: int, cj: int,
+             dx: float, dy: float) -> Dict[str, Any]:
+    """f3-v2 Hillside label: median Horn slope within HILLSIDE_RADIUS_M.
+    Unknown when less than HILLSIDE_MIN_VALID_FRACTION of the disc has DEM
+    data (nothing is filled in). The median is taken over the cells whose
+    slope could be computed (a cell next to NoData has no Horn slope)."""
+    disc = _disc(z.shape, ci, cj, dx, dy, HILLSIDE_RADIUS_M)
+    zd = z[disc]
+    frac = float((~np.isnan(zd)).mean()) if zd.size else 0.0
+    sl = slope[disc]
+    sl = sl[~np.isnan(sl)]
+    med = float(np.median(sl)) if sl.size else float("nan")
+    if frac < HILLSIDE_MIN_VALID_FRACTION or math.isnan(med):
+        flag = "Unknown"
+    else:
+        flag = "Yes" if med > HILLSIDE_MEDIAN_SLOPE_DEG else "No"
+    return {"hillside": flag,
+            "median_slope_within_250m_deg": None if math.isnan(med) else round(med, 2),
+            "dem_coverage_250m": round(frac, 3)}
+
+
 def analyse_point(storage_folder: str, offline_data_root: str, lat: float, lon: float) -> Dict[str, Any]:
-    """Full F3 description of one point. Reads ONE window (the mountain disc)
+    """Full F3 description of one point. Reads ONE window (the 2 km near-mountains disc)
     and cuts the shape window out of it (same lattice)."""
-    half = max(MOUNTAIN_RADIUS_M, SHAPE_HALF_WINDOW_M + LOCAL_RELIEF_RADIUS_M) + 50.0
+    half = max(NEAR_MOUNTAINS_RADIUS_M, HILLSIDE_RADIUS_M,
+               SHAPE_HALF_WINDOW_M + LOCAL_RELIEF_RADIUS_M) + 50.0
     win = read_window(storage_folder, offline_data_root, lat, lon, half)
     if "error" in win:
-        return {"shape": "No DEM", "mountain_flag": "Unknown", "error": win["error"]}
+        return {"shape": "No DEM", "hillside": "Unknown", "near_mountains": "Unknown",
+                "error": win["error"]}
     z, dx, dy, ci, cj = win["z"], win["dx_m"], win["dy_m"], win["ci"], win["cj"]
     # Local relief on shape window + disc margin, then crop to the shape window.
     my = int(math.ceil((SHAPE_HALF_WINDOW_M + LOCAL_RELIEF_RADIUS_M) / dy))
@@ -380,7 +462,9 @@ def analyse_point(storage_folder: str, offline_data_root: str, lat: float, lon: 
     sx = int(math.ceil(SHAPE_HALF_WINDOW_M / dx))
     lr = lr[my - sy: my + sy + 1, mx - sx: mx + sx + 1]
     out = classify_shape(lr, sy, sx, dx, dy)
-    out.update(mountain_flag(z, ci, cj, dx, dy))
+    slope = horn_slope_deg(z, dx, dy)      # once, shared by both context labels
+    out.update(hillside(z, slope, ci, cj, dx, dy))
+    out.update(near_mountains(z, slope, ci, cj, dx, dy))
     out["cell_size_m"] = "%.1f x %.1f" % (dx, dy)
     out["shape_window_cells"] = "%d x %d" % (lr.shape[1], lr.shape[0])
     out["dem_files"] = [os.path.basename(p) for p in win["files_used"]]
@@ -464,10 +548,12 @@ def label_job(db_root: str, job_ref: str) -> Dict[str, Any]:
             "method_version": METHOD_VERSION,
             "what": "terrain context derived from the offline DEM; describes shape, not evidence of a site",
             "shape": res["shape"],
-            "mountain_flag": res["mountain_flag"],
+            "hillside": res["hillside"],
+            "near_mountains": res["near_mountains"],
         }
         for k in ("peak_local_relief_m", "centre_local_relief_m", "patch_cells", "patch_area_m2",
                   "elongation", "patch_reaches_window_edge", "ring_sectors_of_8",
+                  "median_slope_within_250m_deg", "dem_coverage_250m",
                   "relief_within_2km_m", "median_slope_within_2km_deg", "dem_coverage_2km",
                   "cell_size_m", "shape_window_cells", "dem_files_missing"):
             if k in res:
@@ -509,7 +595,8 @@ def label_job(db_root: str, job_ref: str) -> Dict[str, Any]:
             continue
         country = countries.get_country_for_point(s["lat"], s["lon"])
         at = (analyse_point(country.storage_folder, db_root, s["lat"], s["lon"]) if country
-              else {"shape": "No DEM", "mountain_flag": "Unknown", "error": "no country package"})
+              else {"shape": "No DEM", "hillside": "Unknown", "near_mountains": "Unknown",
+                    "error": "no country package"})
         at.pop("_dem_paths", None)
         near = None
         best = None
@@ -520,22 +607,28 @@ def label_job(db_root: str, job_ref: str) -> Dict[str, Any]:
         site_rows.append({
             "name": s.get("display_name") or s.get("name"),
             "lat": s["lat"], "lon": s["lon"],
-            "at_site": {k: at.get(k) for k in ("shape", "mountain_flag", "peak_local_relief_m",
-                                              "patch_cells", "elongation", "relief_within_2km_m",
-                                              "median_slope_within_2km_deg", "error")},
+            "at_site": {k: at.get(k) for k in ("shape", "hillside", "near_mountains",
+                                              "peak_local_relief_m", "patch_cells", "elongation",
+                                              "median_slope_within_250m_deg", "dem_coverage_250m",
+                                              "relief_within_2km_m", "median_slope_within_2km_deg",
+                                              "error")},
             "nearest_candidate_id": near["id"] if near else None,
             "nearest_candidate_m": round(best, 1) if best is not None else None,
             "nearest_candidate_label": ({"shape": labels[near["id"]]["shape"],
-                                         "mountain_flag": labels[near["id"]]["mountain_flag"]}
+                                         "hillside": labels[near["id"]]["hillside"],
+                                         "near_mountains": labels[near["id"]]["near_mountains"]}
                                         if near and near["id"] in labels else None),
         })
     site_rows.sort(key=lambda r: (r["nearest_candidate_m"] is None, r["nearest_candidate_m"] or 0))
 
     shape_counts = {k: 0 for k in SHAPES}
-    mountain_counts = {"Yes": 0, "No": 0, "Unknown": 0}
+    hillside_counts = {"Yes": 0, "No": 0, "Unknown": 0}
+    near_counts = {"Yes": 0, "No": 0, "Unknown": 0}
     for d in labels.values():
         shape_counts[d["shape"]] = shape_counts.get(d["shape"], 0) + 1
-        mountain_counts[d["mountain_flag"]] = mountain_counts.get(d["mountain_flag"], 0) + 1
+        hillside_counts[d["hillside"]] = hillside_counts.get(d["hillside"], 0) + 1
+        near_counts[d["near_mountains"]] = near_counts.get(d["near_mountains"], 0) + 1
+    prereg = _prereg_check(site_rows, hillside_counts, near_counts)
 
     result = {
         "job_id": job_id,
@@ -546,7 +639,9 @@ def label_job(db_root: str, job_ref: str) -> Dict[str, Any]:
         "already_labelled": len(existing),
         "not_labelled": failures,
         "shape_counts": shape_counts,
-        "mountain_counts": mountain_counts,
+        "hillside_counts": hillside_counts,
+        "near_mountains_counts": near_counts,
+        "prereg_check": prereg,
         "sites": site_rows,
         "dem_files": {os.path.basename(p): h for p, h in dem_hashes.items()},
         "parameters": params,
@@ -558,15 +653,47 @@ def label_job(db_root: str, job_ref: str) -> Dict[str, Any]:
             db_root, job["grand_project_id"], "TERRAIN_CONTEXT_LABELS_RUN",
             related_entity_type="wide_area_search_job", related_entity_id=job_id,
             description=("F3 terrain labels %s: %d candidates on %d/%d DONE tiles, %d newly labelled, "
-                         "%d already labelled, %d not labelled. Shapes: %s. Mountain flag: %s."
+                         "%d already labelled, %d not labelled. Shapes: %s. Hillside: %s. "
+                         "Near mountains: %s. Pre-registered check 1: Hillside=Yes at %d of %d "
+                         "recorded site points (pass if <= %d) -> %s."
                          % (METHOD_VERSION, len(cands), len(done), len(tiles), len(new_rows),
                             len(existing), sum(failures.values()),
                             ", ".join("%s %d" % (k, v) for k, v in shape_counts.items() if v),
-                            ", ".join("%s %d" % (k, v) for k, v in mountain_counts.items() if v))))
+                            ", ".join("%s %d" % (k, v) for k, v in hillside_counts.items() if v),
+                            ", ".join("%s %d" % (k, v) for k, v in near_counts.items() if v),
+                            prereg["sites_hillside_yes"], prereg["sites_total"],
+                            PREREG_MAX_HILLSIDE_SITES, prereg["check1"])))
     except Exception as e:
         result["timeline_warning"] = "labels saved, but the timeline event failed: %s" % e
     result["report_text"] = _report_text(result)
     return result
+
+
+def _prereg_check(site_rows: List[Dict[str, Any]], hillside_counts: Dict[str, int],
+                  near_counts: Dict[str, int]) -> Dict[str, Any]:
+    """Counts for the pre-registered f3-v2 checks. Reports only -- applies
+    nothing. check1 is PASS / FAIL / NOT EVALUABLE (no site points)."""
+    n_sites = len(site_rows)
+    s_yes = sum(1 for s in site_rows if s["at_site"].get("hillside") == "Yes")
+    s_unk = sum(1 for s in site_rows if s["at_site"].get("hillside") not in ("Yes", "No"))
+    s_near = sum(1 for s in site_rows if s["at_site"].get("near_mountains") == "Yes")
+    if n_sites == 0:
+        check1 = "NOT EVALUABLE"
+    else:
+        check1 = "PASS" if s_yes <= PREREG_MAX_HILLSIDE_SITES else "FAIL"
+    n_cand = sum(hillside_counts.values())
+    known = hillside_counts.get("Yes", 0) + hillside_counts.get("No", 0)
+    share = (hillside_counts.get("Yes", 0) / n_cand) if n_cand else None
+    near_share = (near_counts.get("Yes", 0) / n_cand) if n_cand else None
+    return {"sites_total": n_sites, "sites_hillside_yes": s_yes, "sites_hillside_unknown": s_unk,
+            "sites_near_mountains_yes": s_near, "check1": check1,
+            "candidates_labelled": n_cand, "candidates_hillside_known": known,
+            "hillside_yes_share": share, "near_mountains_yes_share": near_share,
+            "worth_automating": (None if share is None else share >= PREREG_MIN_USEFUL_SHARE)}
+
+
+def _pct(x: Optional[float]) -> str:
+    return "n/a" if x is None else "%.1f%%" % (100.0 * x)
 
 
 def _fmt_at(a: Dict[str, Any]) -> str:
@@ -582,7 +709,13 @@ def _fmt_at(a: Dict[str, Any]) -> str:
         bits.append("elong %.1f" % a["elongation"])
     if bits:
         s += " (" + ", ".join(bits) + ")"
-    s += "; mountain %s" % a["mountain_flag"]
+    s += "; hillside %s" % a.get("hillside")
+    if a.get("median_slope_within_250m_deg") is not None:
+        s += " (median slope %.2f deg" % a["median_slope_within_250m_deg"]
+        if a.get("dem_coverage_250m") is not None and a["dem_coverage_250m"] < 1.0:
+            s += ", DEM %.0f%%" % (100.0 * a["dem_coverage_250m"])
+        s += ")"
+    s += "; near mountains %s" % a.get("near_mountains")
     if a.get("relief_within_2km_m") is not None:
         s += " (range %.0f m, median slope %s deg)" % (
             a["relief_within_2km_m"],
@@ -593,7 +726,7 @@ def _fmt_at(a: Dict[str, Any]) -> str:
 def _report_text(r: Dict[str, Any]) -> str:
     L = []
     L.append("Job %s  %s" % (r["job_id"][:6], r.get("job_name") or ""))
-    L.append("Method %s: shape and mountain context read from the OFFLINE DEM only. "
+    L.append("Method %s: shape, hillside and near-mountains context read from the OFFLINE DEM only. "
              "Derived from the same DEM the detector used -- it describes the ground, "
              "it is NOT evidence of a site, and it changes no status or confidence."
              % r["method_version"])
@@ -610,9 +743,15 @@ def _report_text(r: Dict[str, Any]) -> str:
     L.append("Shape (all labelled candidates):")
     for k, v in r["shape_counts"].items():
         L.append("  %-20s %d" % (k, v))
-    L.append("Mountain flag (label only, rejects nothing):")
-    for k, v in r["mountain_counts"].items():
+    pc = r["prereg_check"]
+    L.append("Hillside (median slope within 250 m; label only, rejects nothing):")
+    for k, v in r["hillside_counts"].items():
         L.append("  %-20s %d" % (k, v))
+    L.append("  share Yes: %s of labelled candidates" % _pct(pc["hillside_yes_share"]))
+    L.append("Near mountains (old f3-v1 Mountain flag; context only, never a rule):")
+    for k, v in r["near_mountains_counts"].items():
+        L.append("  %-20s %d" % (k, v))
+    L.append("  share Yes: %s of labelled candidates" % _pct(pc["near_mountains_yes_share"]))
     L.append("")
     if r["sites"]:
         L.append("Recorded sites in the scanned area (gazetteer points):")
@@ -623,21 +762,43 @@ def _report_text(r: Dict[str, Any]) -> str:
                 lab = s["nearest_candidate_label"]
                 L.append("    nearest candidate %.0f m: %s" % (
                     s["nearest_candidate_m"],
-                    "not labelled" if lab is None else "%s; mountain %s" % (lab["shape"], lab["mountain_flag"])))
+                    "not labelled" if lab is None else "%s; hillside %s; near mountains %s"
+                    % (lab["shape"], lab["hillside"], lab["near_mountains"])))
         L.append("  (gazetteer points were placed by eye; the label AT the point can")
         L.append("   miss a feature a few cells away, so both lines are shown)")
     else:
         L.append("No recorded gazetteer sites inside the scanned area.")
     L.append("")
+    L.append("f3-v2 pre-registered checks (the decision applies to the Kangavar test job;")
+    L.append("on any other job these lines are information only; nothing is applied):")
+    L.append("  1. Hillside = Yes at %d of %d recorded site points (pass if <= %d): %s"
+             % (pc["sites_hillside_yes"], pc["sites_total"], PREREG_MAX_HILLSIDE_SITES, pc["check1"]))
+    if pc["sites_hillside_unknown"]:
+        L.append("     (%d site point(s) Hillside Unknown -- not enough DEM around them)"
+                 % pc["sites_hillside_unknown"])
+    L.append("  2. Hillside = Yes on %s of candidates (< %.0f%% = not worth automating)%s"
+             % (_pct(pc["hillside_yes_share"]), 100.0 * PREREG_MIN_USEFUL_SHARE,
+                "" if pc["worth_automating"] is None else
+                (": at or above the 5% floor (a rule could matter)" if pc["worth_automating"]
+                 else ": below the 5% floor -- not worth automating")))
+    L.append("  3. Near mountains = Yes at %d of %d site points, on %s of candidates"
+             % (pc["sites_near_mountains_yes"], pc["sites_total"], _pct(pc["near_mountains_yes_share"])))
+    L.append("  Even a PASS here does not make Hillside a rule: a second fresh job")
+    L.append("  (Susiana plain) must pass too, and it would apply to mound/tell searches only.")
+    L.append("")
     p = r["parameters"]
     L.append("Parameters (fixed 2026-09-30): local relief = elevation minus mean within %.0f m; "
              "shape needs |relief| >= %.1f m; window +/- %.0f m; < %d cells = too small; "
              "elongation >= %.0f = linear; ring = %d of 8 sectors at %.0f-%.0f m; "
-             "mountain = range > %.0f m or median slope > %.0f deg within %.0f m."
+             "hillside = median slope > %.0f deg within %.0f m (Unknown below %.0f%% DEM); "
+             "near mountains = range > %.0f m or median slope > %.0f deg within %.0f m."
              % (p["local_relief_radius_m"], p["relief_threshold_m"], p["shape_half_window_m"],
                 p["min_shape_cells"], p["linear_elongation"], p["ring_min_sectors_of_8"],
-                p["ring_annulus_m"][0], p["ring_annulus_m"][1], p["mountain_relief_m"],
-                p["mountain_median_slope_deg"], p["mountain_radius_m"]))
+                p["ring_annulus_m"][0], p["ring_annulus_m"][1],
+                p["hillside_median_slope_deg"], p["hillside_radius_m"],
+                100.0 * p["hillside_min_valid_fraction"],
+                p["near_mountains_relief_m"], p["near_mountains_median_slope_deg"],
+                p["near_mountains_radius_m"]))
     L.append("Resolution: Copernicus GLO-30 cells are ~30 m, so features narrower than "
              "~90 m cannot be shaped and are reported as such, not guessed.")
     if r["dem_files"]:
