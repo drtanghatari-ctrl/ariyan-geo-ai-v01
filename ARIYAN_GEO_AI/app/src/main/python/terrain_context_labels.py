@@ -107,6 +107,20 @@ Writes: one TERRAIN_CONTEXT evidence_link per newly labelled candidate
 (TERRAIN_CONTEXT_LABELS_RUN). Refuses jobs marked CORRUPTED.
 Existing entries of an older method version (f3-v1) are neither changed
 nor counted as "already labelled"; f3-v2 adds its own entry beside them.
+
+REPORTING CORRECTIONS (2026-09-30, after the first Susiana run, job ca77c0;
+no label rule and no pre-registered number changed):
+- A DEM file is now checked with os.stat + a real read instead of
+  os.path.isfile(), which reports a present-but-unreadable file (storage
+  permission / I/O error) as "not in the library". The reason is now one of
+  ABSENT / UNREADABLE (with the OS error) / NOT A TIFF, and a read error
+  while sampling is reported for that candidate instead of stopping the run.
+- Check 1 said PASS when every site point was Hillside Unknown (no DEM).
+  It is now PASS / FAIL only over site points that actually got a Yes or
+  No; with none it is NOT EVALUABLE. Kangavar (8 of 8 evaluated) is
+  unaffected by this correction.
+- The pre-registered decision covers BOTH test jobs (Kangavar valley, then
+  Susiana plain); the report used to name only Kangavar.
 """
 
 from __future__ import annotations
@@ -202,17 +216,54 @@ def _file_sha256(path: str) -> str:
     return cached
 
 
+_TIFF_MAGIC = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
+
+
+def dem_file_state(path: str) -> Optional[str]:
+    """None if the DEM file is there and readable right now; otherwise the
+    honest reason. os.path.isfile() would call a present-but-unreadable file
+    "missing", so it is not used. Reads at most 4 bytes. Never raises."""
+    name = os.path.basename(path)
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return "offline DEM tile %s is not in the library (ABSENT)" % name
+    except OSError as exc:
+        return "offline DEM tile %s is UNREADABLE (%s, errno %s: %s)" % (
+            name, type(exc).__name__, exc.errno, exc.strerror)
+    if not os.path.isfile(path):
+        return "offline DEM tile %s: a folder or special file has this name" % name
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError as exc:
+        return "offline DEM tile %s is UNREADABLE (%s, errno %s: %s)" % (
+            name, type(exc).__name__, exc.errno, exc.strerror)
+    if head not in _TIFF_MAGIC:
+        return "offline DEM tile %s is present (%d bytes) but NOT a TIFF file" % (name, st.st_size)
+    return None
+
+
 def read_window(storage_folder: str, offline_data_root: str, lat: float, lon: float,
                 half_m: float) -> Dict[str, Any]:
     """Reads a square window of +/- half_m around (lat, lon) on the DEM's own
     pixel lattice (that of the tile holding the centre; neighbouring
     Copernicus tiles share the same lattice). Row 0 is the NORTH edge.
     Returns {"z", "dx_m", "dy_m", "ci", "cj", "files_used", "files_missing"}
-    or {"error"} when the centre's own tile is not in the library.
+    or {"error"} when the centre's own tile is absent or unreadable.
     Cells with no data stay NaN -- nothing is filled in."""
+    try:
+        return _read_window(storage_folder, offline_data_root, lat, lon, half_m)
+    except (OSError, ValueError) as exc:
+        return {"error": "offline DEM read failed (%s: %s)" % (type(exc).__name__, exc)}
+
+
+def _read_window(storage_folder: str, offline_data_root: str, lat: float, lon: float,
+                 half_m: float) -> Dict[str, Any]:
     centre_path = offline_dem_store.local_tile_path(storage_folder, offline_data_root, lat, lon)
-    if not os.path.isfile(centre_path):
-        return {"error": "offline DEM tile %s is not in the library" % os.path.basename(centre_path)}
+    problem = dem_file_state(centre_path)
+    if problem:
+        return {"error": problem}
     g = offline_dem_store._get_cached_tile(centre_path).georef()
     sx, sy = g["scale_x"], g["scale_y"]
     col_c = round(g["tie_col"] + (lon - g["tie_lon"]) / sx)
@@ -238,7 +289,7 @@ def read_window(storage_folder: str, offline_data_root: str, lat: float, lon: fl
             todo = np.isnan(z)
             if not todo.any():
                 break
-            if not os.path.isfile(path):
+            if dem_file_state(path):
                 in_tile = todo & (np.floor(LAT) == tlat) & (np.floor(LON) == tlon)
                 if in_tile.any():
                     files_missing.append(os.path.basename(path))
@@ -655,14 +706,14 @@ def label_job(db_root: str, job_ref: str) -> Dict[str, Any]:
             description=("F3 terrain labels %s: %d candidates on %d/%d DONE tiles, %d newly labelled, "
                          "%d already labelled, %d not labelled. Shapes: %s. Hillside: %s. "
                          "Near mountains: %s. Pre-registered check 1: Hillside=Yes at %d of %d "
-                         "recorded site points (pass if <= %d) -> %s."
+                         "site points with a Hillside label (of %d recorded; pass if <= %d) -> %s."
                          % (METHOD_VERSION, len(cands), len(done), len(tiles), len(new_rows),
                             len(existing), sum(failures.values()),
                             ", ".join("%s %d" % (k, v) for k, v in shape_counts.items() if v),
                             ", ".join("%s %d" % (k, v) for k, v in hillside_counts.items() if v),
                             ", ".join("%s %d" % (k, v) for k, v in near_counts.items() if v),
-                            prereg["sites_hillside_yes"], prereg["sites_total"],
-                            PREREG_MAX_HILLSIDE_SITES, prereg["check1"])))
+                            prereg["sites_hillside_yes"], prereg["sites_evaluated"],
+                            prereg["sites_total"], PREREG_MAX_HILLSIDE_SITES, prereg["check1"])))
     except Exception as e:
         result["timeline_warning"] = "labels saved, but the timeline event failed: %s" % e
     result["report_text"] = _report_text(result)
@@ -672,12 +723,15 @@ def label_job(db_root: str, job_ref: str) -> Dict[str, Any]:
 def _prereg_check(site_rows: List[Dict[str, Any]], hillside_counts: Dict[str, int],
                   near_counts: Dict[str, int]) -> Dict[str, Any]:
     """Counts for the pre-registered f3-v2 checks. Reports only -- applies
-    nothing. check1 is PASS / FAIL / NOT EVALUABLE (no site points)."""
+    nothing. check1 is PASS / FAIL over the site points that actually got a
+    Hillside Yes or No; NOT EVALUABLE when none did (no site points, or no
+    DEM / not enough DEM at every one of them)."""
     n_sites = len(site_rows)
     s_yes = sum(1 for s in site_rows if s["at_site"].get("hillside") == "Yes")
-    s_unk = sum(1 for s in site_rows if s["at_site"].get("hillside") not in ("Yes", "No"))
+    s_no = sum(1 for s in site_rows if s["at_site"].get("hillside") == "No")
+    s_unk = n_sites - s_yes - s_no
     s_near = sum(1 for s in site_rows if s["at_site"].get("near_mountains") == "Yes")
-    if n_sites == 0:
+    if s_yes + s_no == 0:
         check1 = "NOT EVALUABLE"
     else:
         check1 = "PASS" if s_yes <= PREREG_MAX_HILLSIDE_SITES else "FAIL"
@@ -685,7 +739,8 @@ def _prereg_check(site_rows: List[Dict[str, Any]], hillside_counts: Dict[str, in
     known = hillside_counts.get("Yes", 0) + hillside_counts.get("No", 0)
     share = (hillside_counts.get("Yes", 0) / n_cand) if n_cand else None
     near_share = (near_counts.get("Yes", 0) / n_cand) if n_cand else None
-    return {"sites_total": n_sites, "sites_hillside_yes": s_yes, "sites_hillside_unknown": s_unk,
+    return {"sites_total": n_sites, "sites_evaluated": s_yes + s_no,
+            "sites_hillside_yes": s_yes, "sites_hillside_unknown": s_unk,
             "sites_near_mountains_yes": s_near, "check1": check1,
             "candidates_labelled": n_cand, "candidates_hillside_known": known,
             "hillside_yes_share": share, "near_mountains_yes_share": near_share,
@@ -769,13 +824,17 @@ def _report_text(r: Dict[str, Any]) -> str:
     else:
         L.append("No recorded gazetteer sites inside the scanned area.")
     L.append("")
-    L.append("f3-v2 pre-registered checks (the decision applies to the Kangavar test job;")
-    L.append("on any other job these lines are information only; nothing is applied):")
-    L.append("  1. Hillside = Yes at %d of %d recorded site points (pass if <= %d): %s"
-             % (pc["sites_hillside_yes"], pc["sites_total"], PREREG_MAX_HILLSIDE_SITES, pc["check1"]))
+    L.append("f3-v2 pre-registered checks (the decision applies to the two test jobs,")
+    L.append("Kangavar valley then Susiana plain; on any other job these lines are")
+    L.append("information only; nothing is applied):")
+    L.append("  1. Hillside = Yes at %d of %d site points that got a Hillside label"
+             % (pc["sites_hillside_yes"], pc["sites_evaluated"]))
+    L.append("     (%d recorded site points in the area; pass if <= %d): %s"
+             % (pc["sites_total"], PREREG_MAX_HILLSIDE_SITES, pc["check1"]))
     if pc["sites_hillside_unknown"]:
-        L.append("     (%d site point(s) Hillside Unknown -- not enough DEM around them)"
+        L.append("     (%d site point(s) got no Hillside label -- no DEM, or not enough DEM"
                  % pc["sites_hillside_unknown"])
+        L.append("      around them -- and are not counted either way)")
     L.append("  2. Hillside = Yes on %s of candidates (< %.0f%% = not worth automating)%s"
              % (_pct(pc["hillside_yes_share"]), 100.0 * PREREG_MIN_USEFUL_SHARE,
                 "" if pc["worth_automating"] is None else
@@ -783,8 +842,8 @@ def _report_text(r: Dict[str, Any]) -> str:
                  else ": below the 5% floor -- not worth automating")))
     L.append("  3. Near mountains = Yes at %d of %d site points, on %s of candidates"
              % (pc["sites_near_mountains_yes"], pc["sites_total"], _pct(pc["near_mountains_yes_share"])))
-    L.append("  Even a PASS here does not make Hillside a rule: a second fresh job")
-    L.append("  (Susiana plain) must pass too, and it would apply to mound/tell searches only.")
+    L.append("  Hillside becomes a rule only if BOTH test jobs pass check 1, and then")
+    L.append("  only for mound/tell searches -- never fortress/cliff/rock-relief ones.")
     L.append("")
     p = r["parameters"]
     L.append("Parameters (fixed 2026-09-30): local relief = elevation minus mean within %.0f m; "
