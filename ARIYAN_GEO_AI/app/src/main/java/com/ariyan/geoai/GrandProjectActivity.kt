@@ -1184,6 +1184,21 @@ appendReviewSection(sb, detail)
         bar.addView(trustButton)
         bar.addView(calibrateButton)
         binding.containerCandidateRows.addView(bar)
+
+        // F3 terrain context labels (added 2026-09-30): own row, because a
+        // fourth button would not fit on a phone screen beside the other three.
+        val bar2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding((8 * density).toInt(), 0, (8 * density).toInt(), (4 * density).toInt())
+        }
+        val terrainButton = MaterialButton(this).apply {
+            text = "Terrain labels (F3)..."
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { showTerrainLabelsStart() }
+        }
+        bar2.addView(terrainButton)
+        binding.containerCandidateRows.addView(bar2)
     }
 
     /** Adds the "Review" and "Job" sections to the candidate detail text. */
@@ -1375,6 +1390,53 @@ appendReviewSection(sb, detail)
                     ).show()
                 } catch (e: Exception) {
                     Toast.makeText(this@GrandProjectActivity, "Calibration failed: ${e.message}", Toast.LENGTH_LONG).show()
+                } finally {
+                    setLoading(false)
+                }
+            }
+        }
+    }
+
+    /** F3 terrain context labels (added 2026-09-30): asks for a job id, runs
+     * terrain_context_labels.py through grand_project_query_mobile (offline
+     * DEM only, no network) and shows its report. Writes one neutral
+     * TERRAIN_CONTEXT evidence entry per newly labelled candidate plus one
+     * timeline event; never changes status, score or confidence. Re-running
+     * on the same job only reports (already-labelled candidates are skipped). */
+    private fun showTerrainLabelsStart() {
+        promptText(
+            "Terrain labels (F3)", "job id, first 6+ characters, e.g. 273d33", "Run",
+            "Reads the ground around every candidate of the job from the offline DEM (no network) and " +
+                "labels its shape (Mound / Depression / Linear / Ring / Too small to shape / No shape) " +
+                "and a Mountain flag. Adds a neutral TERRAIN_CONTEXT entry to each candidate's evidence; " +
+                "changes no status or confidence. Candidates already labelled are skipped. " +
+                "A large job can take a minute or two."
+        ) { jobRef ->
+            setLoading(true)
+            lifecycleScope.launch {
+                try {
+                    val jsonText = withContext(Dispatchers.Default) {
+                        python.getModule("grand_project_query_mobile")
+                            .callAttr("label_job_terrain_json", offlineDataRoot, jobRef).toString()
+                    }
+                    val result = JSONObject(jsonText)
+                    if (result.has("error")) {
+                        Toast.makeText(this@GrandProjectActivity, result.optString("error"), Toast.LENGTH_LONG).show()
+                    } else {
+                        AlertDialog.Builder(this@GrandProjectActivity)
+                            .setTitle("Terrain labels: job " + result.optString("job_id").take(6))
+                            .setMessage(result.optString("report_text"))
+                            .setPositiveButton("Close", null)
+                            .show()
+                    }
+                } catch (e: PyException) {
+                    Toast.makeText(
+                        this@GrandProjectActivity,
+                        "Terrain labels failed: ${cleanErrorMessage(e.message)}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this@GrandProjectActivity, "Terrain labels failed: ${e.message}", Toast.LENGTH_LONG).show()
                 } finally {
                     setLoading(false)
                 }
