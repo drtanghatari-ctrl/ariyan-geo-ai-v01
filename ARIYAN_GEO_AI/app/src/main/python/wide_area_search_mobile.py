@@ -744,6 +744,7 @@ def _status_path(data_root: str, job_id: str) -> str:
 def _write_wide_area_status(
     data_root: str, job_id: str, done: int, total: int, detail: str = "",
     phase: str = "running", health: str = "",
+    extra: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Best-effort progress status write, polled by
     WideAreaSearchActivity.kt while a job runs in
@@ -752,14 +753,20 @@ def _write_wide_area_status(
     phase/done/total/detail), one file PER JOB (named by job_id) rather
     than a single shared file. `health` is an optional human-readable
     run-health report (see _render_run_health()) that the Activity shows
-    under the progress lines. Never raises: a failure to write progress
-    must never fail the actual job."""
+    under the progress lines. `extra` (optional) adds further keys, e.g.
+    the offline-library guard's list of missing files when a run pauses.
+    Never raises: a failure to write progress must never fail the actual
+    job."""
     try:
         payload: Dict[str, Any] = {
             "phase": phase, "done": done, "total": total, "detail": detail,
         }
         if health:
             payload["health"] = health
+        if extra:
+            for key, value in extra.items():
+                if key not in payload:
+                    payload[key] = value
         _atomic_write_json(_status_path(data_root, job_id), payload)
     except Exception:
         pass
@@ -1174,6 +1181,267 @@ def _clear_offline_tile_cache() -> None:
         pass
 
 
+# ====================== OFFLINE LIBRARY GUARD (added 2026-09-30) ======================
+# WHY THIS EXISTS: found on real hardware 2026-09-30 (job "Susiana f3-v2
+# test", 378 tiles, DEM-only, offline library first). Tiles 1-337 read
+# N32_E048.tif from the offline library; then the whole
+# offline_data/ir/dem folder was emptied while the job was still running
+# (the second time a file left that folder mid-run -- see the 2026-09-29
+# share-moves-files incident). Every later tile then found no offline
+# coverage, fell through to a live OpenTopography fetch, used up the
+# remaining daily calls, and 40 tiles ended FAILED.
+#
+# WHAT IT DOES, in "offline library first" runs ONLY (the one mode where
+# the library is the tile's PRIMARY source; online-first runs are
+# unchanged):
+#   1. When the run starts, it records which offline DEM files the PENDING
+#      tiles need and the size of each one that is present at that moment.
+#      A file that is absent at start is the ordinary "not downloaded /
+#      outside the package" case and is NOT guarded -- those tiles behave
+#      exactly as before.
+#   2. Before every tile it re-checks that tile's files. If one that was
+#      present at start is now absent, unreadable, no longer a regular file,
+#      or has a different size (being moved, deleted, or overwritten), the
+#      run STOPS BEFORE that tile: the tile and every later one stay
+#      PENDING (nothing is marked FAILED by the guard and no live DEM call
+#      is spent on them), the job is set to PAUSED (logged), an append-only
+#      timeline event names the files, and the job screen and the
+#      end-of-run message say what happened and what to do.
+#   3. The missing files are also written to a small per-job guard file.
+#      If Start / Resume is tapped again in offline-first mode while any of
+#      them is STILL missing, the run pauses again at once, before any
+#      tile. Once they are back (a real TIFF header), the guard file is
+#      removed and the run continues normally.
+# It never changes a finished tile, a candidate, or any evidence. To carry
+# on WITHOUT the missing files (live DEM, subject to the daily limit),
+# choose any run mode other than "offline library first".
+#
+# Limitation, stated honestly: a file that disappears DURING a tile can
+# still make THAT one tile fail (its real error is stored as always); the
+# guard then pauses before the next tile and its message points out that
+# the previous tile failed, so "Retry failed tiles..." can re-run it once
+# the file is restored. The per-tile check costs one os.stat() per needed
+# file (usually one or two) -- nothing is read from the files themselves.
+
+_GUARD_TIMELINE_EVENT = "WIDE_AREA_SEARCH_PAUSED_OFFLINE_DEM_MISSING"
+
+
+def _guard_file_path(data_root: str, job_id: str) -> str:
+    return os.path.join(data_root, f"wide_area_search_offline_guard_{job_id}.json")
+
+
+def _needed_offline_dem_paths(data_root: str, center_lat: float, center_lon: float,
+                              radius_m: float) -> List[str]:
+    """The offline DEM files one tile's offline-first read can touch: every
+    1x1-degree file overlapped by the tile's analysis window. Uses the same
+    window (centre + radius, see investigation_multi_mobile.
+    _fetch_offline_dem_resampled()), the same country lookup (the centre)
+    and the same file naming (offline_dem_store.local_tile_path()) as the
+    read itself and as _offline_dem_check(). The window's OUTER edges are
+    used (a superset of the sample points), so a file is never missed; at
+    worst a file the read does not touch is also watched, which can only
+    make the guard more cautious. Returns [] outside every registered
+    country. May raise; the caller handles that."""
+    country = offline_country_registry.get_country_for_point(center_lat, center_lon)
+    if country is None:
+        return []
+    aoi = build_aoi(GeoPoint(center_lat, center_lon), radius_m=radius_m, grid_size=8)
+    paths: List[str] = []
+    for lat_deg in range(int(math.floor(aoi.min_lat)), int(math.floor(aoi.max_lat)) + 1):
+        for lon_deg in range(int(math.floor(aoi.min_lon)), int(math.floor(aoi.max_lon)) + 1):
+            paths.append(offline_dem_store.local_tile_path(
+                country.storage_folder, data_root, lat_deg + 0.5, lon_deg + 0.5,
+            ))
+    return paths
+
+
+def _regular_file_size(path: str) -> Optional[int]:
+    """Size in bytes if `path` is a regular file right now, else None.
+    Never raises."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return int(st.st_size) if stat.S_ISREG(st.st_mode) else None
+
+
+def _guard_snapshot(data_root: str, pending_tiles: List[Dict[str, Any]],
+                    radius_m: float) -> Dict[str, Any]:
+    """Step 1 of the guard: {"tile_paths": {tile_id: [paths]},
+    "start_sizes": {path: size, only for files PRESENT at start},
+    "errors": [...]}. Never raises: a tile whose files cannot be worked
+    out simply has no guard (and is listed in "errors")."""
+    tile_paths: Dict[str, List[str]] = {}
+    start_sizes: Dict[str, int] = {}
+    checked: Dict[str, Optional[int]] = {}
+    errors: List[str] = []
+    for tile in pending_tiles:
+        try:
+            paths = _needed_offline_dem_paths(
+                data_root, float(tile["center_lat"]), float(tile["center_lon"]), float(radius_m),
+            )
+        except Exception as exc:
+            errors.append(f"tile {int(tile.get('tile_index', 0)) + 1}: {type(exc).__name__}: {exc}")
+            continue
+        tile_paths[tile["id"]] = paths
+        for path in paths:
+            if path not in checked:
+                checked[path] = _regular_file_size(path)
+                if checked[path] is not None:
+                    start_sizes[path] = checked[path]
+    return {"tile_paths": tile_paths, "start_sizes": start_sizes, "errors": errors}
+
+
+def _describe_now(path: str) -> str:
+    """Short state of a file right now, for the pause message. Reuses
+    _dem_file_status() (ABSENT / UNREADABLE with the OS error / NOT A FILE /
+    PRESENT ...). Never raises."""
+    try:
+        return _dem_file_status(path)
+    except Exception as exc:
+        return f"could not be checked ({type(exc).__name__}: {exc})"
+
+
+def _guard_problems(paths: List[str], start_sizes: Dict[str, int]) -> List[Dict[str, Any]]:
+    """Step 2 of the guard: for one tile, the files that were present at the
+    start of this run but are now missing or changed. Empty list = fine.
+    Never raises."""
+    problems: List[Dict[str, Any]] = []
+    for path in paths:
+        before = start_sizes.get(path)
+        if before is None:
+            continue   # absent at start: ordinary no-coverage case, not guarded
+        now_size = _regular_file_size(path)
+        if now_size == before:
+            continue
+        if now_size is None:
+            now = _describe_now(path)
+        else:
+            now = (f"size changed from {before} to {now_size} bytes since this "
+                   f"run started (being copied, moved or overwritten?)")
+        problems.append({
+            "path": path, "file": os.path.basename(path),
+            "size_at_start": before, "now": now,
+        })
+    return problems
+
+
+def _write_guard_file(data_root: str, job_id: str, problems: List[Dict[str, Any]]) -> None:
+    """Best-effort: remembers which files made this job pause (step 3)."""
+    try:
+        _atomic_write_json(_guard_file_path(data_root, job_id), {"missing": problems})
+    except Exception:
+        pass
+
+
+def _still_missing_from_previous_pause(data_root: str, job_id: str) -> List[Dict[str, Any]]:
+    """Step 3 of the guard: if an earlier offline-first run of this job
+    paused because files went missing, returns those that are STILL not
+    back (not a regular file, or not starting with a TIFF header). If all
+    are back, removes the guard file and returns []. No guard file -> [].
+    Never raises."""
+    path = _guard_file_path(data_root, job_id)
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+        remembered = payload.get("missing") if isinstance(payload, dict) else None
+    except Exception:
+        return []
+    if not isinstance(remembered, list):
+        return []
+    still: List[Dict[str, Any]] = []
+    for item in remembered:
+        if not isinstance(item, dict) or not item.get("path"):
+            continue
+        now = _describe_now(str(item["path"]))
+        if not now.startswith("PRESENT (") or "NOT a TIFF" in now:
+            entry = dict(item)
+            entry["now"] = now
+            still.append(entry)
+    if not still:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return still
+
+
+def _format_mb(size_bytes: Any) -> str:
+    try:
+        return f"{float(size_bytes) / (1024.0 * 1024.0):.2f} MB"
+    except (TypeError, ValueError):
+        return "unknown size"
+
+
+def _pause_for_offline_library(
+    data_root: str, job: Dict[str, Any], job_id: str,
+    problems: List[Dict[str, Any]], done_count: int, total: int,
+    tally: "_RunHealth", next_tile_number: Optional[int],
+    previous_tile_failed: Optional[int], at_resume: bool,
+) -> str:
+    """Stops the run cleanly (see OFFLINE LIBRARY GUARD). Logs the reason,
+    sets the job PAUSED, writes the guard file and a "paused" status with
+    the explanation, and returns that explanation. Timeline/status writes
+    are real database writes and may raise like any other in the runner."""
+    folder = os.path.dirname(problems[0]["path"]) if problems else ""
+    names = ", ".join(p["file"] for p in problems)
+    lines: List[str] = []
+    if at_resume:
+        lines.append(
+            "PAUSED before any tile: this job paused earlier because offline DEM "
+            "file(s) went missing, and they are STILL missing, so nothing was run."
+        )
+    else:
+        where = (f"before tile {next_tile_number}/{total}"
+                 if next_tile_number is not None else "before the next tile")
+        lines.append(
+            f"PAUSED {where}: offline DEM file(s) that were present when this run "
+            f"started are now missing or changed, so the run stopped instead of "
+            f"running tiles without them."
+        )
+    for p in problems:
+        lines.append(f"- {p['file']} (was {_format_mb(p.get('size_at_start'))} at start) "
+                     f"-- now {p.get('now')}")
+    if folder:
+        lines.append(f"folder: {folder}")
+    lines.append(
+        "The remaining tiles are still PENDING; no tile was marked failed by this "
+        "pause and no live DEM call was spent on them."
+    )
+    if previous_tile_failed is not None:
+        lines.append(
+            f"Tile {previous_tile_failed} (the one just before) FAILED during this "
+            f"run -- if its reason mentions the offline library, use \"Retry failed "
+            f"tiles...\" after restoring the file(s)."
+        )
+    lines.append(
+        "Most likely the file(s) were moved, shared or deleted from that folder "
+        "(use Copy, never Move, while a job runs). Restore them (Recycle bin, or "
+        "Download offline data for the country), then tap Start / Resume. To go on "
+        "without them (live DEM, daily limit applies), choose a run mode other than "
+        "\"offline library first\"."
+    )
+    detail = "\n".join(lines)
+
+    db.log_timeline_event(
+        data_root, job["grand_project_id"], _GUARD_TIMELINE_EVENT,
+        related_entity_type="wide_area_search_job", related_entity_id=job_id,
+        description=f"Wide-area search job '{job['title']}': " + detail,
+    )
+    db.update_wide_area_search_job_status(data_root, job["grand_project_id"], job_id, "PAUSED")
+    _write_guard_file(data_root, job_id, problems)
+    _run_state.summary = (
+        f"PAUSED: offline DEM file(s) missing ({names}); remaining tiles are still "
+        f"PENDING -- restore the file(s), then Start / Resume."
+    )
+    _write_wide_area_status(
+        data_root, job_id, done_count, total, detail,
+        phase="paused", health=_render_run_health(tally),
+        extra={"offline_guard_missing": problems},
+    )
+    return detail
+
+
 def _attach_throttle_report(
     result: str, copernicus: Any, live_dem: Any, health_summary: Optional[str] = None,
 ) -> str:
@@ -1260,6 +1528,18 @@ def run_wide_area_search_job(
             _clear_offline_tile_cache()
     return _attach_throttle_report(
         result, copernicus, live_dem, getattr(_run_state, "summary", None))
+
+
+def _paused_payload(data_root: str, job_id: str, dem_only: bool,
+                    offline_first: bool, reason: str) -> str:
+    """The runner's return value when the offline-library guard paused it:
+    the job's real progress counts plus "paused": true and the reason."""
+    payload: Dict[str, Any] = dict(db.get_wide_area_search_job_progress(data_root, job_id))
+    payload["dem_only"] = bool(dem_only)
+    payload["dem_offline_first"] = bool(offline_first)
+    payload["paused"] = True
+    payload["pause_reason"] = reason
+    return json.dumps(payload)
 
 
 def _run_wide_area_search_job_impl(
@@ -1393,8 +1673,16 @@ def _run_wide_area_search_job_impl(
     WideAreaSearchService.kt/WideAreaSearchActivity.kt for live progress
     -- best-effort, never raises on its own.
 
+    OFFLINE LIBRARY GUARD (offline-first runs only, added 2026-09-30):
+    if an offline DEM file a tile needs was present when the run started
+    but is gone or changed by the time that tile is reached, the run
+    stops BEFORE that tile with the job PAUSED and the rest still PENDING
+    -- see the OFFLINE LIBRARY GUARD section above.
+
     Returns the job's final real progress counts as a JSON string:
-    {"total", "pending", "done", "failed", "dem_only"}.
+    {"total", "pending", "done", "failed", "dem_only"} (plus
+    "dem_offline_first", and "paused": true with "pause_reason" when the
+    guard stopped the run).
     """
     if dem_only:
         # See DEM-ONLY SWEEP above: blank credentials => every Copernicus
@@ -1444,16 +1732,42 @@ def _run_wide_area_search_job_impl(
 
     tally = _RunHealth(dem_only=bool(dem_only), dem_offline_first=offline_first)
 
+    # OFFLINE LIBRARY GUARD (offline-first runs only) -- see that section.
+    guard: Optional[Dict[str, Any]] = None
+    if offline_first and pending_tiles:
+        still_missing = _still_missing_from_previous_pause(data_root, job_id)
+        if still_missing:
+            reason = _pause_for_offline_library(
+                data_root, job, job_id, still_missing, already_done, total, tally,
+                next_tile_number=None, previous_tile_failed=None, at_resume=True,
+            )
+            return _paused_payload(data_root, job_id, dem_only, offline_first, reason)
+        guard = _guard_snapshot(data_root, pending_tiles, radius_m)
+
     _write_wide_area_status(
         data_root, job_id, already_done, total, "starting",
         health=_render_run_health(tally),
     )
+
+    previous_tile_failed: Optional[int] = None
 
     for i, tile in enumerate(pending_tiles):
         tile_id = tile["id"]
         tile_index = tile["tile_index"]
         lat = tile["center_lat"]
         lon = tile["center_lon"]
+
+        if guard is not None:
+            problems = _guard_problems(
+                guard["tile_paths"].get(tile_id, []), guard["start_sizes"],
+            )
+            if problems:
+                reason = _pause_for_offline_library(
+                    data_root, job, job_id, problems, already_done + i, total, tally,
+                    next_tile_number=tile_index + 1,
+                    previous_tile_failed=previous_tile_failed, at_resume=False,
+                )
+                return _paused_payload(data_root, job_id, dem_only, offline_first, reason)
 
         # Written BEFORE the tile so a slow tile (retry waits can add
         # minutes) is visibly "running", with the live pause state, rather
@@ -1506,10 +1820,12 @@ def _run_wide_area_search_job_impl(
             )
             db.mark_tile_done(data_root, tile_id, result["investigation_id"])
             tally.add(parse_tile_health(investigation_json))  # never raises
+            previous_tile_failed = None
 
         except Exception as exc:
             db.mark_tile_failed(data_root, tile_id, f"{type(exc).__name__}: {exc}")
             tally.add_failed()
+            previous_tile_failed = tile_index + 1
 
         if offline_first and (i + 1) % OFFLINE_TILE_CACHE_CLEAR_EVERY_TILES == 0:
             _clear_offline_tile_cache()   # never raises
