@@ -73,6 +73,29 @@ the on-device retest this fix is going out for. Still NOT yet tested
 against a real Copernicus-produced file (only a self-built synthetic
 one) -- that remains the next honest step before this is fully trusted
 on-device.
+
+UPDATE 2026-09-21 (already in the FIX notes below): the reader has since
+been checked against rasterio on the real Copernicus tile N33_E044.
+
+VECTORISED WINDOW READS (added 2026-09-30 for F3 terrain context labels):
+two PUBLIC methods were added to CopernicusDemTile, and nothing existing
+was changed:
+  - georef(): read-only view of the pixel <-> lon/lat mapping, so a caller
+    can place sample points exactly on this file's own pixel lattice
+    (lon = tie_lon + (col - tie_col) * scale_x,
+     lat = tie_lat - (row - tie_row) * scale_y).
+  - get_elevations(lons, lats): the SAME nearest-pixel rule as
+    get_elevation() applied to whole numpy arrays at once, returning NaN
+    (never a made-up value) where a point falls outside this file.
+    np.rint and Python's round() both round halves to even, so both
+    methods pick the identical pixel for every coordinate.
+Why: F3 reads a ~4 km x 4 km window (~20,000 points) around each
+candidate to decide the Mountain flag; one Python call per point would be
+far too slow on a phone for a 782-candidate job.
+TESTED 2026-09-30 in the sandbox against the real, byte-identical
+Copernicus tiles N29_E052 and N30_E052 (same file sizes as on the
+user's phone): get_elevations() matched get_elevation() exactly on
+random points, and matched rasterio's pixel values exactly.
 """
 
 from __future__ import annotations
@@ -342,3 +365,52 @@ class CopernicusDemTile:
         local_row = row % self._layout.tile_length
         local_col = col % self._layout.tile_width
         return float(tile[local_row, local_col])
+
+    def georef(self) -> Dict[str, float]:
+        """Read-only georeferencing of this file's pixel lattice (added
+        2026-09-30 for F3). Pixel (row, col) sits at
+        lon = tie_lon + (col - tie_col) * scale_x and
+        lat = tie_lat - (row - tie_row) * scale_y -- exactly the inverse of
+        _pixel_for_lonlat(), so points built from these values land on
+        pixel centres with no rounding ambiguity."""
+        tp_i, tp_j = self._layout.tiepoint_pixel
+        tp_x, tp_y = self._layout.tiepoint_geo
+        return {
+            "tie_col": float(tp_i), "tie_row": float(tp_j),
+            "tie_lon": float(tp_x), "tie_lat": float(tp_y),
+            "scale_x": float(self._layout.pixel_scale_x),
+            "scale_y": float(self._layout.pixel_scale_y),
+            "width": int(self._layout.width), "height": int(self._layout.height),
+        }
+
+    def get_elevations(self, lons: np.ndarray, lats: np.ndarray) -> np.ndarray:
+        """Vectorised nearest-pixel lookup (added 2026-09-30 for F3).
+        Same pixel choice as get_elevation() for every point (np.rint and
+        round() both round halves to even). Returns a float64 array shaped
+        like `lons`; points outside this file are NaN -- never a guessed
+        value. Decoded image tiles come from the same per-object cache as
+        get_elevation()."""
+        lons = np.asarray(lons, dtype=np.float64)
+        lats = np.asarray(lats, dtype=np.float64)
+        if lons.shape != lats.shape:
+            raise ValueError("lons and lats must have the same shape")
+        tp_i, tp_j = self._layout.tiepoint_pixel
+        tp_x, tp_y = self._layout.tiepoint_geo
+        col = np.rint(tp_i + (lons - tp_x) / self._layout.pixel_scale_x)
+        row = np.rint(tp_j + (tp_y - lats) / self._layout.pixel_scale_y)
+        out = np.full(lons.shape, np.nan, dtype=np.float64)
+        inside = (row >= 0) & (row < self._layout.height) & (col >= 0) & (col < self._layout.width)
+        if not inside.any():
+            return out
+        r = row[inside].astype(np.int64)
+        c = col[inside].astype(np.int64)
+        tile_index = (r // self._layout.tile_length) * self._tiles_across + (c // self._layout.tile_width)
+        lr = r % self._layout.tile_length
+        lc = c % self._layout.tile_width
+        vals = np.empty(r.shape, dtype=np.float64)
+        for ti in np.unique(tile_index):
+            sel = tile_index == ti
+            tile = self._get_decoded_tile(int(ti))
+            vals[sel] = tile[lr[sel], lc[sel]]
+        out[inside] = vals
+        return out
