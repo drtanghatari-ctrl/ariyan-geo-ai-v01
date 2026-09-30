@@ -268,3 +268,13 @@ def list_job_trust_json(db_root: str) -> str:
 def calibrate_job_json(db_root: str, job_ref: str) -> str:
     import grand_project_calibration as calibration
     return calibration.calibrate_job_json(db_root, job_ref)
+
+
+# F3 terrain context labels (added 2026-09-30): labels every candidate on a
+# job's DONE tiles with a shape (Mound / Depression / Linear / Ring / Too
+# small to shape / No shape) and a Mountain flag, read from the offline DEM
+# only. Adds one neutral TERRAIN_CONTEXT evidence entry per candidate;
+# never changes status or confidence. See terrain_context_labels.py.
+def label_job_terrain_json(db_root: str, job_ref: str) -> str:
+    import terrain_context_labels as terrain_labels
+    return terrain_labels.label_job_json(db_root, job_ref)
