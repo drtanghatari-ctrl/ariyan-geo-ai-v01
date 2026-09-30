@@ -492,6 +492,12 @@ class GrandProjectActivity : AppCompatActivity() {
                 if (trust.isNotEmpty() && trust != "null") {
                     append("\ntrust: ").append(trust)
                 }
+                // Job target (added 2026-10-01): shown only when set.
+                val target = first.optString("job_target", "")
+                if (target.isNotEmpty() && target != "null" && target != "NOT_SET") {
+                    append(if (trust.isNotEmpty() && trust != "null") "   " else "\n")
+                    append("target: ").append(first.optString("job_target_label", target))
+                }
             }
             append("\n").append(rows.size).append(" candidates:  ")
             append("Supported ").append(supported)
@@ -1197,7 +1203,17 @@ appendReviewSection(sb, detail)
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener { showTerrainLabelsStart() }
         }
+        // Job target (added 2026-10-01): switches the f3-v2 Hillside
+        // auto-reject rule on (Mound / tell) or off for one job.
+        val targetButton = MaterialButton(this).apply {
+            text = "Job target..."
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = (8 * density).toInt() }
+            setOnClickListener { showJobTargetStart() }
+        }
         bar2.addView(terrainButton)
+        bar2.addView(targetButton)
         binding.containerCandidateRows.addView(bar2)
     }
 
@@ -1215,6 +1231,12 @@ appendReviewSection(sb, detail)
                 } else {
                     sb.append("  trust: not marked")
                 }
+                sb.append("\n")
+                // Job target (added 2026-10-01).
+                sb.append("  target: ").append(
+                    if (review.isNull("job_target_label")) "Not set" else review.optString("job_target_label")
+                )
+                if (review.optString("job_target") == "MOUND_TELL") sb.append("  (Hillside rule on)")
                 sb.append("\n")
             }
         }
@@ -1347,6 +1369,60 @@ appendReviewSection(sb, detail)
                             callReviewWrite(
                                 "set_job_trust_json", listOf(jobRef, values[which], reason),
                                 "Job $jobRef marked " + labels[which]
+                            )
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+    }
+
+    /** Job target (added 2026-10-01): shows current targets, asks for a
+     * job id (6+ characters), then a target, then a reason. Only
+     * "Mound / tell" switches the f3-v2 Hillside auto-reject rule on; the
+     * next Candidates load applies (or undoes) it. User reviews are never
+     * overwritten. */
+    private fun showJobTargetStart() {
+        setLoading(true)
+        lifecycleScope.launch {
+            var current = ""
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr("list_job_target_json", offlineDataRoot).toString()
+                }
+                val arr = JSONArray(jsonText)
+                val sb = StringBuilder()
+                for (i in 0 until arr.length()) {
+                    val r = arr.getJSONObject(i)
+                    sb.append(r.optString("job_id").take(6)).append("  ").append(r.optString("target_label"))
+                        .append("  (").append(r.optString("reason")).append(")\n")
+                }
+                current = (if (sb.isEmpty()) "No job has a target yet (all: Not set).\n" else sb.toString()) +
+                    "\nMound / tell turns on the Hillside rule: candidates labelled Hillside = Yes by " +
+                    "Terrain labels (F3) are rejected automatically. Other and Not set leave it off. " +
+                    "Run Terrain labels on the job first."
+            } catch (e: Exception) {
+                current = "Could not load current targets."
+            } finally {
+                setLoading(false)
+            }
+            promptText("Job target", "job id, first 6+ characters, e.g. f89dfe", "Next", current) { jobRef ->
+                val labels: Array<CharSequence> = arrayOf(
+                    "Mound / tell (Hillside rule on)",
+                    "Other: fortress, cliff tomb, rock relief ... (rule off)",
+                    "Not set (rule off)"
+                )
+                val values = arrayOf("MOUND_TELL", "OTHER", "NOT_SET")
+                val short = arrayOf("Mound / tell", "Other", "Not set")
+                AlertDialog.Builder(this@GrandProjectActivity)
+                    .setTitle("Target for job $jobRef")
+                    .setItems(labels) { _, which ->
+                        promptText("Reason for " + short[which], "e.g. valley survey for tells", "Save") { reason ->
+                            callReviewWrite(
+                                "set_job_target_json", listOf(jobRef, values[which], reason),
+                                "Job $jobRef target: " + short[which]
                             )
                         }
                     }
