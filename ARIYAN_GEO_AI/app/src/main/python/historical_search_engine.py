@@ -55,6 +55,24 @@ unlocated Pleiades place (placeTypes contains "unlocated", e.g. Maitona)
 still carries a `reprPoint`. That point is NOT a location and is never
 used as one here -- such places go to unlocated_findings.
 
+NOT-A-PLACE RULE (hs-v1.1, ADDED 2026-10-01 after on-device test: the
+query "Persian Gate in Persian" returned Urdu at 25.0, 70.0 and Persian
+language at 31.0, 56.0 as "located"). A finding's coordinates are
+WITHHELD (moved to `withheld_coordinates`, finding goes to
+unlocated_findings, caveat says why) when EITHER:
+  (a) its Wikidata instance-of includes a class that is not a place
+      (_NOT_A_PLACE_CLASS_QIDS: languages, language families, ethnic
+      groups, tribes, humans, countries / states / empires / historical
+      countries, dynasties, religions) -- their P625 is a nominal
+      centre, not a position anyone could survey; or
+  (b) EVERY coordinate it has is on a whole degree in both latitude and
+      longitude (e.g. 25.0, 70.0) -- a placeholder, not a measured point.
+EXCEPTION: a finding with a Pleiades PRECISE (tier A) coordinate is never
+withheld -- the specialist gazetteer itself says it is a located place.
+Nothing is deleted: the withheld coordinates stay in the result and in
+any saved record. Geographic REGIONS are deliberately NOT in the class
+list (open question; a region can carry a Pleiades point and matter).
+
 ORDERING: findings keep the order the sources' own search ranking gave
 them (Wikipedia rank, en and fa interleaved; Pleiades-only hits after).
 It is search rank, not likelihood.
@@ -73,7 +91,7 @@ import urllib.parse
 import urllib.request
 
 
-ENGINE_VERSION = "hs-v1"
+ENGINE_VERSION = "hs-v1.1"
 USER_AGENT = "ARIYAN-GEO-AI/1.0 (historical-search-engine; contact: repo owner)"
 
 _HTTP_TIMEOUT_SECONDS = 12
@@ -441,6 +459,40 @@ def _openalex(q, budget, limit, api_key=None):
 
 # ---------------------------------------------------------------- assembly
 
+# Wikidata classes whose P625 is a nominal centre, not a place
+# (hs-v1.1 NOT-A-PLACE RULE, see module doc). Ids checked live against
+# Wikidata labels 2026-10-01.
+_NOT_A_PLACE_CLASS_QIDS = {
+    "Q34770": "language", "Q33742": "natural language", "Q1288568": "modern language",
+    "Q152559": "macrolanguage", "Q20162172": "human language", "Q25295": "language family",
+    "Q41710": "ethnic group", "Q133311": "tribe", "Q5": "human",
+    "Q6256": "country", "Q3624078": "sovereign state", "Q7275": "state",
+    "Q48349": "empire", "Q3024240": "historical country", "Q164950": "dynasty",
+    "Q9174": "religion",
+}
+
+
+def _is_whole_degree(x):
+    return abs(x - round(x)) < 1e-9
+
+
+def withhold_reason(f):
+    """hs-v1.1 NOT-A-PLACE RULE. Returns a reason string if this
+    finding's coordinates must be withheld, else None."""
+    cs = f.get("coordinates") or []
+    if not cs:
+        return None
+    if any(c["source"] == "pleiades" and c["tier"] == "A" for c in cs):
+        return None
+    hits = [_NOT_A_PLACE_CLASS_QIDS[t["id"]] for t in f.get("instance_of") or []
+            if t.get("id") in _NOT_A_PLACE_CLASS_QIDS]
+    if hits:
+        return "Wikidata type is %s, not a place" % ", ".join(dict.fromkeys(hits))
+    if all(_is_whole_degree(c["lat"]) and _is_whole_degree(c["lon"]) for c in cs):
+        return "every coordinate is a whole-degree placeholder"
+    return None
+
+
 def _coord_record(lat, lon, source, tier, url, referenced=None, note=None):
     return {
         "lat": round(lat, 6), "lon": round(lon, 6), "source": source, "tier": tier,
@@ -544,7 +596,7 @@ def search_historical(query, max_results=6, max_pleiades=5, max_literature=5,
                 "description": None, "wikidata_id": h["qid"], "instance_of": [],
                 "is_event": False, "date": None, "countries": [], "in_iran": None,
                 "coordinates": [], "best_tier": None, "coordinate_spread_km": None,
-                "caveat": "", "pleiades": None,
+                "caveat": "", "pleiades": None, "withheld_coordinates": [],
                 "links": {"wikipedia_en": None, "wikipedia_fa": None,
                           "wikidata": ("https://www.wikidata.org/wiki/" + h["qid"]) if h["qid"] else None,
                           "pleiades": None},
@@ -662,7 +714,7 @@ def search_historical(query, max_results=6, max_pleiades=5, max_literature=5,
             "instance_of": [{"id": None, "label": t} for t in rec["place_types"]],
             "is_event": False, "date": None, "countries": [], "in_iran": None,
             "coordinates": [], "best_tier": None, "coordinate_spread_km": None,
-            "caveat": "", "pleiades": None,
+            "caveat": "", "pleiades": None, "withheld_coordinates": [],
             "links": {"wikipedia_en": None, "wikipedia_fa": None, "wikidata": None, "pleiades": None},
             "evidence": [{"source": "pleiades", "lang": "en", "rank": len(used_pids),
                           "title": rec["title"], "url": rec["url"],
@@ -688,6 +740,10 @@ def search_historical(query, max_results=6, max_pleiades=5, max_literature=5,
     located, unlocated = [], []
     for key in order:
         f = findings[key]
+        reason = withhold_reason(f)
+        if reason:
+            f["withheld_coordinates"] = f["coordinates"]
+            f["coordinates"] = []
         cs = f["coordinates"]
         if cs:
             f["best_tier"] = "A" if any(c["tier"] == "A" for c in cs) else "B"
@@ -711,6 +767,10 @@ def search_historical(query, max_results=6, max_pleiades=5, max_literature=5,
         elif f["pleiades"] and f["pleiades"].get("rough_point"):
             parts.append("Pleiades gives only a ROUGH position (%.4f, %.4f); not used as a location."
                          % f["pleiades"]["rough_point"])
+        if reason:
+            w = f["withheld_coordinates"][0]
+            parts.append("COORDINATE WITHHELD: %s (recorded %.4f, %.4f, kept in the record)."
+                         % (reason, w["lat"], w["lon"]))
         f["caveat"] = " ".join(parts)
         (located if cs else unlocated).append(f)
 
