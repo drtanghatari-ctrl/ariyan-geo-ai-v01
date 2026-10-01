@@ -1398,6 +1398,9 @@ appendReviewSection(sb, detail)
                     val r = arr.getJSONObject(i)
                     sb.append(r.optString("job_id").take(6)).append("  ").append(r.optString("target_label"))
                         .append("  (").append(r.optString("reason")).append(")\n")
+                    // Read-only Hillside check (added 2026-10-02), Mound / tell jobs only.
+                    val check = r.optString("hillside_check", "")
+                    if (check.isNotEmpty() && check != "null") sb.append(check).append("\n\n")
                 }
                 current = (if (sb.isEmpty()) "No job has a target yet (all: Not set).\n" else sb.toString()) +
                     "\nMound / tell turns on the Hillside rule: candidates labelled Hillside = Yes by " +
