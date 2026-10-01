@@ -74,6 +74,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+# PHASE 4a: provenance ledger (lightweight: no heavy imports at load time).
+# If it cannot be imported, evidence writing is unchanged and simply has no
+# ledger records -- never a failure of this module.
+try:
+    import provenance_ledger as _provenance_ledger
+except Exception:  # pragma: no cover
+    _provenance_ledger = None
+
 DB_FILENAME = "grand_project.db"
 
 
@@ -707,8 +715,14 @@ def add_evidence_link(
     evidence_type: str,
     relation: str,
     detail: Optional[Dict[str, Any]] = None,
+    provenance_sources: Optional[List[Dict[str, Any]]] = None,
 ) -> int:
-    """`evidence_type` is deliberately free-text (not an enum/CHECK
+    """`provenance_sources` (Phase 4a, optional): the data sources behind
+    this row, supplied by the writer itself. When omitted, the provenance
+    ledger uses the investigation capture bound to this thread (see
+    provenance_ledger.bind()), or records NOT_CAPTURED.
+
+    `evidence_type` is deliberately free-text (not an enum/CHECK
     constraint) -- so a future Phase 2.5 value like
     'HISTORICAL_ACCOUNT' can be inserted without a schema migration.
     `relation` is expected to be one of 'supports' / 'contradicts' /
@@ -722,6 +736,7 @@ def add_evidence_link(
     try:
         initialize_schema(conn)
         now = _now_iso()
+        detail_json = json.dumps(detail) if detail is not None else None
         with conn:
             cursor = conn.execute(
                 """
@@ -729,10 +744,20 @@ def add_evidence_link(
                     (candidate_id, evidence_type, relation, detail_json, recorded_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (candidate_id, evidence_type, relation,
-                 json.dumps(detail) if detail is not None else None, now),
+                (candidate_id, evidence_type, relation, detail_json, now),
             )
-            return cursor.lastrowid
+            evidence_id = cursor.lastrowid
+            # PHASE 4a: provenance ledger record for this row, written in the
+            # SAME transaction (the evidence INSERT above already holds the
+            # write lock, so the hash chain stays in order). A ledger failure
+            # is logged to provenance_issue and never blocks this row.
+            if _provenance_ledger is not None:
+                _provenance_ledger.record_evidence(
+                    conn, evidence_id,
+                    (candidate_id, evidence_type, relation, detail_json, now),
+                    sources=provenance_sources,
+                )
+            return evidence_id
     finally:
         conn.close()
 
