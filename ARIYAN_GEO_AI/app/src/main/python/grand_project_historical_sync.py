@@ -91,6 +91,7 @@ already uses around runDebate().
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 import grand_project_db as db
@@ -252,3 +253,171 @@ def record_historical_research_results(
         "historical_finding_ids": historical_finding_ids,
         "geographic_suggestion_ids": geographic_suggestion_ids,
     }
+
+
+# ==================== ADDED 2026-10-01, HISTORICAL SEARCH REBUILD (hs-v1) ====================
+# Persistence for ONE located finding from historical_search_engine.py
+# (engine hs-v1). The legacy record_historical_research_results() above is
+# untouched (the old word-guessing route is switched off in the screen
+# but its code and its already-saved rows stay).
+#
+# What gets written, per finding the USER chose to save (never
+# automatically, never all results at once):
+#   - one historical_finding row, source_type "historical_search_hs-v1",
+#     item_detail = the WHOLE finding exactly as the engine returned it
+#     (every coordinate with its source/tier/reference flag, evidence
+#     texts, links, caveat) plus the search's query / keyword query /
+#     retrieval date / tier definitions -- reused, not reshaped;
+#   - one geographic_suggestion row, kind "LOCATED_FINDING" (kind is not
+#     DB-enforced, see add_geographic_suggestion()), status
+#     PENDING_REVIEW, radius LEFT EMPTY: no radius is taken from text;
+#     the user types one when starting a Wide-Area Search from it.
+#
+# PRIMARY COORDINATE (the lat/lon written to the suggestion row), fixed
+# order, first match wins -- every other coordinate stays in the
+# historical_finding row and is summarised in `context`:
+#   1. pleiades (tier A, precise)
+#   2. wikidata_P625 with a cited reference
+#   3. wikidata_P625 without one
+#   4. wikipedia_en, 5. wikipedia_fa, 6. anything else in engine order.
+#
+# SAVING THE SAME FINDING TWICE does not duplicate rows: an existing
+# hs-v1 historical_finding with the same finding key in this project is
+# returned with already_saved=True.
+
+HS_SOURCE_TYPE = "historical_search_hs-v1"
+LOCATED_FINDING_KIND = "LOCATED_FINDING"
+
+_PRIMARY_ORDER = (
+    lambda c: c.get("source") == "pleiades" and c.get("tier") == "A",
+    lambda c: c.get("source") == "wikidata_P625" and c.get("referenced") is True,
+    lambda c: c.get("source") == "wikidata_P625",
+    lambda c: c.get("source") == "wikipedia_en",
+    lambda c: c.get("source") == "wikipedia_fa",
+    lambda c: True,
+)
+
+
+def choose_primary_coordinate(coordinates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Fixed-order pick, see the block comment above. None if empty."""
+    for rule in _PRIMARY_ORDER:
+        for c in coordinates or []:
+            if c.get("lat") is not None and c.get("lon") is not None and rule(c):
+                return c
+    return None
+
+
+def _coord_line(c: Dict[str, Any]) -> str:
+    ref = ""
+    if c.get("referenced") is True:
+        ref = ", cited"
+    elif c.get("referenced") is False:
+        ref = ", no citation"
+    return "%s %s %.5f,%.5f%s" % (c.get("tier"), c.get("source"), c.get("lat"), c.get("lon"), ref)
+
+
+def build_located_finding_context(finding: Dict[str, Any], primary: Dict[str, Any], query: str) -> str:
+    """Plain-text summary stored in geographic_suggestion.context, so the
+    Saved tab can show sources and tiers without parsing JSON."""
+    others = [c for c in finding.get("coordinates") or [] if c is not primary]
+    parts = ["used: " + _coord_line(primary)]
+    if others:
+        parts.append("also: " + "; ".join(_coord_line(c) for c in others))
+    if finding.get("coordinate_spread_km") is not None:
+        parts.append("spread %.2f km" % finding["coordinate_spread_km"])
+    iran = finding.get("in_iran")
+    parts.append("Iran: " + ("yes" if iran is True else "no" if iran is False else "not recorded"))
+    if finding.get("date"):
+        parts.append("date: " + str(finding["date"]))
+    parts.append(finding.get("caveat") or "")
+    parts.append("query: " + (query or ""))
+    return " | ".join(p for p in parts if p)
+
+
+def _finding_link(finding: Dict[str, Any]) -> Optional[str]:
+    links = finding.get("links") or {}
+    for k in ("wikidata", "pleiades", "wikipedia_en", "wikipedia_fa"):
+        if links.get(k):
+            return links[k]
+    return None
+
+
+def record_located_finding(
+    db_root: str,
+    grand_project_id: str,
+    search_result: Dict[str, Any],
+    finding_key: str,
+    hypothesis_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Saves ONE located finding (picked by its `key`) from a
+    historical_search_engine.search_historical() result. Returns
+    {"historical_finding_id", "geographic_suggestion_id", "already_saved",
+     "primary": {...coordinate...}}.
+
+    Raises ValueError if the key is not among located_findings (a caller
+    bug -- unlocated findings carry no coordinate and are not saved)."""
+    finding = None
+    for f in search_result.get("located_findings") or []:
+        if f.get("key") == finding_key:
+            finding = f
+            break
+    if finding is None:
+        raise ValueError("Finding %r is not a located finding of this search result." % finding_key)
+    primary = choose_primary_coordinate(finding.get("coordinates") or [])
+    if primary is None:
+        raise ValueError("Finding %r has no usable coordinate." % finding_key)
+
+    # Duplicate guard: same finding key already saved in this project.
+    for row in db.get_historical_findings_for_project(db_root, grand_project_id):
+        if row.get("source_type") != HS_SOURCE_TYPE:
+            continue
+        try:
+            detail = json.loads(row.get("item_detail_json") or "{}")
+        except (ValueError, TypeError):
+            continue
+        if ((detail.get("finding") or {}).get("key")) == finding_key:
+            existing_sid = None
+            for s in db.get_geographic_suggestions_for_project(db_root, grand_project_id):
+                if s.get("historical_finding_id") == row["id"] and s.get("kind") == LOCATED_FINDING_KIND:
+                    existing_sid = s["id"]
+                    break
+            return {"historical_finding_id": row["id"], "geographic_suggestion_id": existing_sid,
+                    "already_saved": True, "primary": primary}
+
+    item_detail = {
+        "engine_version": search_result.get("engine_version"),
+        "query": search_result.get("query"),
+        "keyword_query": search_result.get("keyword_query"),
+        "retrieval_date": search_result.get("retrieval_date"),
+        "tier_definitions": search_result.get("tier_definitions"),
+        "primary_coordinate": primary,
+        "finding": finding,
+    }
+    finding_id = db.create_historical_finding(
+        db_root, grand_project_id,
+        source_type=HS_SOURCE_TYPE,
+        item_detail=item_detail,
+        retrieved_at=search_result.get("retrieval_date") or "",
+        title=finding.get("title"),
+        url=_finding_link(finding),
+        hypothesis_id=hypothesis_id,
+    )
+    names = [n for n in (finding.get("title_en") or finding.get("title"), finding.get("title_fa")) if n]
+    suggestion_id = db.add_geographic_suggestion(
+        db_root, grand_project_id,
+        kind=LOCATED_FINDING_KIND,
+        hypothesis_id=hypothesis_id,
+        historical_finding_id=finding_id,
+        place_name=finding.get("title"),
+        resolved_name=" / ".join(names) if names else finding.get("title"),
+        lat=primary["lat"],
+        lon=primary["lon"],
+        bounding_box=None,
+        radius_value=None,
+        radius_unit=None,
+        radius_raw_text=None,
+        has_proximity_keyword=None,
+        context=build_located_finding_context(finding, primary, search_result.get("query") or ""),
+    )
+    return {"historical_finding_id": finding_id, "geographic_suggestion_id": suggestion_id,
+            "already_saved": False, "primary": primary}
