@@ -40,6 +40,7 @@ import historical_source_mobile_combined as combined
 import historical_claim_extraction_mobile as extraction
 import grand_project_historical_sync as sync
 import grand_project_db as db
+import historical_search_engine as search_engine
 
 
 def run_historical_research_json(query: str, max_results_per_source: int = 10) -> str:
@@ -81,10 +82,32 @@ def run_historical_research_json(query: str, max_results_per_source: int = 10) -
         query, max_results_per_source=max_results_per_source
     )
     suggestion_result = extraction.suggest_probable_areas(combined_evidence_result)
+    # ADDED 2026-10-01 (Historical Search rebuild, engine hs-v1): the new
+    # en+fa Wikipedia / Wikidata / Pleiades / OpenAlex engine runs
+    # ALONGSIDE the legacy pipeline above, under its own key. The two
+    # legacy keys are unchanged, so the installed APK keeps working and
+    # its Save path is untouched; the new key is simply ignored until the
+    # Kotlin screen is updated to show it. Its own failure can never
+    # break the legacy result -- reported as {"error": "..."} instead.
+    hs_result, hs_error = search_engine.search_historical_safe(query)
     return json.dumps({
         "combined_evidence": combined_evidence_result,
         "suggestions": suggestion_result,
-    })
+        "historical_search": hs_result if hs_result is not None else {"error": hs_error},
+    }, ensure_ascii=False)
+
+
+def run_historical_search_json(query: str, openalex_api_key: Optional[str] = None) -> str:
+    """ADDED 2026-10-01: runs ONLY the new hs-v1 engine
+    (`historical_search_engine.search_historical()`) and returns its
+    result as JSON -- for the rebuilt Kotlin screen and for quick tests.
+    Never raises: a failure comes back as {"error": "..."}. Nothing is
+    persisted here (same two-step design as above)."""
+    hs_result, hs_error = search_engine.search_historical_safe(
+        query, openalex_api_key=openalex_api_key or None
+    )
+    return json.dumps(hs_result if hs_result is not None else {"error": hs_error},
+                      ensure_ascii=False)
 
 
 def save_historical_research_json(
