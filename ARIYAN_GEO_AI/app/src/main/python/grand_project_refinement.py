@@ -137,6 +137,7 @@ import debate_mobile
 import dem_source_mobile
 import grand_project_db as db
 import grand_project_sync as sync
+import provenance_ledger
 import investigation_multi_mobile
 import land_cover_flags
 import sh_backoff
@@ -602,6 +603,28 @@ def refine_candidate(
     allow_repeat: bool = False,
     require_live_dem: bool = False,
 ) -> Dict[str, Any]:
+    """PHASE 4a wrapper: guarantees the provenance binding made inside
+    _refine_candidate_impl() is released afterwards, whatever happens.
+    Behaviour and return value are exactly _refine_candidate_impl()'s."""
+    try:
+        return _refine_candidate_impl(
+            db_root, candidate_id, api_key=api_key, demtype=demtype,
+            ndvi_client_id=ndvi_client_id, ndvi_client_secret=ndvi_client_secret,
+            allow_repeat=allow_repeat, require_live_dem=require_live_dem)
+    finally:
+        provenance_ledger.unbind()
+
+
+def _refine_candidate_impl(
+    db_root: str,
+    candidate_id: str,
+    api_key: str = "",
+    demtype: str = "SRTMGL1",
+    ndvi_client_id: str = "",
+    ndvi_client_secret: str = "",
+    allow_repeat: bool = False,
+    require_live_dem: bool = False,
+) -> Dict[str, Any]:
     """Runs ONE full-evidence refinement of an existing Pass 1 candidate
     and records the results against THAT candidate (see module docstring).
 
@@ -648,6 +671,8 @@ def refine_candidate(
         debate_json: Optional[str] = debate_mobile.run_debate_json(investigation_json)
     except Exception:
         debate_json = None # a debate failure never hides the evidence gathered
+    # PHASE 4a: every evidence row below belongs to THIS run's output.
+    provenance_ledger.bind(investigation_json)
 
     dem_info = _dem_source_of(investigation_json, demtype)
     if require_live_dem and dem_info["dem_source"] != DEM_SOURCE_LIVE:
