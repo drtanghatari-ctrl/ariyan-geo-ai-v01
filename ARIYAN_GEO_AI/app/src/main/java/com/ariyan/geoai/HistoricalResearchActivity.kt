@@ -50,10 +50,13 @@ import java.util.Locale
  * still in the repo and its already-saved rows still show in the Saved
  * tab.
  *
- * SAVED TAB: every geographic_suggestion row for this project.
- * LOCATED_FINDING and legacy PAIRED_SUGGESTION rows get a "Start
- * Wide-Area Search" button (AOI mechanism (c)); DISTANCE_ONLY /
- * UNGROUNDED_PLACE rows are read-only.
+ * SAVED TAB: every geographic_suggestion row for this project. Only
+ * LOCATED_FINDING rows get a "Start Wide-Area Search" button (AOI
+ * mechanism (c)). Legacy PAIRED_SUGGESTION rows (old route) are
+ * read-only since hs-v1.1, as are DISTANCE_ONLY / UNGROUNDED_PLACE rows.
+ * Findings whose coordinate the engine WITHHELD (hs-v1.1 not-a-place
+ * rule: languages, empires, people, whole-degree placeholders) appear
+ * under "Found, but no coordinate" with the reason.
  *
  * All content is built in code into the two empty XML containers, same
  * discipline as every other screen. Project scope: the same interim
@@ -224,7 +227,9 @@ class HistoricalResearchActivity : AppCompatActivity() {
                     val f = unlocated.getJSONObject(i)
                     append("- ").append(titleLine(f))
                     val caveat = str(f, "caveat")
-                    if (caveat.contains("ROUGH") || caveat.contains("UNLOCATED")) {
+                    if (caveat.contains("COORDINATE WITHHELD")) {
+                        append("\n    ").append("COORDINATE WITHHELD" + caveat.substringAfter("COORDINATE WITHHELD").take(180))
+                    } else if (caveat.contains("ROUGH") || caveat.contains("UNLOCATED")) {
                         append("\n    ").append(caveat.substringAfter("archaeological position. ").take(160))
                     }
                     val link = firstLink(f)
@@ -360,8 +365,9 @@ class HistoricalResearchActivity : AppCompatActivity() {
                     Toast.makeText(this@HistoricalResearchActivity, "Save failed: " + str(result, "error"), Toast.LENGTH_LONG).show()
                     return@launch
                 }
+                // Button stays enabled: tapping again re-asks Python, which
+                // answers "already saved" without creating a duplicate.
                 saveButton.text = "Saved"
-                saveButton.isEnabled = false
                 if (!thenStartJob) {
                     Toast.makeText(
                         this@HistoricalResearchActivity,
@@ -450,6 +456,7 @@ class HistoricalResearchActivity : AppCompatActivity() {
                 } else if (kind == "PAIRED_SUGGESTION") {
                     append("  ").append(str(row, "resolved_name").ifEmpty { str(row, "place_name") }).append("\n")
                     append("  radius: ").append(row.optDouble("radius_value")).append(" ").append(str(row, "radius_unit")).append("\n")
+                    append("  (old word-guessing route, switched off 2026-10-01; kept for the record, cannot start a job)\n")
                 }
                 val context = str(row, "context")
                 val limit = if (kind == "LOCATED_FINDING") 600 else 140
@@ -458,8 +465,10 @@ class HistoricalResearchActivity : AppCompatActivity() {
             }
             binding.containerSaved.addView(plainText(text))
 
-            val startable = (kind == "PAIRED_SUGGESTION" || kind == "LOCATED_FINDING") &&
-                !row.isNull("lat") && !row.isNull("lon")
+            // Only LOCATED_FINDING rows can start a job (2026-10-01): legacy
+            // PAIRED_SUGGESTION rows came from the switched-off word-guessing
+            // route (e.g. a Galway, Ireland anchor) and stay read-only.
+            val startable = kind == "LOCATED_FINDING" && !row.isNull("lat") && !row.isNull("lon")
             if (startable) {
                 val buttonStart = MaterialButton(this).apply {
                     this.text = "Start Wide-Area Search"
