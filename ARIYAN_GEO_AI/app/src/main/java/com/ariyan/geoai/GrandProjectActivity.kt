@@ -910,6 +910,7 @@ class GrandProjectActivity : AppCompatActivity() {
         }
 appendReviewSection(sb, detail)
         appendKnownSiteSection(sb, detail)
+        appendProvenanceSection(sb, detail)
         val history = detail.optJSONArray("confidence_history")
         if (history != null && history.length() > 0) {
             sb.append("Confidence History (").append(history.length()).append(" entries, oldest first)\n")
@@ -1215,6 +1216,104 @@ appendReviewSection(sb, detail)
         bar2.addView(terrainButton)
         bar2.addView(targetButton)
         binding.containerCandidateRows.addView(bar2)
+
+        // Phase 4b provenance check (added 2026-10-02): own row.
+        val bar3 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding((8 * density).toInt(), 0, (8 * density).toInt(), (4 * density).toInt())
+        }
+        val provenanceButton = MaterialButton(this).apply {
+            text = "Provenance check..."
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { showProvenanceCheckStart() }
+        }
+        bar3.addView(provenanceButton)
+        binding.containerCandidateRows.addView(bar3)
+    }
+
+    /** Phase 4b (added 2026-10-02): provenance verdict for this candidate's
+     * evidence rows, from provenance_check.py. Read-only. */
+    private fun appendProvenanceSection(sb: StringBuilder, detail: JSONObject) {
+        val p = detail.optJSONObject("provenance") ?: return
+        sb.append("Provenance (Phase 4)\n")
+        if (p.has("error")) {
+            sb.append("  check failed: ").append(p.optString("error")).append("\n\n")
+            return
+        }
+        sb.append("  ").append(p.optString("summary")).append("\n")
+        val rows = p.optJSONArray("rows")
+        if (rows != null) {
+            for (i in 0 until rows.length()) {
+                val r = rows.getJSONObject(i)
+                sb.append("  ").append(r.optString("evidence_type")).append("  ")
+                sb.append(if (r.optBoolean("verified")) "verified" else "NOT verified").append("\n")
+                val reasons = r.optJSONArray("reasons")
+                if (reasons != null) {
+                    for (j in 0 until reasons.length()) {
+                        sb.append("      - ").append(reasons.optString(j)).append("\n")
+                    }
+                }
+                val sources = r.optJSONArray("sources")
+                if (sources != null) {
+                    for (j in 0 until sources.length()) {
+                        val s = sources.getJSONObject(j)
+                        sb.append("      ").append(s.optString("type"))
+                        val label = s.optString("name", "").ifEmpty { s.optString("service", "") }
+                        if (label.isNotEmpty()) sb.append(" ").append(label)
+                        val sha = s.optString("sha256", "")
+                        if (sha.isNotEmpty()) sb.append(" sha256:").append(sha)
+                        sb.append("  (").append(s.optString("status")).append(")\n")
+                    }
+                }
+                val bundle = r.optString("code_bundle_md5", "")
+                if (bundle.isNotEmpty() && bundle != "null") {
+                    sb.append("      code bundle md5: ").append(bundle).append("\n")
+                }
+            }
+        }
+        sb.append("  (Verified = traceable and unchanged. It does not raise the confidence ceiling.)\n\n")
+    }
+
+    /** Phase 4b (added 2026-10-02): asks for a job id or exact title and
+     * shows provenance_check.py's read-only job report. */
+    private fun showProvenanceCheckStart() {
+        promptText(
+            "Provenance check", "job id (first 6+ characters) or exact job title", "Check",
+            "Checks that every evidence row of the job has a ledger record, that the record chain is " +
+                "intact, and that the offline files used are still on this phone and unchanged " +
+                "(they are re-hashed now). Changes nothing. A large job can take a minute."
+        ) { jobRef ->
+            setLoading(true)
+            lifecycleScope.launch {
+                try {
+                    val jsonText = withContext(Dispatchers.Default) {
+                        python.getModule("grand_project_query_mobile")
+                            .callAttr("check_job_provenance_json", offlineDataRoot, jobRef).toString()
+                    }
+                    val result = JSONObject(jsonText)
+                    if (result.has("error")) {
+                        Toast.makeText(this@GrandProjectActivity, result.optString("error"), Toast.LENGTH_LONG).show()
+                    } else {
+                        AlertDialog.Builder(this@GrandProjectActivity)
+                            .setTitle("Provenance: job " + result.optString("job_id").take(6))
+                            .setMessage(result.optString("report_text"))
+                            .setPositiveButton("Close", null)
+                            .show()
+                    }
+                } catch (e: PyException) {
+                    Toast.makeText(
+                        this@GrandProjectActivity,
+                        "Provenance check failed: ${cleanErrorMessage(e.message)}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this@GrandProjectActivity, "Provenance check failed: ${e.message}", Toast.LENGTH_LONG).show()
+                } finally {
+                    setLoading(false)
+                }
+            }
+        }
     }
 
     /** Adds the "Review" and "Job" sections to the candidate detail text. */
