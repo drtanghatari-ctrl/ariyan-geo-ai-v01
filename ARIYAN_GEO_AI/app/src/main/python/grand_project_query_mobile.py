@@ -233,6 +233,15 @@ def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
     else:
         known_site = json.loads(known_sites.annotate_json(candidate["lat"], candidate["lon"]))
 
+    # ADDED 2026-10-02 (Phase 4b): provenance verdict for this candidate's
+    # evidence rows (read-only; see provenance_check.py). A failure here
+    # never hides the rest of the detail.
+    try:
+        import provenance_check
+        provenance = provenance_check.check_candidate(db_root, candidate_id)
+    except Exception as exc:
+        provenance = {"error": "%s: %s" % (type(exc).__name__, exc)}
+
     return json.dumps({
         "candidate": candidate,
         "investigation": investigation,
@@ -242,6 +251,7 @@ def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
         "review_history": review_history,
         "review": review_entry,
         "known_site": known_site,
+        "provenance": provenance,
     })
 
 
@@ -293,3 +303,10 @@ def calibrate_job_json(db_root: str, job_ref: str) -> str:
 def label_job_terrain_json(db_root: str, job_ref: str) -> str:
     import terrain_context_labels as terrain_labels
     return terrain_labels.label_job_json(db_root, job_ref)
+
+
+# Phase 4b provenance check (added 2026-10-02): read-only verdict for every
+# evidence row of one job (id prefix or exact title). See provenance_check.py.
+def check_job_provenance_json(db_root: str, job_ref: str) -> str:
+    import provenance_check
+    return provenance_check.check_job_json(db_root, job_ref)
