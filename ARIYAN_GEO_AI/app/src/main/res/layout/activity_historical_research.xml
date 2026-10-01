@@ -46,7 +46,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Ask a free-text historical question. Real search across Wikipedia, Internet Archive, and Wikisource looks for a place plus a distance mentioned together in the same real source -- every result here is a suggestion for you to review, never a committed search area."
+            android:text="Ask a historical question in English or Persian. Searches Wikipedia (English and Persian), Wikidata, Pleiades and OpenAlex for places with a recorded coordinate. Every result is a lead for you to review, never a committed search area. Coordinates are where a source records the subject, not verified positions."
             android:textColor="@color/ariyan_text_secondary"
             android:textSize="12sp"
             android:paddingBottom="16dp" />
@@ -87,11 +87,11 @@
             android:visibility="gone" />
 
         <!-- Every saved geographic_suggestion row for this project,
-             built entirely in code by renderSavedSuggestions() - a
-             PAIRED_SUGGESTION row gets a "Start Wide-Area Search"
-             button (AOI mechanism (c)); DISTANCE_ONLY/UNGROUNDED_PLACE
-             rows are shown read-only, since they carry no real
-             coordinates to act on. -->
+             built entirely in code by renderSavedSuggestions(). A
+             LOCATED_FINDING row (Historical Search rebuild, 2026-10-01)
+             or a legacy PAIRED_SUGGESTION row gets a "Start Wide-Area
+             Search" button (AOI mechanism (c)); DISTANCE_ONLY and
+             UNGROUNDED_PLACE rows are shown read-only. -->
         <LinearLayout
             android:id="@+id/containerSaved"
             android:layout_width="match_parent"
