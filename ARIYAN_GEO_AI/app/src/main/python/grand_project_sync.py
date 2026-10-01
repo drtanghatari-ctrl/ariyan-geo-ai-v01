@@ -145,6 +145,15 @@ import math
 from typing import Any, Dict, List, Optional
 
 import grand_project_db as db
+import provenance_ledger
+
+# PHASE 4a: install the provenance observation wrappers once, as soon as the
+# Grand Project path is in use (wide-area search and refinement both import
+# this module before running any investigation). Never fatal.
+try:
+    provenance_ledger.install()
+except Exception:
+    pass
 
 DEFAULT_GRAND_PROJECT_ID = "default"
 
@@ -249,6 +258,27 @@ def _colocation_distance_m(investigation: Dict[str, Any]) -> float:
 
 
 def record_investigation_results(
+    db_root: str,
+    grand_project_id: str,
+    investigation_json: str,
+    debate_json: Optional[str] = None,
+    hypothesis_id: Optional[str] = None,
+    objective: str = "",
+) -> Dict[str, Any]:
+    """PHASE 4a wrapper: binds this exact investigation output's provenance
+    capture (see provenance_ledger.bind()) for every evidence row written
+    below, then unbinds. Behaviour and return value are otherwise exactly
+    _record_investigation_results_impl()'s (documented there)."""
+    provenance_ledger.bind(investigation_json)
+    try:
+        return _record_investigation_results_impl(
+            db_root, grand_project_id, investigation_json,
+            debate_json=debate_json, hypothesis_id=hypothesis_id, objective=objective)
+    finally:
+        provenance_ledger.unbind()
+
+
+def _record_investigation_results_impl(
     db_root: str,
     grand_project_id: str,
     investigation_json: str,
