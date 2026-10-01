@@ -3,7 +3,8 @@ package com.ariyan.geoai
 import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
-import android.util.TypedValue
+import android.text.method.LinkMovementMethod
+import android.text.util.Linkify
 import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -22,37 +23,41 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 
 /**
- * HistoricalResearchActivity -- Phase 2.5's Historical Research &
- * Probable-Area Engine, ADDED 2026-09-17. Until now none of that real
- * Python (`historical_source_mobile_combined.py`,
- * `historical_claim_extraction_mobile.py`,
- * `grand_project_historical_sync.py`) had any Kotlin call path at all;
- * see `historical_research_mobile.py`'s own module doc for why that
- * mattered (a real broken-import bug in that pipeline went undetected
- * for an entire prior session as a direct result).
+ * HistoricalResearchActivity -- Phase 2.5's Historical Research screen,
+ * ADDED 2026-09-17, SEARCH TAB REBUILT 2026-10-01 (Historical Search
+ * rebuild, step 2, engine hs-v1).
  *
- * TWO TABS, same button-switch pattern as every other screen built this
- * session: "Search" (ask a free-text question, run the real three-
- * source fetch + extraction, preview the result, then explicitly Save
- * it -- searching never silently writes to the database) and "Saved
- * Suggestions" (every `geographic_suggestion` row saved for this
- * project; a `PAIRED_SUGGESTION` row gets a "Start Wide-Area Search"
- * button, which is AOI mechanism (c) -- turning a reviewed suggestion
- * directly into a wide-area search job via
- * `wide_area_search_mobile.create_wide_area_search_job_from_
- * suggestion_json()`). `DISTANCE_ONLY`/`UNGROUNDED_PLACE` rows are
- * shown read-only, since they carry no real coordinates to act on.
+ * SEARCH TAB (rebuilt): calls `historical_research_mobile.
+ * run_historical_search_json()` -- English + Persian Wikipedia, Wikidata,
+ * Pleiades, OpenAlex (see historical_search_engine.py). Shows:
+ *   - per-source counts and every source error in full;
+ *   - LOCATED findings: each coordinate with its source and tier
+ *     (A = Pleiades precise, B = Wikidata/Wikipedia), Iran flag, caveat,
+ *     tappable links. Order = the sources' own search rank, not
+ *     likelihood. No confidence percentages anywhere.
+ *   - findings with NO coordinate, and LITERATURE (OpenAlex, pointers only).
+ * Each located finding has its own "Save" button (saves only that one,
+ * kind LOCATED_FINDING, via save_located_finding_json(); saving the same
+ * finding twice does not duplicate rows) and "Wide-Area Search..." (saves
+ * it first, then asks for a radius -- no radius is ever taken from text).
  *
- * All content built entirely in Kotlin code into two empty XML
- * containers, same discipline as every other screen this session (see
- * `activity_historical_research.xml`'s own class doc for why).
+ * The OLD word-guessing route (capitalised words in snippets geocoded
+ * worldwide by Nominatim, e.g. "Persian Gate" -> England/France) is
+ * SWITCHED OFF here by the user's decision of 2026-10-01. Its Python is
+ * still in the repo and its already-saved rows still show in the Saved
+ * tab.
  *
- * PROJECT SCOPE: uses the SAME interim stopgap every other Grand-
- * Project-aware screen already uses --
- * `grand_project_sync.get_or_create_default_grand_project()` -- since
- * no real Grand Project selection UI exists yet.
+ * SAVED TAB: every geographic_suggestion row for this project.
+ * LOCATED_FINDING and legacy PAIRED_SUGGESTION rows get a "Start
+ * Wide-Area Search" button (AOI mechanism (c)); DISTANCE_ONLY /
+ * UNGROUNDED_PLACE rows are read-only.
+ *
+ * All content is built in code into the two empty XML containers, same
+ * discipline as every other screen. Project scope: the same interim
+ * get_or_create_default_grand_project() stopgap as every other screen.
  */
 class HistoricalResearchActivity : AppCompatActivity() {
 
@@ -61,13 +66,14 @@ class HistoricalResearchActivity : AppCompatActivity() {
 
     private val offlineDataRoot: String by lazy { ExternalStorageAccess.offlineDataRoot().absolutePath }
 
-    // The most recently RUN (but not necessarily yet saved) search
-    // result, held in memory so the "Save These Results" button can
-    // persist exactly what's on screen without re-running the search.
-    // Cleared (set to null) once saved, so a stale save can't be
-    // accidentally repeated.
-    private var lastCombinedEvidenceJson: String? = null
-    private var lastSuggestionsJson: String? = null
+    // The most recent search result JSON, exactly as Python returned it,
+    // so each Save passes back the SAME result it was shown from.
+    private var lastSearchJson: String? = null
+
+    // Number of views the search form itself occupies at the top of
+    // containerSearch; results are appended after them and cleared on
+    // every new search (the old screen kept stacking old results).
+    private var searchFormViewCount = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -91,15 +97,11 @@ class HistoricalResearchActivity : AppCompatActivity() {
         renderSearchForm()
     }
 
-    /** Builds the question field and Search button. Rebuilt from
-     * scratch each time the Search tab is shown, same
-     * removeAllViews() convention as every other screen this
-     * session. */
     private fun renderSearchForm() {
         val density = resources.displayMetrics.density
 
         val label = TextView(this).apply {
-            text = "Historical question"
+            text = "Historical question (English or Persian)"
             setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_secondary))
             textSize = 12f
             setPadding(0, (4 * density).toInt(), 0, (4 * density).toInt())
@@ -107,7 +109,7 @@ class HistoricalResearchActivity : AppCompatActivity() {
         binding.containerSearch.addView(label)
 
         val inputQuery = EditText(this).apply {
-            hint = "e.g. Darius III treasure Persepolis"
+            hint = "e.g. Where was the battle of the Persian Gate? / \u0645\u062d\u0644 \u0646\u0628\u0631\u062f \u062f\u0631\u0628\u0646\u062f \u067e\u0627\u0631\u0633"
             setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_primary))
             setHintTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_secondary))
             setPadding((12 * density).toInt(), (10 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
@@ -130,29 +132,42 @@ class HistoricalResearchActivity : AppCompatActivity() {
             }
         }
         binding.containerSearch.addView(buttonSearch)
+
+        binding.containerSearch.addView(plainText(
+            "Searches English and Persian Wikipedia, Wikidata, Pleiades and OpenAlex. " +
+                "Can take up to about a minute. Nothing is saved unless you tap Save on a result."
+        ))
+
+        searchFormViewCount = binding.containerSearch.childCount
     }
 
-    /** Runs the real, live three-source search + extraction (can take
-     * several real seconds -- suggest_probable_areas() does its own
-     * real Nominatim geocoding per candidate place), then renders a
-     * READ-ONLY preview of the result plus a "Save These Results"
-     * button. Nothing is written to the database until that button is
-     * tapped. */
+    private fun clearSearchResults() {
+        val extra = binding.containerSearch.childCount - searchFormViewCount
+        if (extra > 0) binding.containerSearch.removeViews(searchFormViewCount, extra)
+    }
+
     private fun runSearch(query: String) {
+        clearSearchResults()
+        lastSearchJson = null
         setLoading(true)
         lifecycleScope.launch {
             try {
                 val resultJson = withContext(Dispatchers.Default) {
                     python.getModule("historical_research_mobile")
-                        .callAttr("run_historical_research_json", query)
+                        .callAttr("run_historical_search_json", query)
                         .toString()
                 }
                 val result = JSONObject(resultJson)
-                lastCombinedEvidenceJson = result.getJSONObject("combined_evidence").toString()
-                lastSuggestionsJson = result.getJSONObject("suggestions").toString()
-                renderSearchResults(result)
+                if (result.has("error")) {
+                    binding.containerSearch.addView(plainText("Search failed: " + str(result, "error")))
+                } else {
+                    lastSearchJson = resultJson
+                    renderSearchResults(result)
+                }
             } catch (e: PyException) {
                 Toast.makeText(this@HistoricalResearchActivity, "Search failed: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@HistoricalResearchActivity, "Search failed: ${e.message}", Toast.LENGTH_LONG).show()
             } finally {
                 setLoading(false)
             }
@@ -160,73 +175,174 @@ class HistoricalResearchActivity : AppCompatActivity() {
     }
 
     private fun renderSearchResults(result: JSONObject) {
-        // Keep the question field + Search button, just clear anything
-        // rendered below a previous search (containerSearch already
-        // holds the form from renderSearchForm() -- this appends below
-        // it rather than wiping the whole tab, so re-searching doesn't
-        // lose the typed question).
-        val density = resources.displayMetrics.density
-        val evidence = result.getJSONObject("combined_evidence")
-        val suggestions = result.getJSONObject("suggestions")
-        val sourceCounts = evidence.getJSONObject("source_counts")
-        val sourceErrors = evidence.getJSONObject("source_errors")
+        val counts = result.optJSONObject("source_counts") ?: JSONObject()
+        val errors = result.optJSONObject("source_errors") ?: JSONObject()
 
         val summary = buildString {
+            append("Searched: ").append(str(result, "keyword_query"))
+            append("  (").append(str(result, "query_script")).append(")\n")
             append("Sources: ")
-            val keys = sourceCounts.keys()
+            val keys = counts.keys()
             while (keys.hasNext()) {
                 val key = keys.next()
-                append(key).append("=").append(sourceCounts.getInt(key))
-                val err = sourceErrors.optString(key, "")
-                if (err.isNotEmpty() && err != "null") append(" (error)")
+                append(key).append("=").append(counts.optInt(key))
+                if (str(errors, key).isNotEmpty()) append(" (error)")
                 if (keys.hasNext()) append(", ")
+            }
+            val ek = errors.keys()
+            while (ek.hasNext()) {
+                val key = ek.next()
+                val err = str(errors, key)
+                if (err.isNotEmpty()) append("\n  ").append(key).append(": ").append(err.take(220))
             }
         }
         binding.containerSearch.addView(plainText(summary))
 
-        val suggestedAreas = suggestions.getJSONArray("suggested_areas")
-        if (suggestedAreas.length() == 0) {
-            binding.containerSearch.addView(plainText("No paired place+distance suggestions found in this search's results. Try a different or more specific question -- short search snippets don't always contain that kind of phrasing."))
-        } else {
-            for (i in 0 until suggestedAreas.length()) {
-                val area = suggestedAreas.getJSONObject(i)
-                val anchor = area.getJSONObject("anchor")
-                val radius = area.getJSONObject("radius")
-                val sourceItem = area.getJSONObject("source_item")
-                val text = buildString {
-                    append("Suggestion #").append(i + 1).append(": ")
-                    append(anchor.optString("resolved_name", anchor.optString("query", "?"))).append("\n")
-                    append("  radius: ").append(radius.optDouble("value")).append(" ").append(radius.optString("unit")).append("\n")
-                    append("  from: ").append(sourceItem.optString("title")).append(" (").append(sourceItem.optString("source")).append(")\n")
-                    append("  context: ").append(area.optString("context").take(160))
-                }
-                binding.containerSearch.addView(plainText(text))
-            }
+        binding.containerSearch.addView(plainText(
+            "Order = the sources' own search rank, not likelihood.\n" +
+                "Tier A = Pleiades scholarly gazetteer, precise location.\n" +
+                "Tier B = Wikidata / Wikipedia (community-edited).\n" +
+                "A coordinate is where the source records the subject, not a verified archaeological position."
+        ))
+
+        val located = result.optJSONArray("located_findings") ?: JSONArray()
+        binding.containerSearch.addView(heading("Located (${located.length()})"))
+        if (located.length() == 0) {
+            binding.containerSearch.addView(plainText("No source recorded a coordinate for this search. Try the place or event name itself, in English or Persian."))
+        }
+        for (i in 0 until located.length()) {
+            val f = located.getJSONObject(i)
+            binding.containerSearch.addView(linkText(locatedFindingText(i + 1, f)))
+            addFindingButtons(f)
         }
 
-        val buttonSave = MaterialButton(this).apply {
-            text = "Save These Results"
-            setBackgroundColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_accent))
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = (12 * density).toInt() }
-            setOnClickListener { saveSearchResults() }
+        val unlocated = result.optJSONArray("unlocated_findings") ?: JSONArray()
+        if (unlocated.length() > 0) {
+            binding.containerSearch.addView(heading("Found, but no coordinate (${unlocated.length()})"))
+            val text = buildString {
+                for (i in 0 until unlocated.length()) {
+                    val f = unlocated.getJSONObject(i)
+                    append("- ").append(titleLine(f))
+                    val caveat = str(f, "caveat")
+                    if (caveat.contains("ROUGH") || caveat.contains("UNLOCATED")) {
+                        append("\n    ").append(caveat.substringAfter("archaeological position. ").take(160))
+                    }
+                    val link = firstLink(f)
+                    if (link.isNotEmpty()) append("\n    ").append(link)
+                    if (i < unlocated.length() - 1) append("\n")
+                }
+            }
+            binding.containerSearch.addView(linkText(text))
         }
-        binding.containerSearch.addView(buttonSave)
+
+        val literature = result.optJSONArray("literature") ?: JSONArray()
+        if (literature.length() > 0) {
+            binding.containerSearch.addView(heading("Literature (OpenAlex, title match only, ${literature.length()})"))
+            val text = buildString {
+                for (i in 0 until literature.length()) {
+                    val w = literature.getJSONObject(i)
+                    append("- ").append(str(w, "year")).append("  ").append(str(w, "title"))
+                    val url = str(w, "url")
+                    if (url.isNotEmpty()) append("\n    ").append(url)
+                    if (i < literature.length() - 1) append("\n")
+                }
+            }
+            binding.containerSearch.addView(linkText(text))
+        }
     }
 
-    /** Persists whatever the last real search run produced (exactly as
-     * `run_historical_research_json()` returned it, unmodified) via
-     * `save_historical_research_json()`. Refuses to run twice in a row
-     * on the same result (lastCombinedEvidenceJson/lastSuggestionsJson
-     * are cleared to null immediately after a successful save) -- a
-     * second tap without a new search first is a no-op with a plain
-     * Toast, not a silent duplicate save. */
-    private fun saveSearchResults() {
-        val evidenceJson = lastCombinedEvidenceJson
-        val suggestionsJson = lastSuggestionsJson
-        if (evidenceJson == null || suggestionsJson == null) {
-            Toast.makeText(this, "Nothing new to save -- run a search first.", Toast.LENGTH_SHORT).show()
+    private fun locatedFindingText(rank: Int, f: JSONObject): String = buildString {
+        append("#").append(rank).append(" [").append(str(f, "best_tier")).append("] ").append(titleLine(f)).append("\n")
+        val iran = if (f.isNull("in_iran")) "not recorded" else if (f.optBoolean("in_iran")) "yes" else "NO"
+        append("  Iran: ").append(iran)
+        val types = f.optJSONArray("instance_of")
+        if (types != null && types.length() > 0) {
+            val labels = mutableListOf<String>()
+            for (t in 0 until minOf(3, types.length())) labels.add(str(types.getJSONObject(t), "label"))
+            append("   type: ").append(labels.filter { it.isNotEmpty() }.joinToString(", "))
+        }
+        val date = str(f, "date")
+        if (date.isNotEmpty()) append("   date: ").append(date)
+        append("\n")
+        val coords = f.optJSONArray("coordinates") ?: JSONArray()
+        for (c in 0 until coords.length()) {
+            val co = coords.getJSONObject(c)
+            append("  ").append(str(co, "tier")).append(" ").append(str(co, "source")).append("  ")
+            append(String.format(Locale.US, "%.5f, %.5f", co.optDouble("lat"), co.optDouble("lon")))
+            if (!co.isNull("referenced")) {
+                append(if (co.optBoolean("referenced")) "  (cited)" else "  (no citation)")
+            }
+            append("\n")
+        }
+        val caveat = str(f, "caveat")
+        if (caveat.isNotEmpty()) append("  ").append(caveat).append("\n")
+        val evidence = f.optJSONArray("evidence")
+        if (evidence != null && evidence.length() > 0) {
+            val t = str(evidence.getJSONObject(0), "text")
+            if (t.isNotEmpty()) append("  \"").append(t.take(200)).append(if (t.length > 200) "...\"\n" else "\"\n")
+        }
+        val links = f.optJSONObject("links") ?: JSONObject()
+        for (k in listOf("wikidata", "pleiades", "wikipedia_en")) {
+            val u = str(links, k)
+            if (u.isNotEmpty()) append("  ").append(u).append("\n")
+        }
+        if (str(links, "wikipedia_en").isEmpty() && str(links, "wikipedia_fa").isNotEmpty()) {
+            append("  ").append(str(links, "wikipedia_fa")).append("\n")
+        }
+    }.trimEnd()
+
+    private fun titleLine(f: JSONObject): String {
+        val en = str(f, "title_en").ifEmpty { str(f, "title") }
+        val fa = str(f, "title_fa")
+        return if (fa.isNotEmpty() && fa != en) "$en / $fa" else en
+    }
+
+    private fun firstLink(f: JSONObject): String {
+        val links = f.optJSONObject("links") ?: return ""
+        for (k in listOf("wikidata", "pleiades", "wikipedia_en", "wikipedia_fa")) {
+            val u = str(links, k)
+            if (u.isNotEmpty()) return u
+        }
+        return ""
+    }
+
+    private fun addFindingButtons(f: JSONObject) {
+        val density = resources.displayMetrics.density
+        val key = str(f, "key")
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = (14 * density).toInt() }
+        }
+        val buttonSave = MaterialButton(this).apply {
+            text = "Save"
+            setBackgroundColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_surface))
+            setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_primary))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { rightMargin = (4 * density).toInt() }
+        }
+        val buttonArea = MaterialButton(this).apply {
+            text = "Wide-Area Search..."
+            setBackgroundColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_surface))
+            setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_primary))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { leftMargin = (4 * density).toInt() }
+        }
+        buttonSave.setOnClickListener { saveFinding(key, buttonSave, false) }
+        buttonArea.setOnClickListener { saveFinding(key, buttonSave, true) }
+        row.addView(buttonSave)
+        row.addView(buttonArea)
+        binding.containerSearch.addView(row)
+    }
+
+    /** Saves ONE located finding (duplicate-safe on the Python side).
+     * When thenStartJob is true, opens the Wide-Area Search dialog for
+     * the saved row afterwards. */
+    private fun saveFinding(findingKey: String, saveButton: MaterialButton, thenStartJob: Boolean) {
+        val searchJson = lastSearchJson
+        if (searchJson == null) {
+            Toast.makeText(this, "Run a search first.", Toast.LENGTH_SHORT).show()
             return
         }
         setLoading(true)
@@ -235,20 +351,45 @@ class HistoricalResearchActivity : AppCompatActivity() {
                 val grandProjectId = getGrandProjectId()
                 val resultJson = withContext(Dispatchers.Default) {
                     python.getModule("historical_research_mobile").callAttr(
-                        "save_historical_research_json",
-                        offlineDataRoot, grandProjectId, evidenceJson, suggestionsJson,
+                        "save_located_finding_json",
+                        offlineDataRoot, grandProjectId, searchJson, findingKey,
                     ).toString()
                 }
                 val result = JSONObject(resultJson)
-                val suggestionIds = result.getJSONArray("geographic_suggestion_ids")
-                Toast.makeText(
-                    this@HistoricalResearchActivity,
-                    "Saved ${suggestionIds.length()} suggestion(s).",
-                    Toast.LENGTH_LONG
-                ).show()
-                lastCombinedEvidenceJson = null
-                lastSuggestionsJson = null
-                loadSavedTab()
+                if (result.has("error")) {
+                    Toast.makeText(this@HistoricalResearchActivity, "Save failed: " + str(result, "error"), Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                saveButton.text = "Saved"
+                saveButton.isEnabled = false
+                if (!thenStartJob) {
+                    Toast.makeText(
+                        this@HistoricalResearchActivity,
+                        if (result.optBoolean("already_saved")) "Already saved earlier." else "Saved.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@launch
+                }
+                val suggestionId = str(result, "geographic_suggestion_id")
+                val primary = result.optJSONObject("primary")
+                if (suggestionId.isEmpty() || primary == null) {
+                    Toast.makeText(this@HistoricalResearchActivity, "Saved, but no suggestion row was found to start from.", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                val located = JSONObject(searchJson).optJSONArray("located_findings") ?: JSONArray()
+                var name = findingKey
+                for (i in 0 until located.length()) {
+                    val f = located.getJSONObject(i)
+                    if (str(f, "key") == findingKey) { name = titleLine(f); break }
+                }
+                val row = JSONObject().apply {
+                    put("id", suggestionId)
+                    put("kind", "LOCATED_FINDING")
+                    put("lat", primary.optDouble("lat"))
+                    put("lon", primary.optDouble("lon"))
+                    put("resolved_name", name)
+                }
+                showStartJobDialog(row)
             } catch (e: PyException) {
                 Toast.makeText(this@HistoricalResearchActivity, "Save failed: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
             } finally {
@@ -281,23 +422,6 @@ class HistoricalResearchActivity : AppCompatActivity() {
         }
     }
 
-    private fun plainText(text: String): TextView {
-        val density = resources.displayMetrics.density
-        return TextView(this).apply {
-            this.text = text
-            typeface = Typeface.MONOSPACE
-            textSize = 12f
-            setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_secondary))
-            setPadding(0, (10 * density).toInt(), 0, (10 * density).toInt())
-        }
-    }
-
-    /** Real fields per row, exactly as
-     * `list_geographic_suggestions_json()` (a thin wrapper over
-     * `grand_project_db.get_geographic_suggestions_for_project()`)
-     * returns them. A `PAIRED_SUGGESTION` row (the only kind with real
-     * lat/lon/radius) gets a "Start Wide-Area Search" button --
-     * `DISTANCE_ONLY`/`UNGROUNDED_PLACE` rows are shown read-only. */
     private fun renderSavedSuggestions(jsonText: String) {
         binding.containerSearch.visibility = View.GONE
         binding.containerSaved.visibility = View.VISIBLE
@@ -310,27 +434,33 @@ class HistoricalResearchActivity : AppCompatActivity() {
             return
         }
         if (array.length() == 0) {
-            binding.containerSaved.addView(plainText("No saved suggestions yet -- run a search and tap \"Save These Results\"."))
+            binding.containerSaved.addView(plainText("No saved suggestions yet. Run a search and tap Save on a located result."))
             return
         }
 
         val density = resources.displayMetrics.density
         for (i in 0 until array.length()) {
             val row = array.getJSONObject(i)
-            val kind = row.optString("kind")
+            val kind = str(row, "kind")
             val text = buildString {
                 append("#").append(i + 1).append("  ").append(kind).append("\n")
-                if (kind == "PAIRED_SUGGESTION") {
-                    append("  ").append(row.optString("resolved_name", row.optString("place_name"))).append("\n")
-                    append("  radius: ").append(row.optDouble("radius_value")).append(" ").append(row.optString("radius_unit")).append("\n")
+                if (kind == "LOCATED_FINDING") {
+                    append("  ").append(str(row, "resolved_name").ifEmpty { str(row, "place_name") }).append("\n")
+                    append("  ").append(String.format(Locale.US, "%.5f, %.5f", row.optDouble("lat"), row.optDouble("lon"))).append("\n")
+                } else if (kind == "PAIRED_SUGGESTION") {
+                    append("  ").append(str(row, "resolved_name").ifEmpty { str(row, "place_name") }).append("\n")
+                    append("  radius: ").append(row.optDouble("radius_value")).append(" ").append(str(row, "radius_unit")).append("\n")
                 }
-                val context = row.optString("context", "")
-                if (context.isNotEmpty()) append("  context: ").append(context.take(140)).append("\n")
-                append("  status: ").append(row.optString("status"))
+                val context = str(row, "context")
+                val limit = if (kind == "LOCATED_FINDING") 600 else 140
+                if (context.isNotEmpty()) append("  context: ").append(context.take(limit)).append("\n")
+                append("  status: ").append(str(row, "status"))
             }
             binding.containerSaved.addView(plainText(text))
 
-            if (kind == "PAIRED_SUGGESTION" && !row.isNull("lat") && !row.isNull("lon")) {
+            val startable = (kind == "PAIRED_SUGGESTION" || kind == "LOCATED_FINDING") &&
+                !row.isNull("lat") && !row.isNull("lon")
+            if (startable) {
                 val buttonStart = MaterialButton(this).apply {
                     this.text = "Start Wide-Area Search"
                     setBackgroundColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_surface))
@@ -345,26 +475,20 @@ class HistoricalResearchActivity : AppCompatActivity() {
         }
     }
 
-    /** AOI mechanism (c): prompts for a job title and tile size, then
-     * calls `wide_area_search_mobile.create_wide_area_search_job_from_
-     * suggestion_json()` with this suggestion's own real lat/lon/
-     * radius -- turning a reviewed suggestion directly into a wide-area
-     * search job. Converts radius_unit="miles" to km first, since that
-     * function's own real parameter is radius_km specifically (the
-     * suggestion row preserves whatever unit the original source text
-     * used, per suggest_probable_areas()'s own real parsing -- this is
-     * the one place that unit choice actually needs to become a single
-     * consistent number). The created job then shows up in Wide-Area
-     * Search's own Jobs tab like any other job -- this dialog does not
-     * duplicate that screen's own start/monitor UI. */
+    /** AOI mechanism (c): asks for job title, RADIUS and tile size, then
+     * calls create_wide_area_search_job_from_suggestion_json(). A
+     * LOCATED_FINDING row has no radius, so the radius field starts empty
+     * and must be typed; a legacy PAIRED_SUGGESTION row pre-fills its
+     * stored radius (miles converted to km). */
     private fun showStartJobDialog(suggestionRow: JSONObject) {
         val density = resources.displayMetrics.density
         val lat = suggestionRow.optDouble("lat")
         val lon = suggestionRow.optDouble("lon")
-        var radiusKm = suggestionRow.optDouble("radius_value", 1.0)
-        val unit = suggestionRow.optString("radius_unit", "km")
-        if (unit.equals("miles", ignoreCase = true)) {
-            radiusKm *= 1.60934
+        var prefillRadiusKm: Double? = null
+        if (!suggestionRow.isNull("radius_value") && suggestionRow.has("radius_value")) {
+            var r = suggestionRow.optDouble("radius_value")
+            if (str(suggestionRow, "radius_unit").equals("miles", ignoreCase = true)) r *= 1.60934
+            if (!r.isNaN() && r > 0) prefillRadiusKm = r
         }
 
         val container = LinearLayout(this).apply {
@@ -374,7 +498,18 @@ class HistoricalResearchActivity : AppCompatActivity() {
         }
         val inputTitle = EditText(this).apply {
             hint = "Job title"
-            setText(suggestionRow.optString("resolved_name", suggestionRow.optString("place_name", "Suggestion-derived search")))
+            setText(str(suggestionRow, "resolved_name").ifEmpty { str(suggestionRow, "place_name").ifEmpty { "Suggestion-derived search" } })
+            setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_primary))
+        }
+        val info = TextView(this).apply {
+            text = String.format(Locale.US, "Center: %.5f, %.5f", lat, lon)
+            setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_secondary))
+            textSize = 12f
+            setPadding(0, (8 * density).toInt(), 0, (8 * density).toInt())
+        }
+        val inputRadius = EditText(this).apply {
+            hint = "Radius (km), your choice"
+            if (prefillRadiusKm != null) setText(String.format(Locale.US, "%.2f", prefillRadiusKm))
             setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_primary))
         }
         val inputTileSize = EditText(this).apply {
@@ -382,14 +517,9 @@ class HistoricalResearchActivity : AppCompatActivity() {
             setText("1000")
             setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_primary))
         }
-        val info = TextView(this).apply {
-            text = "Center: %.4f, %.4f  --  radius %.2f km".format(lat, lon, radiusKm)
-            setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_secondary))
-            textSize = 12f
-            setPadding(0, (8 * density).toInt(), 0, (8 * density).toInt())
-        }
         container.addView(inputTitle)
         container.addView(info)
+        container.addView(inputRadius)
         container.addView(inputTileSize)
 
         AlertDialog.Builder(this)
@@ -397,9 +527,10 @@ class HistoricalResearchActivity : AppCompatActivity() {
             .setView(container)
             .setPositiveButton("Create Job") { _, _ ->
                 val title = inputTitle.text.toString().trim()
+                val radiusKm = inputRadius.text.toString().trim().toDoubleOrNull()
                 val tileSize = inputTileSize.text.toString().trim().toDoubleOrNull()
-                if (title.isEmpty() || tileSize == null || tileSize <= 0) {
-                    Toast.makeText(this, "Enter a title and a valid tile size.", Toast.LENGTH_LONG).show()
+                if (title.isEmpty() || radiusKm == null || radiusKm <= 0 || tileSize == null || tileSize <= 0) {
+                    Toast.makeText(this, "Enter a title, a radius in km and a valid tile size.", Toast.LENGTH_LONG).show()
                     return@setPositiveButton
                 }
                 createJobFromSuggestion(suggestionRow, title, lat, lon, radiusKm, tileSize)
@@ -420,7 +551,7 @@ class HistoricalResearchActivity : AppCompatActivity() {
                         "create_wide_area_search_job_from_suggestion_json",
                         offlineDataRoot, grandProjectId, title, lat, lon, radiusKm,
                         com.chaquo.python.Kwarg("tile_size_m", tileSizeM),
-                        com.chaquo.python.Kwarg("geographic_suggestion_id", suggestionRow.optString("id")),
+                        com.chaquo.python.Kwarg("geographic_suggestion_id", str(suggestionRow, "id")),
                     ).toString()
                 }
                 val result = JSONObject(jsonText)
@@ -444,6 +575,41 @@ class HistoricalResearchActivity : AppCompatActivity() {
 
     // =========================== SHARED ===========================
 
+    /** org.json returns the text "null" for JSON null; this returns "". */
+    private fun str(obj: JSONObject, key: String): String =
+        if (!obj.has(key) || obj.isNull(key)) "" else obj.optString(key, "")
+
+    private fun plainText(text: String): TextView {
+        val density = resources.displayMetrics.density
+        return TextView(this).apply {
+            this.text = text
+            typeface = Typeface.MONOSPACE
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_text_secondary))
+            setPadding(0, (10 * density).toInt(), 0, (10 * density).toInt())
+        }
+    }
+
+    /** Same as plainText, with web links made tappable. */
+    private fun linkText(text: String): TextView {
+        val tv = plainText(text)
+        tv.setTextColor(ContextCompat.getColor(this, R.color.ariyan_text_primary))
+        Linkify.addLinks(tv, Linkify.WEB_URLS)
+        tv.movementMethod = LinkMovementMethod.getInstance()
+        return tv
+    }
+
+    private fun heading(text: String): TextView {
+        val density = resources.displayMetrics.density
+        return TextView(this).apply {
+            this.text = text
+            textSize = 15f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(ContextCompat.getColor(this@HistoricalResearchActivity, R.color.ariyan_accent))
+            setPadding(0, (14 * density).toInt(), 0, (2 * density).toInt())
+        }
+    }
+
     private suspend fun getGrandProjectId(): String = withContext(Dispatchers.Default) {
         python.getModule("grand_project_sync")
             .callAttr("get_or_create_default_grand_project", offlineDataRoot)
@@ -461,4 +627,3 @@ class HistoricalResearchActivity : AppCompatActivity() {
         binding.buttonShowSaved.isEnabled = !loading
     }
 }
-
