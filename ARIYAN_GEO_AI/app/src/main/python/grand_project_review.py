@@ -114,6 +114,18 @@ CHANGELOG
   The f3-v2 numbers themselves (250 m, 10 deg, 90 % coverage) are NOT
   copied or changed here: the rule reads the label terrain_context_labels
   stored, so there is one definition only.
+- 2026-10-02 (READ-ONLY Hillside check, exploratory). On 2026-10-01 the
+  user found a Hillside-rejected f89dfe candidate (34.525311, 48.059315)
+  that looks like a tell on satellite imagery: Shape Mound, 250 m median
+  slope 11.07 deg, but only 0.9 deg within 2 km -- the steepness came
+  from its own flanks, not from a hillside. hillside_check_for_job()
+  counts how common that "flank pattern" is among a job's f3-v2
+  Hillside = Yes candidates. It READS ONLY: no row is written, no status
+  changes, no rule changes. The 2 deg cut-off was chosen AFTER seeing
+  that one case, so these numbers are exploration, not a test; any rule
+  built on them must be pre-registered and tested first (as f3-v2 was).
+  list_job_target() adds the result as "hillside_check" (text) to every
+  Mound / tell job.
 """
 
 from __future__ import annotations
@@ -550,13 +562,120 @@ def _current_job_target(conn) -> Dict[str, Dict[str, Any]]:
 
 
 def list_job_target(db_root: str) -> List[Dict[str, Any]]:
-    """Current target of every job that has ever been set."""
+    """Current target of every job that has ever been set. Mound / tell
+    jobs also carry "hillside_check": the read-only text of
+    hillside_check_for_job() (2026-10-02, see CHANGELOG)."""
     conn = _connect(db_root)
     try:
         out = sorted(_current_job_target(conn).values(), key=lambda r: r["recorded_at"])
         for r in out:
             r["target_label"] = TARGET_LABELS.get(r["target"], r["target"])
+            if r["target"] == TARGET_MOUND_TELL:
+                try:
+                    r["hillside_check"] = _hillside_check(conn, r["job_id"])["text"]
+                except Exception as e:  # never let the check break the dialog
+                    r["hillside_check"] = f"Hillside check could not be read: {e}"
         return out
+    finally:
+        conn.close()
+
+
+# Exploratory only (see the 2026-10-02 CHANGELOG entry). NOT a rule.
+_FLANK_SHAPE = "Mound"
+_FLANK_MAX_2KM_SLOPE_DEG = 2.0
+_FLANK_LIST_MAX = 15
+_SLOPE_BUCKETS = ((0.0, 2.0, "<2"), (2.0, 5.0, "2-5"), (5.0, 10.0, "5-10"), (10.0, 1e9, ">=10"))
+
+
+def _hillside_check(conn, job_id: str) -> Dict[str, Any]:
+    """Read-only breakdown of one job's f3-v2 Hillside = Yes candidates."""
+    rows = conn.execute(
+        """
+        SELECT c.id, c.lat, c.lon, c.status
+        FROM candidate c
+        JOIN wide_area_search_tile t ON t.investigation_id = c.investigation_id
+        WHERE t.job_id = ?
+        """,
+        (job_id,),
+    ).fetchall()
+    cands = {r["id"]: dict(r) for r in rows}
+    newest: Dict[str, Dict[str, Any]] = {}
+    for r in conn.execute(
+        "SELECT candidate_id, detail_json FROM evidence_link WHERE evidence_type = ? ORDER BY id",
+        (_TERRAIN_EVIDENCE_TYPE,),
+    ):
+        cid = r["candidate_id"]
+        if cid not in cands:
+            continue
+        try:
+            d = json.loads(r["detail_json"] or "{}")
+        except ValueError:
+            continue
+        if d.get("method_version") == _TERRAIN_RULE_METHOD:
+            newest[cid] = d
+    latest = _latest_reviews(conn)
+    user_owned = _user_owned_ids(conn)
+
+    yes = {cid: d for cid, d in newest.items() if d.get("hillside") == "Yes"}
+    by_rule = [cid for cid in yes
+               if (latest.get(cid) or {}).get("reason", "").startswith(AUTO_REASON_PREFIX + "Hillside")]
+    shapes: Dict[str, int] = {}
+    buckets = {label: 0 for _, _, label in _SLOPE_BUCKETS}
+    no_2km = 0
+    flank = []
+    for cid, d in yes.items():
+        shapes[d.get("shape", "?")] = shapes.get(d.get("shape", "?"), 0) + 1
+        s2 = d.get("median_slope_within_2km_deg")
+        if not isinstance(s2, (int, float)):
+            no_2km += 1
+            continue
+        for lo, hi, label in _SLOPE_BUCKETS:
+            if lo <= s2 < hi:
+                buckets[label] += 1
+                break
+        if d.get("shape") == _FLANK_SHAPE and s2 < _FLANK_MAX_2KM_SLOPE_DEG:
+            flank.append((cid, d))
+    flank.sort(key=lambda x: -(x[1].get("peak_local_relief_m") or 0))
+
+    lines = [
+        "  Hillside check (read-only, exploratory):",
+        f"  f3-v2 labels {len(newest)} of {len(cands)} candidates; Hillside = Yes {len(yes)}",
+        f"  rejected now by the Hillside rule {len(by_rule)}; Yes but user-reviewed "
+        f"{len([c for c in yes if c in user_owned])}",
+        "  Yes by shape: " + " / ".join(f"{k} {v}" for k, v in sorted(shapes.items(), key=lambda kv: -kv[1])),
+        "  Yes by 2 km median slope (deg): " + " / ".join(f"{k} {v}" for k, v in buckets.items())
+        + (f" / not measured {no_2km}" if no_2km else ""),
+        f"  FLANK PATTERN (Mound AND 2 km slope < {_FLANK_MAX_2KM_SLOPE_DEG:g} deg): {len(flank)}",
+    ]
+    for cid, d in flank[:_FLANK_LIST_MAX]:
+        c = cands[cid]
+        st = (STATUS_LABELS.get(c["status"], c["status"])
+              + (" (auto)" if cid not in user_owned and c["status"] == STATUS_REJECTED else ""))
+        s250 = d.get("median_slope_within_250m_deg")
+        rel = d.get("peak_local_relief_m")
+        lines.append(
+            f"    {cid[:8]}  {c['lat']:.6f}, {c['lon']:.6f}  "
+            + (f"250m {s250:.1f} deg  " if isinstance(s250, (int, float)) else "")
+            + (f"relief {rel:.1f} m  " if isinstance(rel, (int, float)) else "")
+            + f"2km {d['median_slope_within_2km_deg']:.1f} deg  [{st}]"
+        )
+    if len(flank) > _FLANK_LIST_MAX:
+        lines.append(f"    ... and {len(flank) - _FLANK_LIST_MAX} more (highest relief listed first)")
+    lines.append(f"  Note: the {_FLANK_MAX_2KM_SLOPE_DEG:g} deg cut was chosen after seeing one case -- "
+                 "exploration, not a test. Nothing was changed.")
+    return {
+        "job_id": job_id, "n_candidates": len(cands), "n_f3v2": len(newest),
+        "n_hillside_yes": len(yes), "n_rejected_by_rule": len(by_rule),
+        "shapes": shapes, "slope_2km_buckets": buckets, "n_flank_pattern": len(flank),
+        "flank_pattern_ids": [cid for cid, _ in flank], "text": "\n".join(lines),
+    }
+
+
+def hillside_check_for_job(db_root: str, job_ref: str) -> Dict[str, Any]:
+    """Read-only Hillside breakdown for one job (see CHANGELOG 2026-10-02)."""
+    conn = _connect(db_root)
+    try:
+        return _hillside_check(conn, _resolve_id(conn, "wide_area_search_job", job_ref))
     finally:
         conn.close()
 
@@ -910,6 +1029,10 @@ def set_job_target_json(db_root: str, job_ref: str, target: str, reason: str) ->
 
 def list_job_target_json(db_root: str) -> str:
     return _json_call(list_job_target, db_root)
+
+
+def hillside_check_for_job_json(db_root: str, job_ref: str) -> str:
+    return _json_call(hillside_check_for_job, db_root, job_ref)
 
 
 def review_summary_for_project_json(db_root: str, grand_project_id: str) -> str:
