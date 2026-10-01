@@ -147,3 +147,28 @@ def list_geographic_suggestions_json(db_root: str, grand_project_id: str) -> str
     suggestion_json()`)."""
     rows = db.get_geographic_suggestions_for_project(db_root, grand_project_id)
     return json.dumps(rows)
+
+
+def save_located_finding_json(
+    db_root: str,
+    grand_project_id: str,
+    search_json: str,
+    finding_key: str,
+    hypothesis_id: Optional[str] = None,
+) -> str:
+    """ADDED 2026-10-01 (Historical Search rebuild, step 2): saves ONE
+    located finding the user chose, from the SAME result JSON
+    `run_historical_search_json()` returned (round-tripped through Kotlin
+    unmodified), via `grand_project_historical_sync.record_located_finding()`.
+    Returns {"historical_finding_id", "geographic_suggestion_id",
+    "already_saved", "primary"} or {"error": "..."} -- never raises, so a
+    save failure can never wipe the results already on screen."""
+    try:
+        search_result = json.loads(search_json)
+        result = sync.record_located_finding(
+            db_root, grand_project_id, search_result, finding_key,
+            hypothesis_id=hypothesis_id,
+        )
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": "%s: %s" % (type(exc).__name__, exc)}, ensure_ascii=False)
