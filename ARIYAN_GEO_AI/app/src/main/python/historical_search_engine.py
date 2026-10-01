@@ -32,7 +32,8 @@ SOURCES (all keyless, all real HTTP calls, nothing synthetic):
 TIERS (fixed definitions, shown with every coordinate; no confidence
 percentages anywhere -- none can be honestly computed here):
     A = coordinate from a specialist scholarly gazetteer record that
-        the gazetteer itself marks as LOCATED (Pleiades). OpenAlex works
+        the gazetteer itself marks as LOCATED with PRECISE location
+        precision (Pleiades; rough-only points are not used). OpenAlex works
         are also tier A, but as literature-exists pointers only.
     B = coordinate from a community-edited encyclopedic source
         (Wikidata P625 or the Wikipedia article's own coordinate).
@@ -380,8 +381,18 @@ def _pleiades_place(pid, budget):
                          for f in (d.get("features") or [])} - {None})
     rp = d.get("reprPoint")
     coord = None
+    rough_point = None
     if not unlocated and isinstance(rp, list) and len(rp) == 2:
-        coord = (float(rp[1]), float(rp[0]))  # Pleiades reprPoint is [lon, lat]
+        point = (float(rp[1]), float(rp[0]))  # Pleiades reprPoint is [lon, lat]
+        # ROUGH-ONLY RULE (found on-device 2026-10-01: Pleiades 926388
+        # "Untitled" dam sat at exactly 30.5, 53.5 with precision
+        # "rough"): a point Pleiades itself calls rough is NOT used as a
+        # location -- kept as rough_point for the record, finding goes to
+        # unlocated_findings. Only a "precise" location counts as tier A.
+        if "precise" in precisions:
+            coord = point
+        else:
+            rough_point = point
     return {
         "pleiades_id": str(pid),
         "title": d.get("title"),
@@ -390,6 +401,7 @@ def _pleiades_place(pid, budget):
         "unlocated": unlocated,
         "location_precision": precisions,
         "coordinate": coord,
+        "rough_point": rough_point,
         "url": d.get("uri") or ("https://pleiades.stoa.org/places/%s" % pid),
         "review_state": d.get("review_state"),
     }
@@ -696,6 +708,9 @@ def search_historical(query, max_results=6, max_pleiades=5, max_literature=5,
             parts.append("Country not recorded.")
         if f["pleiades"] and f["pleiades"]["unlocated"]:
             parts.append("Pleiades marks this place UNLOCATED.")
+        elif f["pleiades"] and f["pleiades"].get("rough_point"):
+            parts.append("Pleiades gives only a ROUGH position (%.4f, %.4f); not used as a location."
+                         % f["pleiades"]["rough_point"])
         f["caveat"] = " ".join(parts)
         (located if cs else unlocated).append(f)
 
@@ -706,7 +721,7 @@ def search_historical(query, max_results=6, max_pleiades=5, max_literature=5,
         "query_script": script,
         "retrieval_date": retrieval_date,
         "tier_definitions": {
-            "A": "specialist scholarly gazetteer record marked located (Pleiades); "
+            "A": "specialist scholarly gazetteer record marked located, precise (Pleiades); "
                  "OpenAlex works = literature exists only",
             "B": "community-edited encyclopedic coordinate (Wikidata P625 / Wikipedia article)",
             "C": "inferred from free text or general web search (not produced by this engine)",
