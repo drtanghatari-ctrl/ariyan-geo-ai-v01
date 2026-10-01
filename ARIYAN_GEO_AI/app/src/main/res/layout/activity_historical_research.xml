@@ -87,11 +87,11 @@
             android:visibility="gone" />
 
         <!-- Every saved geographic_suggestion row for this project,
-             built entirely in code by renderSavedSuggestions(). A
+             built entirely in code by renderSavedSuggestions(). Only a
              LOCATED_FINDING row (Historical Search rebuild, 2026-10-01)
-             or a legacy PAIRED_SUGGESTION row gets a "Start Wide-Area
-             Search" button (AOI mechanism (c)); DISTANCE_ONLY and
-             UNGROUNDED_PLACE rows are shown read-only. -->
+             gets a "Start Wide-Area Search" button (AOI mechanism (c));
+             legacy PAIRED_SUGGESTION, DISTANCE_ONLY and UNGROUNDED_PLACE
+             rows are shown read-only. -->
         <LinearLayout
             android:id="@+id/containerSaved"
             android:layout_width="match_parent"
