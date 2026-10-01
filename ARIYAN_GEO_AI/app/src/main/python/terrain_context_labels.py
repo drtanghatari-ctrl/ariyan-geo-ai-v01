@@ -138,6 +138,7 @@ import grand_project_review as review
 import known_sites
 import offline_country_registry as countries
 import offline_dem_store
+import provenance_ledger
 
 METHOD_VERSION = "f3-v2"
 EVIDENCE_TYPE = "TERRAIN_CONTEXT"
@@ -574,7 +575,7 @@ def label_job(db_root: str, job_ref: str) -> Dict[str, Any]:
     finally:
         conn.close()
 
-    new_rows: List[Tuple[str, Dict[str, Any]]] = []
+    new_rows: List[Tuple[str, Dict[str, Any], List[Dict[str, Any]]]] = []
     failures: Dict[str, int] = {}
     labels: Dict[str, Dict[str, Any]] = dict(existing)
     dem_hashes: Dict[str, str] = {}
@@ -611,7 +612,10 @@ def label_job(db_root: str, job_ref: str) -> Dict[str, Any]:
                 detail[k] = res[k]
         detail["dem_files"] = ["%s sha256:%s" % (os.path.basename(p), dem_hashes[p][:16]) for p in paths]
         detail["parameters"] = params
-        new_rows.append((c["id"], detail))
+        # PHASE 4a: the exact DEM files behind this label, for the ledger.
+        sources = [{"kind": "DEM", "type": "FILE", "path": p, "name": os.path.basename(p),
+                    "sha256": dem_hashes[p]} for p in paths]
+        new_rows.append((c["id"], detail, sources))
         labels[c["id"]] = detail
 
     if new_rows:
@@ -620,10 +624,16 @@ def label_job(db_root: str, job_ref: str) -> Dict[str, Any]:
             db.initialize_schema(conn)
             now = db._now_iso()
             with conn:
-                conn.executemany(
-                    "INSERT INTO evidence_link (candidate_id, evidence_type, relation, detail_json, recorded_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    [(cid, EVIDENCE_TYPE, "neutral", json.dumps(d), now) for cid, d in new_rows])
+                for cid, d, sources in new_rows:
+                    dj = json.dumps(d)
+                    cur = conn.execute(
+                        "INSERT INTO evidence_link (candidate_id, evidence_type, relation, detail_json, recorded_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (cid, EVIDENCE_TYPE, "neutral", dj, now))
+                    # PHASE 4a: ledger record in the same transaction; never raises.
+                    provenance_ledger.record_evidence(
+                        conn, cur.lastrowid, (cid, EVIDENCE_TYPE, "neutral", dj, now),
+                        sources=sources, method_version=METHOD_VERSION)
         finally:
             conn.close()
 
