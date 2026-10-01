@@ -77,6 +77,14 @@ chaquopy {
         // against (see ariyan_core README / test suite).
         version = "3.10"
 
+        // PHASE 4a (provenance ledger): ship the app's own .py source files
+        // instead of compiled .pyc, so the ledger's per-file MD5 is the MD5
+        // of the exact same file on GitHub. Costs a one-time compile on the
+        // phone the first time each module is imported.
+        pyc {
+            src = false
+        }
+
         pip {
             // numpy: required by the whole pipeline (np_ops.py etc).
             // requests: used by dem_source_mobile.py's real OpenTopography
