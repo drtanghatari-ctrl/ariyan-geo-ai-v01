@@ -1228,8 +1228,67 @@ appendReviewSection(sb, detail)
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener { showProvenanceCheckStart() }
         }
+        // Phase 5a calib-v1 bench (added 2026-10-02): frozen, read-only.
+        val benchButton = MaterialButton(this).apply {
+            text = "Calib bench..."
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = (8 * density).toInt() }
+            setOnClickListener { showCalibBenchStart() }
+        }
         bar3.addView(provenanceButton)
+        bar3.addView(benchButton)
         binding.containerCandidateRows.addView(bar3)
+    }
+
+    /** Phase 5a (added 2026-10-02): runs calib_bench.py on its three fixed
+     * bench jobs after one confirmation. Read-only apart from one
+     * CALIBRATION_BENCH timeline event; adopts nothing. */
+    private fun showCalibBenchStart() {
+        AlertDialog.Builder(this)
+            .setTitle("Calibration bench (calib-v1)")
+            .setMessage(
+                "Runs the frozen bench once on jobs 32c858 + 32d423 (derivation) and f43d36 (hold-out). " +
+                    "It chooses a z-score threshold on the derivation jobs and judges it on the hold-out. " +
+                    "Changes nothing; the verdict is written to the timeline. Run now?"
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Run") { _, _ ->
+                setLoading(true)
+                lifecycleScope.launch {
+                    try {
+                        val jsonText = withContext(Dispatchers.Default) {
+                            python.getModule("grand_project_query_mobile")
+                                .callAttr("run_calib_bench_json", offlineDataRoot).toString()
+                        }
+                        val result = JSONObject(jsonText)
+                        if (result.has("error")) {
+                            AlertDialog.Builder(this@GrandProjectActivity)
+                                .setTitle("Bench refused")
+                                .setMessage(result.optString("error"))
+                                .setPositiveButton("Close", null)
+                                .show()
+                        } else {
+                            AlertDialog.Builder(this@GrandProjectActivity)
+                                .setTitle("Bench: " + result.optString("verdict"))
+                                .setMessage(result.optString("report_text"))
+                                .setPositiveButton("Close", null)
+                                .show()
+                        }
+                    } catch (e: PyException) {
+                        Toast.makeText(
+                            this@GrandProjectActivity,
+                            "Bench failed: ${cleanErrorMessage(e.message)}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } catch (e: Exception) {
+                        Toast.makeText(this@GrandProjectActivity, "Bench failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    } finally {
+                        setLoading(false)
+                    }
+                }
+            }
+            .show()
     }
 
     /** Phase 4b (added 2026-10-02): provenance verdict for this candidate's
