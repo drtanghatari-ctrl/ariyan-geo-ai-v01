@@ -67,6 +67,26 @@ this session (same tile object reused across repeated calls for the
 same path) has been reasoned through but not yet re-run against that
 same sandbox fixture -- an honest gap to close alongside the on-device
 retest this fix is going out for.
+
+DEGREE-SEAM FIX (2026-10-02, ods-seam-v1, found on device by job
+"calib Kangavar v1"): Copernicus GLO-30 tiles are PixelIsPoint
+(GTRasterTypeGeoKey = 2, confirmed on the real N34_E047 file): pixel
+(0,0) is CENTRED on the tile's west/north degree line, so a 1-arcsec
+tile's last column is centred half a pixel short of the east degree
+line and its last row half a pixel short of the south degree line. A
+point inside that half-pixel strip (~13 m) is floor()-assigned to this
+tile but rounds to column 3600 / row 3600 -- outside the file -- and
+get_offline_elevation() returned None. Because fetch_offline_dem() is
+all-or-nothing, one such column of sample points sent the whole tile to
+a live fetch (14 of 126 Kangavar tiles, "50 of 2500 DEM grid points").
+The point's true nearest pixel is the FIRST column of the east
+neighbour / FIRST row of the south neighbour tile, so on a None from
+the floor() tile this function now asks those neighbours (east, south,
+south-east) with the SAME nearest-pixel rule. Values elsewhere are
+unchanged (no shift, no interpolation); if the neighbour file isn't
+downloaded either, the result is still None, never a guess. Neighbour
+reads go through _get_cached_tile(), so the provenance ledger records
+whichever file actually supplied the value.
 """
 
 from __future__ import annotations
@@ -145,5 +165,18 @@ def get_offline_elevation(storage_folder: str, offline_data_root: str, lat: floa
     path = local_tile_path(storage_folder, offline_data_root, lat, lon)
     if not os.path.isfile(path):
         return None
-    tile = _get_cached_tile(path)
-    return tile.get_elevation(lon, lat)
+    value = _get_cached_tile(path).get_elevation(lon, lat)
+    if value is not None:
+        return value
+    # Degree-seam fallback (see module docstring, DEGREE-SEAM FIX).
+    lat0 = math.floor(lat)
+    lon0 = math.floor(lon)
+    for dlat, dlon in ((0, 1), (-1, 0), (-1, 1)):
+        npath = local_tile_path(storage_folder, offline_data_root,
+                                lat0 + dlat + 0.5, lon0 + dlon + 0.5)
+        if not os.path.isfile(npath):
+            continue
+        value = _get_cached_tile(npath).get_elevation(lon, lat)
+        if value is not None:
+            return value
+    return None
