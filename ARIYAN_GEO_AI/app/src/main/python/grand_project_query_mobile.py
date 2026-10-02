@@ -85,7 +85,19 @@ def list_candidates_json(db_root: str, grand_project_id: str) -> str:
         jobs = {j["id"]: j for j in db.list_wide_area_search_jobs_for_project(db_root, grand_project_id)}
     except Exception:
         jobs = {}
+    # ADDED 2026-10-02 (Phase 5b calib-v1): label only. Extra key
+    # calib_label is set when an adopted calibration profile is active and
+    # the row's |DEM z-score| meets its threshold, else null. Status,
+    # confidence and reviews are untouched. A failure never breaks the list.
+    try:
+        import calib_profile
+        profile = calib_profile.active_profile(db_root)
+    except Exception:
+        calib_profile, profile = None, None
     for row in rows:
+        row["calib_label"] = (calib_profile.LABEL_TEXT
+                              if profile is not None and calib_profile.is_strong(row.get("score"), profile)
+                              else None)
         row.update(summary.get(row["id"], {}))
         job = jobs.get(row.get("job_id"))
         row["job_title"] = job.get("title") if job else None
@@ -317,3 +329,19 @@ def check_job_provenance_json(db_root: str, job_ref: str) -> str:
 def run_calib_bench_json(db_root: str) -> str:
     import calib_bench
     return calib_bench.run_bench_json(db_root)
+
+
+# Phase 5b/5c calibration profile (added 2026-10-02). See calib_profile.py.
+def calib_profile_report_json(db_root: str, grand_project_id: str) -> str:
+    import calib_profile
+    return calib_profile.profile_report_json(db_root, grand_project_id)
+
+
+def calib_profile_adopt_json(db_root: str, grand_project_id: str, approval_note: str) -> str:
+    import calib_profile
+    return calib_profile.adopt_calib_v1_json(db_root, grand_project_id, approval_note)
+
+
+def calib_profile_revoke_json(db_root: str, grand_project_id: str, reason: str) -> str:
+    import calib_profile
+    return calib_profile.revoke_json(db_root, grand_project_id, reason)
