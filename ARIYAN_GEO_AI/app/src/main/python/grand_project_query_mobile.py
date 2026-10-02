@@ -310,3 +310,10 @@ def label_job_terrain_json(db_root: str, job_ref: str) -> str:
 def check_job_provenance_json(db_root: str, job_ref: str) -> str:
     import provenance_check
     return provenance_check.check_job_json(db_root, job_ref)
+
+
+# Phase 5a calib-v1 bench (added 2026-10-02): frozen, read-only threshold
+# test on the three fixed bench jobs. See calib_bench.py.
+def run_calib_bench_json(db_root: str) -> str:
+    import calib_bench
+    return calib_bench.run_bench_json(db_root)
