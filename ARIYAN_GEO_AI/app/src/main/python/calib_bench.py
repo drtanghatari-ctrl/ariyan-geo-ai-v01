@@ -77,6 +77,15 @@ class BenchError(Exception):
 
 
 def _file_md5() -> str:
+    """MD5 of this file's own bytes. On the phone Chaquopy serves modules
+    from inside the APK (there is no file on disk), so read through the
+    module loader first, exactly as provenance_ledger._module_bytes()."""
+    loader = globals().get("__loader__")
+    if loader is not None and hasattr(loader, "get_data"):
+        try:
+            return hashlib.md5(loader.get_data(__file__)).hexdigest()
+        except Exception:
+            pass
     with open(os.path.abspath(__file__), "rb") as fh:
         return hashlib.md5(fh.read()).hexdigest()
 
