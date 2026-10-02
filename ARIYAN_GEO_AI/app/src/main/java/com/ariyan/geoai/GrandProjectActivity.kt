@@ -254,6 +254,10 @@ class GrandProjectActivity : AppCompatActivity() {
 
     private fun rankComparator(): Comparator<JSONObject> =
         compareByDescending<JSONObject> { c ->
+            // Phase 5b (2026-10-02): optional calib-v1-first ordering; off
+            // = the original order exactly (every row ties here).
+            if (calibStrongFirst && isCalibStrong(c)) 1 else 0
+        }.thenByDescending { c ->
             if (c.isNull("confidence_numeric")) -1.0 else c.optDouble("confidence_numeric", -1.0)
         }.thenByDescending { c ->
             if (c.isNull("score")) -1.0 else Math.abs(c.optDouble("score", 0.0))
@@ -639,6 +643,10 @@ class GrandProjectActivity : AppCompatActivity() {
             val lastReason = row.optString("last_review_reason", "")
             if (lastReason.isNotEmpty() && lastReason != "null") {
                 append("\nreview: ").append(lastReason)
+            }
+            // Phase 5b (2026-10-02): calib-v1 label, display only.
+            if (isCalibStrong(row)) {
+                append("\n").append(row.optString("calib_label"))
             }
             // F1 Known-Site Layer (2026-09-24): gazetteer context, not evidence.
             val knownSiteText = row.optString("known_site_text", "")
@@ -1239,6 +1247,123 @@ appendReviewSection(sb, detail)
         bar3.addView(provenanceButton)
         bar3.addView(benchButton)
         binding.containerCandidateRows.addView(bar3)
+
+        // Phase 5b calib-v1 (added 2026-10-02): profile screen + sort toggle.
+        // Label and sort only; no data is changed by either button.
+        val bar4 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding((8 * density).toInt(), 0, (8 * density).toInt(), (4 * density).toInt())
+        }
+        val profileButton = MaterialButton(this).apply {
+            text = "Calib profile..."
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { showCalibProfile() }
+        }
+        val sortButton = MaterialButton(this).apply {
+            text = if (calibStrongFirst) "Sort: calib-v1 first" else "Sort: confidence"
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = (8 * density).toInt() }
+            setOnClickListener {
+                calibStrongFirst = !calibStrongFirst
+                lastCandidatesJson?.let { renderCandidateRows(it) }
+            }
+        }
+        bar4.addView(profileButton)
+        bar4.addView(sortButton)
+        binding.containerCandidateRows.addView(bar4)
+    }
+
+    /** Phase 5b (added 2026-10-02): when true, candidates carrying the
+     * calib-v1 label are listed first inside each group. Display only. */
+    private var calibStrongFirst = false
+
+    private fun isCalibStrong(row: JSONObject): Boolean {
+        val label = row.optString("calib_label", "")
+        return label.isNotEmpty() && label != "null"
+    }
+
+    /** Phase 5b/5c profile screen: shows the active profile (or the bench
+     * result that could be adopted), the outcome counter and suggestion
+     * kinds. Adopt and Revoke each ask for a written reason. */
+    private fun showCalibProfile() {
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val grandProjectId = getGrandProjectId()
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr("calib_profile_report_json", offlineDataRoot, grandProjectId).toString()
+                }
+                val r = JSONObject(jsonText)
+                if (r.has("error")) {
+                    Toast.makeText(this@GrandProjectActivity, r.optString("error"), Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                val builder = AlertDialog.Builder(this@GrandProjectActivity)
+                    .setTitle("Calibration profile")
+                    .setMessage(r.optString("report_text"))
+                    .setNegativeButton("Close", null)
+                if (r.optBoolean("active")) {
+                    builder.setPositiveButton("Revoke...") { _, _ ->
+                        askCalibReason("Revoke calib-v1", "Why are you revoking it?", "calib_profile_revoke_json")
+                    }
+                } else if (r.optBoolean("can_adopt")) {
+                    builder.setPositiveButton("Adopt calib-v1...") { _, _ ->
+                        askCalibReason(
+                            "Adopt calib-v1",
+                            "Label + sort only. Never changes status, confidence or the ceiling. Write your approval note:",
+                            "calib_profile_adopt_json"
+                        )
+                    }
+                }
+                builder.show()
+            } catch (e: PyException) {
+                Toast.makeText(this@GrandProjectActivity, "Profile failed: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@GrandProjectActivity, "Profile failed: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    private fun askCalibReason(title: String, message: String, fnName: String) {
+        val input = EditText(this).apply {
+            hint = "reason"
+            setSingleLine(false)
+            setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Confirm") { _, _ ->
+                val reason = input.text.toString()
+                setLoading(true)
+                lifecycleScope.launch {
+                    try {
+                        val grandProjectId = getGrandProjectId()
+                        val jsonText = withContext(Dispatchers.Default) {
+                            python.getModule("grand_project_query_mobile")
+                                .callAttr(fnName, offlineDataRoot, grandProjectId, reason).toString()
+                        }
+                        val r = JSONObject(jsonText)
+                        val msg = if (r.has("error")) r.optString("error")
+                            else if (r.optBoolean("adopted")) "calib-v1 adopted (label + sort only)."
+                            else "calib-v1 revoked."
+                        Toast.makeText(this@GrandProjectActivity, msg, Toast.LENGTH_LONG).show()
+                    } catch (e: Exception) {
+                        Toast.makeText(this@GrandProjectActivity, "Failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    } finally {
+                        setLoading(false)
+                    }
+                    loadAndShow(ListKind.CANDIDATES)
+                }
+            }
+            .show()
     }
 
     /** Phase 5a (added 2026-10-02): runs calib_bench.py on its three fixed
