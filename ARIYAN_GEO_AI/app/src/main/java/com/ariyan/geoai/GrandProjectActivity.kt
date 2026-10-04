@@ -1273,6 +1273,28 @@ appendReviewSection(sb, detail)
         bar4.addView(profileButton)
         bar4.addView(sortButton)
         binding.containerCandidateRows.addView(bar4)
+
+        // Phase 6 (added 2026-10-04): read-only dashboard + per-job report export.
+        val bar5 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding((8 * density).toInt(), 0, (8 * density).toInt(), (4 * density).toInt())
+        }
+        val dashboardButton = MaterialButton(this).apply {
+            text = "Dashboard..."
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { showDashboard() }
+        }
+        val reportButton = MaterialButton(this).apply {
+            text = "Export report..."
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = (8 * density).toInt() }
+            setOnClickListener { showExportReportStart() }
+        }
+        bar5.addView(dashboardButton)
+        bar5.addView(reportButton)
+        binding.containerCandidateRows.addView(bar5)
     }
 
     /** Phase 5b (added 2026-10-02): when true, candidates carrying the
@@ -1282,6 +1304,139 @@ appendReviewSection(sb, detail)
     private fun isCalibStrong(row: JSONObject): Boolean {
         val label = row.optString("calib_label", "")
         return label.isNotEmpty() && label != "null"
+    }
+
+    // ===================== Phase 6: dashboard + report (2026-10-04) =====================
+    // Python side: grand_project_report.py via grand_project_query_mobile.py.
+    // The dashboard changes nothing. An export writes two files under
+    // ARIYAN_GEO_AI/reports/ and one REPORT_EXPORTED timeline event.
+
+    private fun showDashboard() {
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val grandProjectId = getGrandProjectId()
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr("project_dashboard_json", offlineDataRoot, grandProjectId).toString()
+                }
+                val r = JSONObject(jsonText)
+                if (r.has("error")) {
+                    Toast.makeText(this@GrandProjectActivity, r.optString("error"), Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                AlertDialog.Builder(this@GrandProjectActivity)
+                    .setTitle("Project dashboard")
+                    .setMessage(r.optString("report_text"))
+                    .setPositiveButton("Export report...") { _, _ -> showExportReportStart() }
+                    .setNegativeButton("Close", null)
+                    .show()
+            } catch (e: PyException) {
+                Toast.makeText(this@GrandProjectActivity, "Dashboard failed: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@GrandProjectActivity, "Dashboard failed: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    /** Step 1: job id. Step 2: how many candidates. Step 3: rounded or exact
+     * coordinates. Then the export runs. */
+    private fun showExportReportStart() {
+        promptText(
+            "Export report", "job id, first 6+ characters, e.g. f43d36", "Next",
+            "Writes an HTML report (English and Persian) and a CSV of the job's candidates to " +
+                "ARIYAN_GEO_AI/reports on this phone. Runs the full provenance check first " +
+                "(a large job can take a minute). Jobs marked Corrupted are refused."
+        ) { jobRef ->
+            if (jobRef.length < 6) {
+                Toast.makeText(this, "Use at least 6 characters of the job id.", Toast.LENGTH_LONG).show()
+                return@promptText
+            }
+            val labels: Array<CharSequence> = arrayOf(
+                "Top 50 (default)", "Top 200", "Other number...", "All candidates"
+            )
+            AlertDialog.Builder(this)
+                .setTitle("How many candidates?")
+                .setItems(labels) { _, which ->
+                    when (which) {
+                        0 -> chooseReportCoordinates(jobRef, 50)
+                        1 -> chooseReportCoordinates(jobRef, 200)
+                        2 -> promptText("Number of candidates", "e.g. 500", "Next") { text ->
+                            val n = text.toIntOrNull()
+                            if (n == null || n < 1) {
+                                Toast.makeText(this, "Enter a whole number of 1 or more.", Toast.LENGTH_LONG).show()
+                            } else {
+                                chooseReportCoordinates(jobRef, n)
+                            }
+                        }
+                        else -> chooseReportCoordinates(jobRef, 0)
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun chooseReportCoordinates(jobRef: String, topN: Int) {
+        val labels: Array<CharSequence> = arrayOf(
+            "Rounded to about 1 km (default, safer to share)",
+            "Exact coordinates (only if you need them)"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Coordinates in the files")
+            .setItems(labels) { _, which ->
+                if (which == 0) {
+                    runReportExport(jobRef, topN, false)
+                } else {
+                    AlertDialog.Builder(this)
+                        .setTitle("Exact coordinates")
+                        .setMessage(
+                            "The files will contain exact positions, and known-site distances in metres. " +
+                                "Anyone who gets the files can find the places. The file names end in _EXACT. Continue?"
+                        )
+                        .setPositiveButton("Export exact") { _, _ -> runReportExport(jobRef, topN, true) }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun runReportExport(jobRef: String, topN: Int, exact: Boolean) {
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val grandProjectId = getGrandProjectId()
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr("export_job_report_json", offlineDataRoot, grandProjectId, jobRef, topN, exact)
+                        .toString()
+                }
+                val r = JSONObject(jsonText)
+                if (r.has("error")) {
+                    AlertDialog.Builder(this@GrandProjectActivity)
+                        .setTitle("Report not exported")
+                        .setMessage(r.optString("error"))
+                        .setPositiveButton("Close", null)
+                        .show()
+                    return@launch
+                }
+                AlertDialog.Builder(this@GrandProjectActivity)
+                    .setTitle("Report exported: job " + r.optString("job_id").take(6))
+                    .setMessage(r.optString("summary_text"))
+                    .setPositiveButton("Close", null)
+                    .show()
+            } catch (e: PyException) {
+                Toast.makeText(this@GrandProjectActivity, "Export failed: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@GrandProjectActivity, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                setLoading(false)
+            }
+        }
     }
 
     /** Phase 5b/5c profile screen: shows the active profile (or the bench
@@ -1574,22 +1729,52 @@ appendReviewSection(sb, detail)
         sb.append("\n")
     }
 
-    /** Asks for one line of text, then calls onOk with it (trimmed). */
+    /** Asks for one line of text, then calls onOk with it (trimmed).
+     *
+     * CHANGED 2026-10-04 (Phase 6, job-target dialog fix): the text box is
+     * now ABOVE the message, and the message sits in its own scroll area
+     * whose height is capped. Before, a long message (the Hillside check
+     * report) was set with setMessage() and pushed the text box out of
+     * view. The dialog's own buttons stay outside the scroll area. */
     private fun promptText(
         title: String, hint: String, okLabel: String, message: String? = null, onOk: (String) -> Unit
     ) {
         val density = resources.displayMetrics.density
+        val pad = (16 * density).toInt()
         val input = EditText(this).apply {
             this.hint = hint
             setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_primary))
             setHintTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
-            val pad = (16 * density).toInt()
             setPadding(pad, pad, pad, pad)
+            setSingleLine(true)
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, (8 * density).toInt(), pad, 0)
+        }
+        content.addView(
+            input,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        )
+        if (!message.isNullOrEmpty()) {
+            val messageView = TextView(this).apply {
+                text = message
+                setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_primary))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                setPadding(0, pad, 0, pad)
+            }
+            val scroll = ScrollView(this).apply { addView(messageView) }
+            // Long messages get a fixed share of the screen and scroll inside it.
+            val height = if (message.length > 300) {
+                (resources.displayMetrics.heightPixels * 0.42).toInt()
+            } else {
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            }
+            content.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, height))
         }
         AlertDialog.Builder(this)
             .setTitle(title)
-            .apply { if (message != null) setMessage(message) }
-            .setView(input)
+            .setView(content)
             .setPositiveButton(okLabel) { _, _ -> onOk(input.text.toString().trim()) }
             .setNegativeButton("Cancel", null)
             .show()
