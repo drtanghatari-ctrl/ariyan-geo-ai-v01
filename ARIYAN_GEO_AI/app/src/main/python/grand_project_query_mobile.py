@@ -345,3 +345,17 @@ def calib_profile_adopt_json(db_root: str, grand_project_id: str, approval_note:
 def calib_profile_revoke_json(db_root: str, grand_project_id: str, reason: str) -> str:
     import calib_profile
     return calib_profile.revoke_json(db_root, grand_project_id, reason)
+
+
+# Phase 6 (added 2026-10-04): read-only project dashboard and per-job report
+# export (HTML in English and Persian + CSV). See grand_project_report.py.
+def project_dashboard_json(db_root: str, grand_project_id: str) -> str:
+    import grand_project_report
+    return grand_project_report.dashboard_json(db_root, grand_project_id)
+
+
+def export_job_report_json(db_root: str, grand_project_id: str, job_ref: str,
+                           top_n: int, exact_coords: bool) -> str:
+    import grand_project_report
+    return grand_project_report.export_job_report_json(
+        db_root, grand_project_id, job_ref, int(top_n), bool(exact_coords))
