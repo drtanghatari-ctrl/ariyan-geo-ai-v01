@@ -1458,7 +1458,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
             typeface = Typeface.MONOSPACE
         }
         val requireLive = CheckBox(this).apply {
-            text = "Require live DEM (stop instead of using the offline library)"
+            text = "Require live-quality DEM (the verified 1-degree DEM library counts; stop instead of falling back to cached/synthetic data)"
             isChecked = requireLivePrefill
         }
         val note = TextView(this).apply {
@@ -1559,7 +1559,9 @@ class WideAreaSearchActivity : AppCompatActivity() {
             if (selected.length() > 0) {
                 append("\n")
                 if (requireLive) {
-                    append("Live DEM required: if the live OpenTopography fetch is unavailable, that ")
+                    append("Live DEM required: windows are cut from the verified DEM library when ")
+                    append("its tiles are present (same cells as live, no API call); otherwise fetched ")
+                    append("live. If neither is available, that ")
                     append("candidate's results are discarded (nothing recorded) and the run stops; ")
                     append("the rest stay as they are.")
                     if (credentialStore.openTopographyApiKey.isNullOrBlank()) {
