@@ -239,6 +239,10 @@ def tile_name(lat_floor: int, lon_floor: int) -> str:
             f"{'E' if lon_floor >= 0 else 'W'}{abs(lon_floor):03d}")
 
 
+def tile_path(root: str, demtype: str, name: str) -> str:
+    return os.path.join(_dir(root, demtype), name + ".tif")
+
+
 def _index_path(root, demtype):
     return os.path.join(_dir(root, demtype), "index.json")
 
