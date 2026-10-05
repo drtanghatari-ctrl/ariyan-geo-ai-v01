@@ -31,6 +31,7 @@ Pure Python + numpy, no GDAL.
 """
 
 import hashlib
+import mmap
 import json
 import math
 import os
@@ -43,7 +44,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-VERSION = "lib-v1"
+VERSION = "lib-v1.1"
 ARCSEC = 1.0 / 3600.0
 TILE_MARGIN_DEG = 0.01
 TIE_EPS = 0.002
@@ -112,7 +113,7 @@ def _tags(d: bytes):
         t, ty, c = struct.unpack(bo + "HHI", d[off + 2 + 12 * i:off + 10 + 12 * i])
         v = d[off + 10 + 12 * i:off + 14 + 12 * i]
         nb = size.get(ty, 1) * c
-        raw = v[:nb] if nb <= 4 else d[struct.unpack(bo + "I", v)[0]:][:nb]
+        raw = v[:nb] if nb <= 4 else d[struct.unpack(bo + "I", v)[0]:struct.unpack(bo + "I", v)[0] + nb]
         tags[t] = raw.rstrip(b"\0").decode("ascii", "replace") if ty == 2 \
             else struct.unpack(bo + fmt[ty] * c, raw)
     return bo, tags
@@ -270,10 +271,16 @@ def _load_tile(root: str, demtype: str, name: str, meta: dict):
             _cache.move_to_end(key)
             return _cache[key]
     path = os.path.join(_dir(root, demtype), name + ".tif")
+    # lib-v1.1: memory-mapped, not read into RAM. A COP30 1-degree tile is
+    # ~54 MB; four cached tiles held as bytes would be ~220 MB. With mmap
+    # only the blocks a window touches are paged in. SHA-256 is streamed.
+    h = hashlib.sha256()
     with open(path, "rb") as f:
-        data = f.read()
-    if hashlib.sha256(data).hexdigest() != meta["sha256"]:
-        raise LibraryError(f"sha_mismatch {key}")
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+        if h.hexdigest() != meta["sha256"]:
+            raise LibraryError(f"sha_mismatch {key}")
+        data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
     entry = TileReader(data)
     with _lock:
         _cache[key] = entry
