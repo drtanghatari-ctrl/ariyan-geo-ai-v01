@@ -616,9 +616,26 @@ class WideAreaSearchActivity : AppCompatActivity() {
             addView(buttonWhyFailed)
             addView(buttonRetryFailed)
         }
+        // Offline DEM library (libfill-v1, 2026-10-05): shows which 1-degree
+        // tiles Pass 2 needs for this job and downloads only the missing
+        // ones, so Pass 2 can cut its windows from disk (0 live calls).
+        val buttonDemLibrary = MaterialButton(this).apply {
+            text = "DEM library…"
+            setAllCaps(false)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val demLibraryRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            val pad = (16 * density).toInt()
+            setPadding(pad, (8 * density).toInt(), pad, 0)
+            addView(buttonDemLibrary)
+        }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(failedTileRow)
+            addView(demLibraryRow)
             addView(stageText)
             addView(progressText)
         }
@@ -632,6 +649,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
             .setNegativeButton("Refine top N…") { _, _ -> chooseRefineCount(jobId) }
             .create()
         buttonWhyFailed.setOnClickListener { showTileFailures(jobId, title) }
+        buttonDemLibrary.setOnClickListener { showDemLibraryPlan(jobId, title) }
         buttonRetryFailed.setOnClickListener {
             // Closed first so that, when reopened, it re-reads the true
             // counts instead of the pre-retry numbers.
@@ -820,6 +838,151 @@ class WideAreaSearchActivity : AppCompatActivity() {
                     "Could not read tile failures: ${cleanErrorMessage(e.message)}",
                     Toast.LENGTH_LONG
                 ).show()
+            }
+        }
+    }
+
+    /** Read-only: which library tiles this job's bbox needs, per DEM
+     * type, which are present (with SHA-256) and which are missing, plus
+     * the rolling 24 h live-call budget. Offers the download only when
+     * something is missing. */
+    private fun showDemLibraryPlan(jobId: String, title: String) {
+        lifecycleScope.launch {
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("dem_library_mobile")
+                        .callAttr("dem_library_plan_json", offlineDataRoot, jobId)
+                        .toString()
+                }
+                val plan = JSONObject(jsonText)
+                if (plan.has("error")) {
+                    Toast.makeText(this@WideAreaSearchActivity, "DEM library: ${plan.optString("error")}", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                val missing = plan.optInt("missing_total")
+                val budget = plan.optInt("budget_left_24h")
+                val nDemTypes = plan.optJSONObject("demtypes")?.length() ?: 0
+                val body = buildString {
+                    append(formatDemLibraryPlan(plan))
+                    append("\nLive-call budget left (rolling 24 h): ").append(budget)
+                    append(" of ").append(plan.optInt("daily_cap")).append("\n\n")
+                    if (missing == 0) {
+                        append("All tiles are in the library. Pass 2 will cut its DEM windows from disk.")
+                    } else {
+                        append("Download uses ").append(missing).append(" live call")
+                        append(if (missing == 1) "" else "s")
+                        append(" (one per tile) plus up to ").append(nDemTypes)
+                        append(" for the spot-check (one small live window per DEM type, compared ")
+                        append("cell-by-cell with the library). Present tiles are never re-downloaded.\n\n")
+                        append("Keep this screen open until it finishes; each tile can take a minute or two.")
+                    }
+                }
+                val b = AlertDialog.Builder(this@WideAreaSearchActivity)
+                    .setTitle("DEM library -- $title")
+                    .setView(scrollableText(body))
+                    .setPositiveButton("Close", null)
+                if (missing > 0 && budget > 0) {
+                    b.setNegativeButton("Download $missing") { _, _ -> fillDemLibrary(jobId, title) }
+                }
+                b.show()
+            } catch (e: PyException) {
+                Toast.makeText(this@WideAreaSearchActivity, "DEM library: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun formatDemLibraryPlan(plan: JSONObject): String = buildString {
+        val dts = plan.optJSONObject("demtypes") ?: return@buildString
+        val keys = dts.keys()
+        while (keys.hasNext()) {
+            val dt = keys.next()
+            val o = dts.getJSONObject(dt)
+            append(dt).append(": ").append(o.optInt("needed")).append(" tile(s) needed\n")
+            val present = o.optJSONArray("present")
+            if (present != null) for (i in 0 until present.length()) {
+                val t = present.getJSONObject(i)
+                append("  ✓ ").append(t.optString("tile")).append("  sha ")
+                append(t.optString("sha256").take(12)).append("…\n")
+            }
+            val miss = o.optJSONArray("missing")
+            if (miss != null) for (i in 0 until miss.length()) {
+                append("  ✗ ").append(miss.optString(i)).append("  missing\n")
+            }
+        }
+    }
+
+    private fun fillDemLibrary(jobId: String, title: String) {
+        val progress = AlertDialog.Builder(this)
+            .setTitle("DEM library -- $title")
+            .setMessage("Downloading missing tiles… keep this screen open.")
+            .setCancelable(false)
+            .show()
+        lifecycleScope.launch {
+            try {
+                val jsonText = withContext(Dispatchers.IO) {
+                    python.getModule("dem_library_mobile").callAttr(
+                        "fill_dem_library_json", offlineDataRoot, jobId,
+                        credentialStore.openTopographyApiKey, 10, true
+                    ).toString()
+                }
+                progress.dismiss()
+                val r = JSONObject(jsonText)
+                val body = buildString {
+                    if (r.has("error")) {
+                        append("Error: ").append(r.optString("error"))
+                        return@buildString
+                    }
+                    append("Live calls used: ").append(r.optInt("calls")).append("\n")
+                    val dl = r.optJSONArray("downloaded")
+                    append("Downloaded: ").append(dl?.length() ?: 0).append("\n")
+                    if (dl != null) for (i in 0 until dl.length()) {
+                        val t = dl.getJSONObject(i)
+                        append("  ").append(t.optString("demtype")).append("/").append(t.optString("tile"))
+                        append("  ").append(t.optLong("bytes") / 1024).append(" KB  sha ")
+                        append(t.optString("sha256").take(12)).append("…\n")
+                    }
+                    val failed = r.optJSONArray("failed")
+                    if (failed != null && failed.length() > 0) {
+                        append("Failed:\n")
+                        for (i in 0 until failed.length()) {
+                            val f = failed.getJSONObject(i)
+                            append("  ").append(f.optString("tile")).append(": ").append(f.optString("error")).append("\n")
+                        }
+                    }
+                    if (!r.isNull("stopped")) {
+                        append("Stopped early: ").append(r.optString("stopped")).append("\n")
+                    }
+                    val checks = r.optJSONArray("spot_checks")
+                    if (checks != null && checks.length() > 0) {
+                        append("\nSpot-check (live window vs library):\n")
+                        for (i in 0 until checks.length()) {
+                            val c = checks.getJSONObject(i)
+                            append("  ").append(c.optString("demtype")).append(": ")
+                            when {
+                                c.has("skipped") -> append("skipped -- ").append(c.optString("skipped"))
+                                c.has("error") -> append("ERROR -- ").append(c.optString("error"))
+                                c.optBoolean("ok") -> append("IDENTICAL (0 mismatches)")
+                                else -> append("DIFFERENT -- mismatches ").append(c.opt("mismatches"))
+                                    .append(", origin match ").append(c.optBoolean("origin_match"))
+                            }
+                            append("\n")
+                        }
+                    }
+                    val after = r.optJSONObject("plan_after")
+                    if (after != null) {
+                        append("\n").append(formatDemLibraryPlan(after))
+                        append("\nBudget left (24 h): ").append(after.optInt("budget_left_24h"))
+                    }
+                    append("\nTime: ").append(r.optDouble("seconds")).append(" s")
+                }
+                AlertDialog.Builder(this@WideAreaSearchActivity)
+                    .setTitle("DEM library -- $title")
+                    .setView(scrollableText(body))
+                    .setPositiveButton("Close", null)
+                    .show()
+            } catch (e: PyException) {
+                progress.dismiss()
+                Toast.makeText(this@WideAreaSearchActivity, "DEM library download failed: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
             }
         }
     }
