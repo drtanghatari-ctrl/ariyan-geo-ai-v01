@@ -932,7 +932,13 @@ class WideAreaSearchActivity : AppCompatActivity() {
                         append("Error: ").append(r.optString("error"))
                         return@buildString
                     }
-                    append("Live calls used: ").append(r.optInt("calls")).append("\n")
+                    val spotCalls = (0 until (r.optJSONArray("spot_checks")?.length() ?: 0)).count {
+                        val c = r.getJSONArray("spot_checks").getJSONObject(it)
+                        !c.has("skipped")
+                    }
+                    append("Live calls used: ").append(r.optInt("calls") + spotCalls)
+                    append(" (").append(r.optInt("calls")).append(" tile, ")
+                    append(spotCalls).append(" spot-check)\n")
                     val dl = r.optJSONArray("downloaded")
                     append("Downloaded: ").append(dl?.length() ?: 0).append("\n")
                     if (dl != null) for (i in 0 until dl.length()) {
@@ -1626,6 +1632,24 @@ class WideAreaSearchActivity : AppCompatActivity() {
         append(r.optInt("refined")).append(" of ").append(r.optInt("attempted")).append(" refined: ")
         append(r.optInt("reproduced")).append(" reproduced the DEM anomaly, ")
         append(r.optInt("not_reproduced")).append(" did not.\n")
+        // lib-v1: where the DEM cells physically came from (the offline
+        // library or the network). Absent when the library was not armed.
+        val lib = r.optJSONObject("dem_library")
+        if (lib != null) {
+            append("DEM library: ").append(lib.optInt("library_cuts")).append(" window(s) cut from disk")
+            val misses = lib.optJSONObject("library_misses")
+            var nMiss = 0
+            if (misses != null) { val k = misses.keys(); while (k.hasNext()) nMiss += misses.optInt(k.next()) }
+            append(", ").append(nMiss).append(" fetched live")
+            if (misses != null && misses.length() > 0) {
+                append(" (")
+                val k = misses.keys(); var first = true
+                while (k.hasNext()) { val key = k.next(); if (!first) append(", "); first = false
+                    append(key).append(" ").append(misses.optInt(key)) }
+                append(")")
+            }
+            append("\n")
+        }
         val results = r.optJSONArray("results") ?: JSONArray()
         if (results.length() > 0) append("\n")
         for (i in 0 until results.length()) {
@@ -1644,6 +1668,9 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 append("not reproduced")
             }
             append("\n DEM ").append(demSourceLabel(x.optString("dem_source")))
+            if (!x.isNull("dem_origin") && x.has("dem_origin")) {
+                append(if (x.optString("dem_origin") == "LIBRARY") " (from library)" else " (from network)")
+            }
             if (x.optBoolean("repeat_refinement", false)) append(", repeat")
             val sats = x.optJSONArray("satellite_sources_recorded")
             if (sats != null && sats.length() > 0) {
