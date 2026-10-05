@@ -647,7 +647,9 @@ def _refine_candidate_impl(
     previous = _refinement_history(db_root, candidate_id)
     if previous and not allow_repeat:
         return {"candidate_id": candidate_id, "status": "ALREADY_REFINED"}
-    if require_live_dem:
+    lib_events = dem_source_mobile.dem_library_events()
+    lib_start = len(lib_events) if lib_events is not None else 0
+    if require_live_dem and lib_events is None:
         blocked = _live_dem_blocked_reason(api_key)
         if blocked:
             raise LiveDemUnavailableError(blocked)
@@ -675,6 +677,19 @@ def _refine_candidate_impl(
     provenance_ledger.bind(investigation_json)
 
     dem_info = _dem_source_of(investigation_json, demtype)
+    # lib-v1: a window cut from the verified offline library is proven
+    # cell-for-cell identical to the live response, so dem_source stays
+    # LIVE (same data, same downstream meaning); dem_origin says where the
+    # cells physically came from, and the ledger holds the tile's SHA-256.
+    dem_info["dem_origin"] = None
+    dem_info["dem_library"] = None
+    if lib_events is not None:
+        mine = lib_events[lib_start:]
+        primary = next((e for e in mine if e["demtype"] == demtype), None)
+        if dem_info["dem_source"] == DEM_SOURCE_LIVE:
+            dem_info["dem_origin"] = ("LIBRARY" if primary is not None and primary["served"]
+                                      else "NETWORK")
+        dem_info["dem_library"] = dem_source_mobile.dem_library_summary(mine)
     if require_live_dem and dem_info["dem_source"] != DEM_SOURCE_LIVE:
         # Checked BEFORE any write: this candidate gets no rows at all and
         # stays exactly as it was.
@@ -830,6 +845,8 @@ def _refine_candidate_impl(
             "dem_source": dem_info["dem_source"],
             "dem_type": dem_info["dem_type"],
             "dem_live_failure_reason": dem_info["dem_live_failure_reason"],
+            "dem_origin": dem_info["dem_origin"],
+            "dem_library": dem_info["dem_library"],
             "repeat_refinement": bool(previous),
             "previous_refinements": len(previous),
             "note": note,
@@ -871,6 +888,8 @@ def _refine_candidate_impl(
         "confidence_numeric": numeric,
         "dem_source": dem_info["dem_source"],
         "dem_live_failure_reason": dem_info["dem_live_failure_reason"],
+        "dem_origin": dem_info["dem_origin"],
+        "dem_library": dem_info["dem_library"],
         "repeat_refinement": bool(previous),
         "_investigation_json": investigation_json, # stripped by the pass runner
     }
@@ -910,7 +929,8 @@ def _run_refinement_loop(
     _write_refine_status(data_root, job_id, 0, total, "starting", health=was._render_run_health(tally))
     sh_backoff.arm()
     dem_source_mobile.arm_live_dem_quota_breaker()
-    copernicus = live_dem = None
+    dem_source_mobile.arm_dem_library(data_root)
+    copernicus = live_dem = dem_library = None
     try:
         for i, cand in enumerate(chosen):
             _write_refine_status(
@@ -969,6 +989,7 @@ def _run_refinement_loop(
     finally:
         copernicus = sh_backoff.disarm()
         live_dem = dem_source_mobile.disarm_live_dem_quota_breaker()
+        dem_library = dem_source_mobile.disarm_dem_library()
 
     if stopped_reason:
         final_detail = f"stopped: live DEM unavailable, {len(not_started)} not started"
@@ -1004,6 +1025,7 @@ def _run_refinement_loop(
         "results": results,
         "copernicus_throttle": copernicus,
         "opentopography_live_dem": live_dem,
+        "dem_library": dem_library,
     }
 
 
