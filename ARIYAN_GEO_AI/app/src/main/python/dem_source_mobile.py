@@ -81,7 +81,7 @@ import os
 import re
 import threading
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -162,6 +162,78 @@ def live_dem_quota_status() -> Optional[dict]:
         "retry_in_s": round(max(0.0, remaining), 0),
         "reason": breaker["reason"] if remaining > 0 else "",
     }
+
+
+# ---- OFFLINE DEM LIBRARY (lib-v1, armed only by Pass 2, 2026-10-05) -------
+# While ARMED (thread-locally), fetch() first tries to CUT the requested
+# window out of a verified local GeoTIFF tile (srtm_library.py). The cut is
+# proven cell-for-cell identical to what the live AAIGrid request returns
+# (bde-v2/v3/v4/v4b), so everything downstream is unchanged. Any miss
+# (near-tie window, tile not downloaded, SHA mismatch, unsupported demtype)
+# falls through to the normal live request exactly as before. A thread that
+# has not armed it is completely unaffected.
+def arm_dem_library(offline_data_root: str) -> None:
+    _tl.library = {"root": offline_data_root, "events": []}
+
+
+def disarm_dem_library() -> Optional[dict]:
+    lib = getattr(_tl, "library", None)
+    _tl.library = None
+    if lib is None:
+        return None
+    return dem_library_summary(lib["events"])
+
+
+def dem_library_events() -> Optional[list]:
+    """Live list (append-only) of this thread's library attempts, each
+    {"demtype", "served": bool, "reason", "tile", "sha256"}. None if not armed."""
+    lib = getattr(_tl, "library", None)
+    return None if lib is None else lib["events"]
+
+
+def dem_library_summary(events: list) -> dict:
+    misses: Dict[str, int] = {}
+    for e in events:
+        if not e["served"]:
+            misses[e["reason"]] = misses.get(e["reason"], 0) + 1
+    return {"library_cuts": sum(1 for e in events if e["served"]),
+            "library_misses": misses}
+
+
+def _try_library(demtype: str, aoi) -> Optional[tuple]:
+    lib = getattr(_tl, "library", None)
+    if lib is None:
+        return None
+    try:
+        import srtm_library
+        if demtype not in srtm_library.SUPPORTED_DEMTYPES:
+            g, why = None, "demtype_not_in_library"
+        else:
+            g, why = srtm_library.cut_window(lib["root"], demtype, aoi.min_lat,
+                                             aoi.max_lat, aoi.min_lon, aoi.max_lon)
+    except Exception as exc:  # never let the library break a fetch
+        g, why = None, f"library_error: {type(exc).__name__}: {exc}"[:200]
+    ev = {"demtype": demtype, "served": g is not None, "reason": why,
+          "tile": g and g["library_tile"], "sha256": g and g["library_sha256"]}
+    lib["events"].append(ev)
+    if g is None:
+        return None
+    try:
+        import provenance_ledger
+        if provenance_ledger._active() is not None:
+            # Recorded as a FILE source: the provenance check re-hashes the
+            # tile later and reports "matches" or "CHANGED".
+            provenance_ledger._note({
+                "kind": "DEM", "type": "FILE",
+                "path": srtm_library.tile_path(lib["root"], demtype, g["library_tile"]),
+                "name": f"{demtype}/{g['library_tile']}.tif",
+                "sha256": g["library_sha256"], "library_version": g["library_version"],
+                "window": {"south": aoi.min_lat, "north": aoi.max_lat,
+                           "west": aoi.min_lon, "east": aoi.max_lon}})
+    except Exception:
+        pass
+    import srtm_library
+    return srtm_library.as_ascii_grid(g), g
 
 
 def _strip_tags(text: str) -> str:
@@ -282,6 +354,14 @@ class OpenTopographyAAIGridSource:
             executor.shutdown(wait=False)
 
     def fetch(self, aoi: AreaOfInterest) -> DEM:
+        hit = _try_library(self.demtype, aoi)
+        if hit is not None:
+            grid, g = hit
+            return self._grid_to_dem(grid, aoi, (
+                f"Cut from the offline DEM library ({g['library_version']}, tile "
+                f"{self.demtype}/{g['library_tile']}, sha256 {g['library_sha256'][:16]}); "
+                "proven cell-for-cell identical to the live OpenTopography AAIGrid "
+                "response for the same box."))
         breaker = getattr(_tl, "breaker", None)
         if breaker is not None and breaker["suspended_until"] > _now():
             breaker["skipped"] += 1
@@ -359,6 +439,19 @@ class OpenTopographyAAIGridSource:
                 "or a nearby land location."
             )
 
+        return self._grid_to_dem(grid, aoi, (
+            "Live fetch from OpenTopography Global DEM API, AAIGrid "
+            "format, decoded without GDAL/rasterio."))
+
+    def _grid_to_dem(self, grid, aoi: AreaOfInterest, origin_note: str) -> DEM:
+        if np.isnan(grid.values).any():
+            raise OpenTopographyFetchError(
+                "The returned elevation data contains NODATA cells inside "
+                "the requested area (commonly open ocean, or a location "
+                "outside this dataset's coverage). This location can't be "
+                "investigated with this dataset -- try a different demtype "
+                "or a nearby land location."
+            )
         n = aoi.grid_size
         if grid.nrows == n and grid.ncols == n:
             elevation = grid.values
@@ -378,8 +471,5 @@ class OpenTopographyAAIGridSource:
             synthetic=False,
             resolution_m=RESOLUTION_BY_DEMTYPE_M.get(self.demtype, grid.cellsize * 111_320),
             acquisition_date=None,
-            notes=(
-                "Live fetch from OpenTopography Global DEM API, AAIGrid "
-                f"format, decoded without GDAL/rasterio. {resample_note}"
-            ),
+            notes=f"{origin_note} {resample_note}",
         )
