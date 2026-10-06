@@ -437,6 +437,37 @@ def select_refinement_candidates(
     }
 
 
+def _relief_by_candidate(db_root: str, candidate_ids: List[str]) -> Dict[str, Optional[float]]:
+    """RELIEF-IN-PREVIEW (ADDED 2026-10-06): the peak DEM residual in
+    metres (peak_residual_m, as stored by Pass 1 in the candidate's DEM
+    primary_detection evidence) for each id, so the Pass 2 confirmation
+    can show how many metres of relief sit behind each z-score. Read-only.
+    Missing or unreadable -> None (shown as "? m"); never raises."""
+    out: Dict[str, Optional[float]] = {cid: None for cid in candidate_ids}
+    if not candidate_ids:
+        return out
+    try:
+        conn = db.get_connection(db_root)
+        try:
+            db.initialize_schema(conn)
+            for i in range(0, len(candidate_ids), 500):
+                chunk = candidate_ids[i:i + 500]
+                for r in conn.execute(
+                        "SELECT candidate_id, detail_json FROM evidence_link "
+                        "WHERE evidence_type = 'DEM' AND relation = 'primary_detection' "
+                        "AND candidate_id IN (%s)" % ",".join("?" * len(chunk)), chunk).fetchall():
+                    try:
+                        v = json.loads(r["detail_json"] or "{}").get("peak_residual_m")
+                        out[r["candidate_id"]] = None if v is None else float(v)
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return out
+
+
 def preview_refinement_selection_json(
     db_root: str, job_id: str, n: int = 5,
     min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
@@ -446,8 +477,10 @@ def preview_refinement_selection_json(
     confirmation step before spending real API budget."""
     result = select_refinement_candidates(
         db_root, job_id, n, min_separation_m, skip_flagged=bool(skip_flagged))
+    relief = _relief_by_candidate(db_root, [c["id"] for c in result["selected"]])
     result["selected"] = [
-        {"candidate_id": c["id"], "lat": c["lat"], "lon": c["lon"], "score": c["score"]}
+        {"candidate_id": c["id"], "lat": c["lat"], "lon": c["lon"], "score": c["score"],
+         "relief_m": relief.get(c["id"])}
         for c in result["selected"]
     ]
     return json.dumps(result)
@@ -534,11 +567,13 @@ def preview_selected_refinement_json(db_root: str, job_id: str, refs: Any) -> st
     source) so the user can see what a repeat adds."""
     res = resolve_candidate_refs(db_root, job_id, refs)
     selected = []
+    relief = _relief_by_candidate(db_root, [c["id"] for c in res["resolved"]])
     for c in res["resolved"]:
         history = _refinement_history(db_root, c["id"])
         selected.append({
             "candidate_id": c["id"], "lat": c["lat"], "lon": c["lon"],
-            "score": c["score"], "confidence_band": c.get("confidence_band"),
+            "score": c["score"], "relief_m": relief.get(c["id"]),
+            "confidence_band": c.get("confidence_band"),
             "previous_refinements": history,
         })
     return json.dumps({"selected": selected, "problems": res["problems"]})
