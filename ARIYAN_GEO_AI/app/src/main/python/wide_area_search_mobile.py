@@ -866,6 +866,15 @@ def _short_dem_reason(text: str) -> str:
 
 def _short_sat_reason(text: str) -> str:
     low = (text or "").lower()
+    # The shared token-failure message also SAYS "credentials are invalid"
+    # as one possible cause, so classify on the real error part only.
+    if "could not obtain a copernicus access token" in low:
+        cause = low.split("this usually means")[0]
+        if any(w in cause for w in ("401", "400", "403", "invalid_client", "unauthor", "invalid client")):
+            return "Copernicus credentials rejected"
+        if "not configured" in cause:
+            return "Copernicus credentials not set"
+        return "Copernicus sign-in failed (network / timeout)"
     if "429" in low or "rate limit" in low or "too many requests" in low:
         return "Copernicus rate limit (429)"
     if any(w in low for w in ("401", "403", "credential", "unauthor")):
@@ -1027,6 +1036,24 @@ def _render_run_health(tally: "_RunHealth") -> str:
                 lines.append(
                     f"  offline library first (by choice): {tally.dem_from_library_first} tiles, "
                     f"live: {live} tiles, offline after a failed live fetch: {tally.dem_offline} tiles")
+            elif getattr(tally, "dem_library", None) is not None:
+                # Pass 2 with the DEM library armed (display fix 2026-10-06):
+                # windows cut from library tiles go through the OpenTopography
+                # source too, so the old live/offline split called them "live".
+                d = tally.dem_library
+                lines.append(f"  windows cut from DEM library: {d.get('library_cuts', 0)}, "
+                             f"live DEM calls: {d.get('live_calls', 0)}")
+                extra = []
+                if d.get("window_cache_hits"):
+                    extra.append(f"{d['window_cache_hits']} from saved windows")
+                if d.get("tiles_promoted"):
+                    extra.append(f"{d['tiles_promoted']} new tile(s) added to the library")
+                if d.get("windows_saved"):
+                    extra.append(f"{d['windows_saved']} live window(s) saved")
+                if extra:
+                    lines.append("  (" + ", ".join(extra) + ")")
+                if tally.dem_offline:
+                    lines.append(f"  offline fallback after a failed live fetch: {tally.dem_offline} tiles")
             else:
                 lines.append(f"  live: {live} tiles, offline library: {tally.dem_offline} tiles")
             for reason, count in sorted(tally.dem_reasons.items(), key=lambda kv: -kv[1]):
