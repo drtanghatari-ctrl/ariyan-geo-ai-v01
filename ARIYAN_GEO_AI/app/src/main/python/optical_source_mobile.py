@@ -219,6 +219,13 @@ class OpticalFetchError(Exception):
 
 
 def _urlopen_with_hard_deadline(req: urllib.request.Request, timeout: int) -> str:
+    """sat-v1 (2026-10-06): answers are reused/saved via sat_response_store
+    while a sweep or refinement has it armed; otherwise a plain live call."""
+    import sat_response_store
+    return sat_response_store.through("OPTICAL", req, timeout, _urlopen_live_with_hard_deadline)
+
+
+def _urlopen_live_with_hard_deadline(req: urllib.request.Request, timeout: int) -> str:
     """This module's own self-contained hard-wall-clock-deadline wrapper
     -- see module docstring, SELF-CONTAINED PER THIS PROJECT'S CONVENTION,
     for why this is a local copy of the same pattern used elsewhere in
@@ -307,7 +314,8 @@ def _default_time_range(days_back: int = 90) -> tuple:
     default (180) directly as a parameter, mirroring NDVI's and
     Thermal's own WINDOW CHOICE separation; see this module's own
     docstring, TEMPORAL PERSISTENCE CHECK, for why."""
-    now = datetime.now(timezone.utc)
+    import sat_response_store
+    now = sat_response_store.anchor_now()  # day-anchored while armed (sat-v1)
     start = now - timedelta(days=days_back)
     fmt = "%Y-%m-%dT%H:%M:%SZ"
     return start.strftime(fmt), now.strftime(fmt)
