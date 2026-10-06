@@ -207,6 +207,13 @@ class ThermalFetchError(Exception):
 
 
 def _urlopen_with_hard_deadline(req: urllib.request.Request, timeout: int) -> str:
+    """sat-v1 (2026-10-06): answers are reused/saved via sat_response_store
+    while a sweep or refinement has it armed; otherwise a plain live call."""
+    import sat_response_store
+    return sat_response_store.through("THERMAL", req, timeout, _urlopen_live_with_hard_deadline)
+
+
+def _urlopen_live_with_hard_deadline(req: urllib.request.Request, timeout: int) -> str:
     """Runs urllib.request.urlopen() on a background thread and gives up
     after `timeout` seconds of real wall-clock time, regardless of which
     internal phase (DNS resolution, connect, TLS handshake, read) is
@@ -293,7 +300,8 @@ def _default_time_range(days_back: int = 90):
     module's own docstring, TEMPORAL PERSISTENCE CHECK, WINDOW CHOICE
     note, for why."""
     from datetime import datetime, timedelta, timezone
-    now = datetime.now(timezone.utc)
+    import sat_response_store
+    now = sat_response_store.anchor_now()  # day-anchored while armed (sat-v1)
     start = now - timedelta(days=days_back)
     fmt = "%Y-%m-%dT%H:%M:%SZ"
     return start.strftime(fmt), now.strftime(fmt)
