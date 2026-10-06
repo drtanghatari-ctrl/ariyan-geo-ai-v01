@@ -251,7 +251,18 @@ def _wrap_urlopen(orig: Callable[..., Any], kind: str) -> Callable[..., Any]:
         result = orig(req, timeout)
         try:
             url = getattr(req, "full_url", "") or ""
-            if _active() is not None and not _is_token_url(url):
+            hit = None
+            try:
+                import sat_response_store
+                hit = sat_response_store.take_hit()
+            except Exception:
+                hit = None
+            if hit is not None and _active() is not None:
+                # sat-v1: answered from the saved satellite store, not live.
+                _note({"kind": kind, "type": "FILE", "path": hit["path"],
+                       "name": hit["name"], "sha256": hit["sha256"],
+                       "saved_utc": hit.get("saved_utc")})
+            elif _active() is not None and not _is_token_url(url):
                 body = getattr(req, "data", None)
                 raw = result.encode("utf-8") if isinstance(result, str) else (
                     result if isinstance(result, (bytes, bytearray)) else _canon(result).encode())
