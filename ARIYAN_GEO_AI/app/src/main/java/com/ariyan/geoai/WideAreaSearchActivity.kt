@@ -1926,8 +1926,9 @@ class WideAreaSearchActivity : AppCompatActivity() {
 
     /** RELIEF-IN-PREVIEW (ADDED 2026-10-06): "+2.4 m" / "-1.1 m" (raised /
      * sunken) from the preview's relief_m (Pass 1 peak DEM residual), or
-     * "? m" when it was not recorded. */
+     * "? m" when it was not recorded. A non-breaking space keeps the
+     * number and "m" on one line in large-font dialogs. */
     private fun reliefText(c: JSONObject): String =
-        if (!c.has("relief_m") || c.isNull("relief_m")) "? m"
-        else String.format(java.util.Locale.US, "%+.1f m", c.optDouble("relief_m"))
+        if (!c.has("relief_m") || c.isNull("relief_m")) "?\u00A0m"
+        else String.format(java.util.Locale.US, "%+.1f\u00A0m", c.optDouble("relief_m"))
 }
