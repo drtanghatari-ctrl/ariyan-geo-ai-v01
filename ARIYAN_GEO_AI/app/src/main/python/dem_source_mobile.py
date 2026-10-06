@@ -197,7 +197,13 @@ def dem_library_summary(events: list) -> dict:
         if not e["served"]:
             misses[e["reason"]] = misses.get(e["reason"], 0) + 1
     return {"library_cuts": sum(1 for e in events if e["served"]),
-            "library_misses": misses}
+            "library_misses": misses,
+            # save-once (2026-10-06): how the misses were turned into data
+            # that will not need fetching again.
+            "window_cache_hits": sum(1 for e in events if e.get("via") == "window_cache"),
+            "tiles_promoted": sum(1 for e in events if e.get("via") == "promoted_tile"),
+            "windows_saved": sum(1 for e in events if e.get("window_saved")),
+            "live_calls": sum(e.get("live_calls", 0) for e in events)}
 
 
 def _try_library(demtype: str, aoi) -> Optional[tuple]:
@@ -218,21 +224,100 @@ def _try_library(demtype: str, aoi) -> Optional[tuple]:
     lib["events"].append(ev)
     if g is None:
         return None
+    import srtm_library
+    _note_library_file(srtm_library.tile_path(lib["root"], demtype, g["library_tile"]),
+                       f"{demtype}/{g['library_tile']}.tif", g["library_sha256"],
+                       g["library_version"], aoi)
+    return srtm_library.as_ascii_grid(g), g
+
+
+def _note_library_file(path, name, sha256, version, aoi) -> None:
+    """Recorded as a FILE source: the provenance check re-hashes the file
+    later and reports "matches" or "CHANGED"."""
     try:
         import provenance_ledger
         if provenance_ledger._active() is not None:
-            # Recorded as a FILE source: the provenance check re-hashes the
-            # tile later and reports "matches" or "CHANGED".
             provenance_ledger._note({
-                "kind": "DEM", "type": "FILE",
-                "path": srtm_library.tile_path(lib["root"], demtype, g["library_tile"]),
-                "name": f"{demtype}/{g['library_tile']}.tif",
-                "sha256": g["library_sha256"], "library_version": g["library_version"],
+                "kind": "DEM", "type": "FILE", "path": path, "name": name,
+                "sha256": sha256, "library_version": version,
                 "window": {"south": aoi.min_lat, "north": aoi.max_lat,
                            "west": aoi.min_lon, "east": aoi.max_lon}})
     except Exception:
         pass
+
+
+# ---- SAVE-ONCE (2026-10-06) -------------------------------------------------
+# While the library is armed, nothing fetched live is thrown away:
+#   1. a window saved earlier for this exact box is read back from disk
+#      (byte-for-byte what OpenTopography sent, SHA-256 checked);
+#   2. if the box lies inside a 1-degree tile that is not in the library yet,
+#      that WHOLE tile is downloaded instead of the window -- the same one
+#      live call -- and the window is cut from it; every later window in that
+#      degree then costs 0 calls;
+#   3. only otherwise (near-tie box, box across a tile edge, tile download
+#      failed, no budget) is the window fetched live, and it is saved (1.).
+# Every live call made here is entered in the rolling 24 h budget log
+# (dem_library/live_calls.json), so callers must not count them again.
+def _from_window_store(demtype: str, aoi, lib: dict, ev: dict):
+    try:
+        import srtm_library
+        data, meta = srtm_library.load_window(lib["root"], demtype, aoi.min_lat,
+                                              aoi.max_lat, aoi.min_lon, aoi.max_lon)
+        if data is None:
+            return None
+        grid = parse_ascii_grid(data.decode("ascii", "replace"))
+    except Exception:
+        return None
+    ev.update(served=True, via="window_cache", tile=None, sha256=meta["sha256"])
+    _note_library_file(meta["path"], f"{demtype}/windows/{meta['key']}.asc", meta["sha256"],
+                       meta.get("store_version"), aoi)
+    return grid, meta
+
+
+def _count_live_call(lib: dict, ev: dict, label: str) -> None:
+    ev["live_calls"] = ev.get("live_calls", 0) + 1
+    try:
+        import dem_library_mobile
+        dem_library_mobile._record_call(lib["root"], label)
+    except Exception:
+        pass
+
+
+def _promote_tile(demtype: str, aoi, lib: dict, ev: dict, api_key: str):
     import srtm_library
+    if demtype not in srtm_library.SUPPORTED_DEMTYPES or ev.get("reason") != "not_in_library":
+        return None
+    t = srtm_library.tile_for_window(aoi.min_lat, aoi.max_lat, aoi.min_lon, aoi.max_lon)
+    if t is None:
+        return None
+    name = srtm_library.tile_name(*t)
+    key = f"{demtype}/{name}"
+    failed = lib.setdefault("promote_failed", {})
+    try:
+        if key in failed or name in srtm_library.load_index(lib["root"], demtype):
+            return None
+        import dem_library_mobile
+        if dem_library_mobile.budget_left(lib["root"]) <= 0:
+            ev["promote"] = "no budget left"
+            return None
+    except Exception:
+        return None
+    _count_live_call(lib, ev, f"promote {key}")
+    try:
+        srtm_library.download_tile(lib["root"], demtype, t[0], t[1], api_key)
+        g, why = srtm_library.cut_window(lib["root"], demtype, aoi.min_lat, aoi.max_lat,
+                                         aoi.min_lon, aoi.max_lon)
+    except Exception as exc:
+        failed[key] = f"{type(exc).__name__}: {exc}"[:200]
+        ev["promote"] = "failed: " + failed[key]
+        return None
+    if g is None:
+        ev["promote"] = f"tile saved, window not cut ({why})"
+        return None
+    ev.update(served=True, via="promoted_tile", tile=g["library_tile"], sha256=g["library_sha256"])
+    _note_library_file(srtm_library.tile_path(lib["root"], demtype, g["library_tile"]),
+                       f"{demtype}/{g['library_tile']}.tif", g["library_sha256"],
+                       g["library_version"], aoi)
     return srtm_library.as_ascii_grid(g), g
 
 
@@ -362,6 +447,16 @@ class OpenTopographyAAIGridSource:
                 f"{self.demtype}/{g['library_tile']}, sha256 {g['library_sha256'][:16]}); "
                 "proven cell-for-cell identical to the live OpenTopography AAIGrid "
                 "response for the same box."))
+        lib = getattr(_tl, "library", None)
+        ev = lib["events"][-1] if lib is not None and lib["events"] else None
+        if ev is not None and not ev["served"]:
+            saved = _from_window_store(self.demtype, aoi, lib, ev)
+            if saved is not None:
+                return self._grid_to_dem(saved[0], aoi, (
+                    "Read from the offline DEM library's saved live windows "
+                    f"({saved[1]['store_version']}, saved {saved[1]['saved_utc']}, sha256 "
+                    f"{saved[1]['sha256'][:16]}): the exact bytes OpenTopography "
+                    "returned for this same box earlier."))
         breaker = getattr(_tl, "breaker", None)
         if breaker is not None and breaker["suspended_until"] > _now():
             breaker["skipped"] += 1
@@ -372,6 +467,17 @@ class OpenTopographyAAIGridSource:
                 f"retried automatically in about {minutes} min; offline data "
                 "is used in the meantime"
             )
+        if ev is not None and not ev["served"] and self.api_key:
+            promoted = _promote_tile(self.demtype, aoi, lib, ev, self.api_key)
+            if promoted is not None:
+                grid, g = promoted
+                return self._grid_to_dem(grid, aoi, (
+                    f"Cut from 1-degree tile {self.demtype}/{g['library_tile']} "
+                    f"(sha256 {g['library_sha256'][:16]}), downloaded into the offline "
+                    "DEM library just now in place of this window (same one live call), "
+                    "so later windows in this degree need no live call."))
+        if ev is not None:
+            _count_live_call(lib, ev, f"window {self.demtype}")
         try:
             dem = self._fetch_live(aoi)
         except (OpenTopographyRateLimitError, OpenTopographyAuthError) as exc:
@@ -439,6 +545,16 @@ class OpenTopographyAAIGridSource:
                 "or a nearby land location."
             )
 
+        lib = getattr(_tl, "library", None)
+        if lib is not None:
+            try:
+                import srtm_library
+                srtm_library.save_window(lib["root"], self.demtype, aoi.min_lat, aoi.max_lat,
+                                         aoi.min_lon, aoi.max_lon, resp.content)
+                if lib["events"]:
+                    lib["events"][-1]["window_saved"] = True
+            except Exception:
+                pass  # saving is a bonus; never fail the fetch over it
         return self._grid_to_dem(grid, aoi, (
             "Live fetch from OpenTopography Global DEM API, AAIGrid "
             "format, decoded without GDAL/rasterio."))
