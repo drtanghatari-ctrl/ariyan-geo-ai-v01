@@ -117,6 +117,14 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- ap-v1 (2026-10-05): AutoPipelineWorker runs as a WorkManager
+             foreground worker of type dataSync (API 34+ requires the type
+             on WorkManager's own foreground service). -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+
         <!-- HISTORICAL RESEARCH (ADDED 2026-09-17): another own
              separate section, same reasoning and same registration
              pattern as WideAreaSearchActivity above. See
