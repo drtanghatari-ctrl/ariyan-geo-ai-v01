@@ -324,6 +324,19 @@ def check_job_provenance_json(db_root: str, job_ref: str) -> str:
     return provenance_check.check_job_json(db_root, job_ref)
 
 
+# cbv-v1 code bundle view (added 2026-10-06): which code a job's evidence
+# was made with, file by file, compared with the code installed now.
+# Read-only. See code_bundle_view.py.
+def job_code_bundles_json(db_root: str, job_ref: str) -> str:
+    import code_bundle_view
+    return code_bundle_view.job_bundles_json(db_root, job_ref)
+
+
+def code_bundle_files_json(db_root: str, bundle_ref: str) -> str:
+    import code_bundle_view
+    return code_bundle_view.bundle_files_json(db_root, bundle_ref)
+
+
 # Phase 5a calib-v1 bench (added 2026-10-02): frozen, read-only threshold
 # test on the three fixed bench jobs. See calib_bench.py.
 def run_calib_bench_json(db_root: str) -> str:
