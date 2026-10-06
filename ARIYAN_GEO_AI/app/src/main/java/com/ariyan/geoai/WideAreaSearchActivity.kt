@@ -149,15 +149,17 @@ class WideAreaSearchActivity : AppCompatActivity() {
 
     // New-search form state remembered across a successful Look Up
     // call, so Create Job can label the new job accurately.
-    // Deliberately simple for a first pass: typing directly into the
-    // bounding-box fields afterward does NOT reset this back to
-    // MANUAL_BBOX (that would need a TextWatcher on all four fields for
-    // marginal benefit -- input_kind is purely a display label on the
-    // job list, it has zero effect on the real tile geometry, which
-    // always comes from whatever numbers are in the four fields at the
-    // moment Create Job is tapped).
+    // INPUT-KIND FIX (2026-10-06): the label used to stay PLACE_NAME for
+    // every later job once any Look Up had succeeded, even when the box
+    // was then typed by hand. Now Look Up also remembers the exact four
+    // values it wrote (lookedUpBox), and createJob() labels the job
+    // PLACE_NAME only if the four fields still hold exactly those values
+    // at the moment Create Job is tapped; any edit -> MANUAL_BBOX. The
+    // label has no effect on tile geometry, which always comes from the
+    // four fields. Jobs created before this fix keep their stored label.
     private var lastInputKind: String = "MANUAL_BBOX"
     private var lastPlaceName: String? = null
+    private var lookedUpBox: List<String>? = null
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -380,12 +382,19 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 val result = JSONObject(jsonText)
                 if (result.optBoolean("found", false)) {
                     val bbox = result.getJSONObject("bounding_box")
-                    minLat.setText(bbox.optDouble("min_lat").toString())
-                    maxLat.setText(bbox.optDouble("max_lat").toString())
-                    minLon.setText(bbox.optDouble("min_lon").toString())
-                    maxLon.setText(bbox.optDouble("max_lon").toString())
+                    val box = listOf(
+                        bbox.optDouble("min_lat").toString(),
+                        bbox.optDouble("max_lat").toString(),
+                        bbox.optDouble("min_lon").toString(),
+                        bbox.optDouble("max_lon").toString(),
+                    )
+                    minLat.setText(box[0])
+                    maxLat.setText(box[1])
+                    minLon.setText(box[2])
+                    maxLon.setText(box[3])
                     lastInputKind = "PLACE_NAME"
                     lastPlaceName = placeName
+                    lookedUpBox = box
                     Toast.makeText(
                         this@WideAreaSearchActivity,
                         "Found: ${result.optString("resolved_name", placeName)}",
@@ -432,6 +441,12 @@ class WideAreaSearchActivity : AppCompatActivity() {
             return
         }
 
+        // INPUT-KIND FIX: PLACE_NAME only if the box is still exactly what
+        // Look Up filled in; otherwise the user typed or edited it.
+        val stillLookedUp = lastInputKind == "PLACE_NAME" &&
+            lookedUpBox == listOf(minLatText, maxLatText, minLonText, maxLonText)
+        val inputKind = if (stillLookedUp) "PLACE_NAME" else "MANUAL_BBOX"
+
         setLoading(true)
         lifecycleScope.launch {
             try {
@@ -439,9 +454,9 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 val jsonText = withContext(Dispatchers.Default) {
                     python.getModule("wide_area_search_mobile").callAttr(
                         "create_wide_area_search_job_json",
-                        offlineDataRoot, grandProjectId, title, lastInputKind,
+                        offlineDataRoot, grandProjectId, title, inputKind,
                         minLat, maxLat, minLon, maxLon, tileSize,
-                        Kwarg("place_name", if (lastInputKind == "PLACE_NAME") lastPlaceName else null),
+                        Kwarg("place_name", if (inputKind == "PLACE_NAME") lastPlaceName else null),
                     ).toString()
                 }
                 val result = JSONObject(jsonText)
