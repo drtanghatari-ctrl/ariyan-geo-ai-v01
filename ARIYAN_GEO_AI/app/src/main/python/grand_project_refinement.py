@@ -920,6 +920,7 @@ def _run_refinement_loop(
     grand_project_id = job["grand_project_id"]
 
     tally = was._RunHealth(dem_only=False)
+    tally.dem_library = dem_source_mobile.dem_library_summary([])  # display fix 2026-10-06
     results: List[Dict[str, Any]] = []
     failures: List[Dict[str, Any]] = []
     not_started: List[Dict[str, Any]] = []
@@ -983,6 +984,8 @@ def _run_refinement_loop(
                     )
                 except Exception:
                     pass
+            tally.dem_library = dem_source_mobile.dem_library_summary(
+                dem_source_mobile.dem_library_events() or [])
             _write_refine_status(
                 data_root, job_id, i + 1, total,
                 f"refined {i + 1}/{total}", health=was._render_run_health(tally))
@@ -990,6 +993,8 @@ def _run_refinement_loop(
         copernicus = sh_backoff.disarm()
         live_dem = dem_source_mobile.disarm_live_dem_quota_breaker()
         dem_library = dem_source_mobile.disarm_dem_library()
+        if dem_library is not None:
+            tally.dem_library = dem_library
 
     if stopped_reason:
         final_detail = f"stopped: live DEM unavailable, {len(not_started)} not started"
