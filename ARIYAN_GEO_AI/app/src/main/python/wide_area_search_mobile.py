@@ -77,6 +77,7 @@ import investigation_multi_mobile
 import debate_mobile
 import dem_source_mobile
 import offline_dem_store
+import sat_response_store
 import offline_evidence_fallback
 import offline_country_registry
 import grand_project_sync
@@ -940,6 +941,22 @@ def parse_tile_health(investigation_json: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _dem_library_lines(d: Dict[str, Any]) -> List[str]:
+    """The save-once DEM library's counts, as health-block lines."""
+    out = [f"  windows cut from DEM library: {d.get('library_cuts', 0)}, "
+           f"live DEM calls: {d.get('live_calls', 0)}"]
+    extra = []
+    if d.get("window_cache_hits"):
+        extra.append(f"{d['window_cache_hits']} from saved windows")
+    if d.get("tiles_promoted"):
+        extra.append(f"{d['tiles_promoted']} new tile(s) added to the library")
+    if d.get("windows_saved"):
+        extra.append(f"{d['windows_saved']} live window(s) saved")
+    if extra:
+        out.append("  (" + ", ".join(extra) + ")")
+    return out
+
+
 class _RunHealth:
     """Running tally of what happened across the tiles processed in THIS run."""
 
@@ -1036,22 +1053,17 @@ def _render_run_health(tally: "_RunHealth") -> str:
                 lines.append(
                     f"  offline library first (by choice): {tally.dem_from_library_first} tiles, "
                     f"live: {live} tiles, offline after a failed live fetch: {tally.dem_offline} tiles")
+                d = getattr(tally, "dem_library", None)
+                if d and (d.get("library_cuts") or d.get("live_calls") or d.get("window_cache_hits")):
+                    # pass1-save-once: tiles the offline store lacked went
+                    # through the save-once DEM library.
+                    lines.append("  where the offline store had no coverage:")
+                    lines.extend("  " + ln for ln in _dem_library_lines(d))
             elif getattr(tally, "dem_library", None) is not None:
                 # Pass 2 with the DEM library armed (display fix 2026-10-06):
                 # windows cut from library tiles go through the OpenTopography
                 # source too, so the old live/offline split called them "live".
-                d = tally.dem_library
-                lines.append(f"  windows cut from DEM library: {d.get('library_cuts', 0)}, "
-                             f"live DEM calls: {d.get('live_calls', 0)}")
-                extra = []
-                if d.get("window_cache_hits"):
-                    extra.append(f"{d['window_cache_hits']} from saved windows")
-                if d.get("tiles_promoted"):
-                    extra.append(f"{d['tiles_promoted']} new tile(s) added to the library")
-                if d.get("windows_saved"):
-                    extra.append(f"{d['windows_saved']} live window(s) saved")
-                if extra:
-                    lines.append("  (" + ", ".join(extra) + ")")
+                lines.extend(_dem_library_lines(tally.dem_library))
                 if tally.dem_offline:
                     lines.append(f"  offline fallback after a failed live fetch: {tally.dem_offline} tiles")
             else:
@@ -1070,6 +1082,11 @@ def _render_run_health(tally: "_RunHealth") -> str:
             if dem["live_attempts_skipped"]:
                 lines.append(
                     f"  live attempts skipped (no network call): {dem['live_attempts_skipped']}")
+        st = getattr(tally, "sat_store", None)
+        if st and (st.get("reused") or st.get("saved")):
+            lines.append(
+                f"  satellite answers: {st.get('reused', 0)} reused from saved, "
+                f"{st.get('saved', 0)} fetched live and saved")
 
         lines.append("")
         if tally.dem_only:
@@ -1471,6 +1488,7 @@ def _pause_for_offline_library(
 
 def _attach_throttle_report(
     result: str, copernicus: Any, live_dem: Any, health_summary: Optional[str] = None,
+    dem_library: Any = None, sat_store: Any = None,
 ) -> str:
     """Adds what the throttle handling actually did to the job's result
     JSON. Purely additive; if the result is not a JSON object it is
@@ -1485,6 +1503,10 @@ def _attach_throttle_report(
     payload["opentopography_live_dem"] = live_dem
     if health_summary:
         payload["health_summary"] = health_summary
+    if dem_library is not None:
+        payload["dem_library"] = dem_library
+    if sat_store is not None:
+        payload["satellite_store"] = sat_store
     return json.dumps(payload)
 
 
@@ -1536,6 +1558,12 @@ def run_wide_area_search_job(
     _run_state.summary = None
     sh_backoff.arm()
     dem_source_mobile.arm_live_dem_quota_breaker()
+    # pass1-save-once (2026-10-06): the same save-once DEM library Pass 2
+    # uses (cut from tile -> saved window -> add tile -> live + save), and
+    # save-once satellite answers. Both disarmed in the finally below.
+    dem_source_mobile.arm_dem_library(data_root)
+    sat_response_store.arm(data_root)
+    dem_library = sat_store = None
     try:
         result = _run_wide_area_search_job_impl(
             data_root, job_id, radius_m, grid_size, api_key, demtype,
@@ -1551,10 +1579,13 @@ def run_wide_area_search_job(
     finally:
         copernicus = sh_backoff.disarm()
         live_dem = dem_source_mobile.disarm_live_dem_quota_breaker()
+        dem_library = dem_source_mobile.disarm_dem_library()
+        sat_store = sat_response_store.disarm()
         if dem_only and dem_offline_first:
             _clear_offline_tile_cache()
     return _attach_throttle_report(
-        result, copernicus, live_dem, getattr(_run_state, "summary", None))
+        result, copernicus, live_dem, getattr(_run_state, "summary", None),
+        dem_library=dem_library, sat_store=sat_store)
 
 
 def _paused_payload(data_root: str, job_id: str, dem_only: bool,
@@ -1856,6 +1887,14 @@ def _run_wide_area_search_job_impl(
 
         if offline_first and (i + 1) % OFFLINE_TILE_CACHE_CLEAR_EVERY_TILES == 0:
             _clear_offline_tile_cache()   # never raises
+
+        try:   # pass1-save-once: live counts for the health block
+            ev = dem_source_mobile.dem_library_events()
+            if ev:
+                tally.dem_library = dem_source_mobile.dem_library_summary(ev)
+            tally.sat_store = sat_response_store.current()
+        except Exception:
+            pass
 
         _write_wide_area_status(
             data_root, job_id, already_done + i + 1, total,
