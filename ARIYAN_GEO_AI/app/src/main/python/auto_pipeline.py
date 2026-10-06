@@ -303,6 +303,7 @@ def _step_pass2(root, run, creds, deadline):
                   "windows_saved": lib.get("windows_saved", 0),
                   "window_cache_hits": lib.get("window_cache_hits", 0), "seconds": r.get("seconds"),
                   # why candidates failed, so the dialog can say (2026-10-06)
+                  "failed_ids": [f.get("candidate_id", "") for f in (r.get("failures") or [])],
                   "errors": [{"candidate": f.get("candidate_id", "")[:8],
                               "error": str(f.get("error", ""))[:200]}
                              for f in (r.get("failures") or [])][:5]}
@@ -335,7 +336,22 @@ def _last_detail(events, step):
     return d[-1]["detail"] if d else {}
 
 
-def trust_decision(events, failed_tiles):
+def _unresolved_pass2_failures(root, events):
+    """2026-10-06: a candidate that failed in one batch is re-queued and
+    usually succeeds in a later one. Only failures still unrefined when
+    the run ends count against trust. None for runs recorded before
+    failed_ids existed (the caller then falls back to the raw count)."""
+    p2 = [e for e in events if e["step"] == "pass2" and e["status"] == "PROGRESS"]
+    if any(e["detail"].get("failed") and "failed_ids" not in e["detail"] for e in p2):
+        return None
+    ids = {i for e in p2 for i in (e["detail"].get("failed_ids") or []) if i}
+    if not ids:
+        return set()
+    import grand_project_refinement as gpr
+    return ids - set(gpr._refined_candidate_ids(root))
+
+
+def trust_decision(events, failed_tiles, unresolved=None):
     """Pure function: (mark TRUSTED?, reasons it fell short)."""
     reasons = []
     prov = _last_detail(events, "provenance")
@@ -348,7 +364,10 @@ def trust_decision(events, failed_tiles):
         reasons.append("sweep offline guard paused during this run")
     p2_failed = sum(e["detail"].get("failed", 0) for e in events
                     if e["step"] == "pass2" and e["status"] == "PROGRESS")
-    if p2_failed:
+    if unresolved is not None:
+        if unresolved:
+            reasons.append(f"{len(unresolved)} Pass 2 candidate(s) still failed after retry")
+    elif p2_failed:
         reasons.append(f"{p2_failed} Pass 2 candidate(s) failed")
     for e in events:
         if e["step"] == "library":
@@ -367,14 +386,18 @@ def _step_trust(root, run, creds, deadline):
     if cur and not str(cur.get("reason") or "").startswith(AUTO_PREFIX):
         return {"decision": "kept", "note": f"user-set trust {cur['trust']} kept (never overwritten)"}
     failed = db.get_wide_area_search_job_progress(root, run["job_id"]).get("failed", 0)
-    ok, reasons = trust_decision(run["_events"], failed)
+    unresolved = _unresolved_pass2_failures(root, run["_events"])
+    ok, reasons = trust_decision(run["_events"], failed, unresolved)
+    retried = sum(e["detail"].get("failed", 0) for e in run["_events"]
+                  if e["step"] == "pass2" and e["status"] == "PROGRESS") - len(unresolved or ())
     if ok:
+        extra = {"note": f"{retried} Pass 2 failure(s) succeeded on retry"} if retried > 0 else {}
         if cur and cur["trust"] == "TRUSTED":
-            return {"decision": "TRUSTED", "note": "already auto-trusted"}
+            return {"decision": "TRUSTED", "note": "already auto-trusted", **({"retried": retried} if retried > 0 else {})}
         review.set_job_trust(root, run["job_id"], "TRUSTED",
                              f"{AUTO_PREFIX} run {run['id'][:8]}: provenance VERIFIED, 0 failed tiles, "
-                             f"no offline-guard pause, no Pass 2 failures")
-        return {"decision": "TRUSTED"}
+                             f"no offline-guard pause, no unresolved Pass 2 failures")
+        return {"decision": "TRUSTED", **extra}
     if cur and cur["trust"] == "TRUSTED":
         # Our own earlier mark no longer holds (2026-10-06). A user mark was
         # returned above and is never touched; never CORRUPTED.
