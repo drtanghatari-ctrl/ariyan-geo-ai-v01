@@ -9,6 +9,8 @@ import androidx.core.content.ContextCompat
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -18,6 +20,7 @@ import com.chaquo.python.Kwarg
 import com.chaquo.python.PyException
 import com.chaquo.python.Python
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -188,6 +191,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var credentialStore: SecureCredentialStore
 
+    // SAVE-AS-YOU-TYPE (ADDED 2026-10-06): pending debounced save of the
+    // key fields -- see attachSaveAsYouType().
+    private var pendingKeySave: Job? = null
+
     // This app's own private internal storage for pre-downloaded offline
     // DEM/NDVI data -- the exact same path OfflineDataActivity.kt already
     // uses (filesDir/offline_data), so the live-fetch-fails fallback in
@@ -229,6 +236,10 @@ class MainActivity : AppCompatActivity() {
         if (credentialStore.copernicusClientSecret.isNotEmpty()) {
             binding.inputNdviClientSecret.setText(credentialStore.copernicusClientSecret)
         }
+
+        // Attached AFTER the saved values are loaded above, so loading
+        // them back into the fields does not itself trigger a save.
+        attachSaveAsYouType()
 
         binding.switchNdviCorrelation.setOnCheckedChangeListener { _, checked ->
             setNdviUiVisible(checked)
@@ -284,14 +295,52 @@ class MainActivity : AppCompatActivity() {
      * exactly as before. */
     override fun onPause() {
         super.onPause()
+        pendingKeySave?.cancel()
         saveTypedCredentials()
+    }
+
+    /** SAVE-AS-YOU-TYPE (ADDED 2026-10-06): keys used to be saved only on
+     * Run or when this screen was left (onPause), so if the app was closed
+     * from the recents list or killed by Android right after typing, the
+     * keys could be lost -- the workaround was "do one NDVI run". Now each
+     * key field saves itself 2 seconds after typing stops, and immediately
+     * when the field loses focus. Same rules as saveTypedCredentials():
+     * only changed, non-empty values are written; clearing a field never
+     * wipes a saved key. onPause() and Run still save exactly as before. */
+    private fun attachSaveAsYouType() {
+        val fields = listOf(
+            binding.inputApiKey,
+            binding.inputDemType,
+            binding.inputNdviClientId,
+            binding.inputNdviClientSecret,
+        )
+        val watcher = object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                pendingKeySave?.cancel()
+                pendingKeySave = lifecycleScope.launch {
+                    delay(2000)
+                    saveTypedCredentials(quiet = true)
+                }
+            }
+        }
+        for (field in fields) {
+            field.addTextChangedListener(watcher)
+            field.setOnFocusChangeListener { _, hasFocus ->
+                if (!hasFocus) {
+                    pendingKeySave?.cancel()
+                    saveTypedCredentials(quiet = true)
+                }
+            }
+        }
     }
 
     /** Saves only fields whose value actually CHANGED and is NOT empty:
      * an unchanged value is not re-written (that would needlessly reset
      * the slot's tested status), and clearing a field never wipes a saved
      * key here -- that stays a deliberate action via Run, as before. */
-    private fun saveTypedCredentials() {
+    private fun saveTypedCredentials(quiet: Boolean = false) {
         if (!::credentialStore.isInitialized || !::binding.isInitialized) return
         try {
             var changed = false
@@ -314,7 +363,9 @@ class MainActivity : AppCompatActivity() {
                 credentialStore.upsertCopernicusSlot(id = "manual-primary", primaryValue = newId, secondaryValue = newSecret)
                 changed = true
             }
-            if (changed) toast("API keys saved")
+            // quiet = auto-save while typing: a short "Keys saved" note
+            // instead of the longer onPause message, same condition.
+            if (changed) toast(if (quiet) "Keys saved" else "API keys saved")
         } catch (e: Exception) {
             toast("Could not save API keys: ${e.message}")
         }
