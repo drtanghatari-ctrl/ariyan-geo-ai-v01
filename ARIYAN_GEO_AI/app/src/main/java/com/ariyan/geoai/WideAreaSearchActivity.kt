@@ -1546,8 +1546,11 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 else String.format(java.util.Locale.US, "%+.2f", c.optDouble("score"))
                 append(i + 1).append(". ")
                 append(String.format(java.util.Locale.US, "%.5f, %.5f", c.optDouble("lat"), c.optDouble("lon")))
-                append(" z=").append(scoreText).append("\n")
+                append(" z=").append(scoreText)
+                append(" (").append(reliefText(c)).append(")\n")
             }
+            append("\nz = how unusual the bump/dip is; m = its peak height or depth ")
+            append("against the smoothed ground (from Pass 1).\n")
             append("\nEach refinement makes about 2 live OpenTopography calls, up to about 8 ")
             append("stability re-fetches, and Copernicus calls -- not cheap while the daily ")
             append("OpenTopography cap applies.")
@@ -1699,6 +1702,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 val scoreText = if (c.isNull("score")) "n/a"
                 else String.format(java.util.Locale.US, "%+.2f", c.optDouble("score"))
                 append(i + 1).append(". ").append(id.take(8)).append(" z=").append(scoreText)
+                append(" (").append(reliefText(c)).append(")")
                 if (!c.isNull("confidence_band")) append(" ").append(c.optString("confidence_band"))
                 append("\n ")
                 append(String.format(java.util.Locale.US, "%.5f, %.5f", c.optDouble("lat"), c.optDouble("lon")))
@@ -1919,4 +1923,11 @@ class WideAreaSearchActivity : AppCompatActivity() {
         binding.buttonShowNewSearch.isEnabled = !loading
         binding.buttonShowJobs.isEnabled = !loading
     }
+
+    /** RELIEF-IN-PREVIEW (ADDED 2026-10-06): "+2.4 m" / "-1.1 m" (raised /
+     * sunken) from the preview's relief_m (Pass 1 peak DEM residual), or
+     * "? m" when it was not recorded. */
+    private fun reliefText(c: JSONObject): String =
+        if (!c.has("relief_m") || c.isNull("relief_m")) "? m"
+        else String.format(java.util.Locale.US, "%+.1f m", c.optDouble("relief_m"))
 }
