@@ -128,6 +128,13 @@ class SARFetchError(Exception):
 
 
 def _urlopen_with_hard_deadline(req: urllib.request.Request, timeout: int):
+    """sat-v1 (2026-10-06): answers are reused/saved via sat_response_store
+    while a sweep or refinement has it armed; otherwise a plain live call."""
+    import sat_response_store
+    return sat_response_store.through("SAR", req, timeout, _urlopen_live_with_hard_deadline)
+
+
+def _urlopen_live_with_hard_deadline(req: urllib.request.Request, timeout: int):
     """Identical pattern to ndvi_source_mobile.py's own
     _urlopen_with_hard_deadline() -- runs urlopen() on a background
     thread and enforces a real wall-clock deadline via
@@ -238,7 +245,8 @@ def _default_time_range(days_back: int = 90) -> tuple:
     reason (enough real Sentinel-1 revisit opportunities -- roughly
     6-12 day repeat cycle depending on coverage -- without pooling too
     far across genuinely different seasonal ground-moisture states)."""
-    now = datetime.now(timezone.utc)
+    import sat_response_store
+    now = sat_response_store.anchor_now()  # day-anchored while armed (sat-v1)
     start = now - timedelta(days=days_back)
     fmt = "%Y-%m-%dT%H:%M:%SZ"
     return start.strftime(fmt), now.strftime(fmt)
