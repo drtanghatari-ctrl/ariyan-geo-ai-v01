@@ -1071,9 +1071,25 @@ class WideAreaSearchActivity : AppCompatActivity() {
             d.has("reason") -> line(d.optString("reason"))
             d.has("error") -> line(d.optString("error").take(160))
             d.has("skipped") -> line(d.optString("skipped"))
-            step == "pass2" && d.has("refined_total") ->
+            step == "pass2" && d.has("refined_total") -> {
                 line("refined ${d.optInt("refined_total")}, failed ${d.optInt("failed_total")}, " +
                      "strong left ${d.optInt("remaining_strong")}")
+                // display fix 2026-10-06: where the DEM windows came from
+                if (d.has("library_cuts_total")) {
+                    line("DEM: ${d.optInt("library_cuts_total")} cut from library, " +
+                         "${d.optInt("live_dem_calls_total")} live call(s)")
+                    val extra = mutableListOf<String>()
+                    if (d.optInt("window_cache_hits_total") > 0) extra.add("${d.optInt("window_cache_hits_total")} from saved windows")
+                    if (d.optInt("tiles_promoted_total") > 0) extra.add("${d.optInt("tiles_promoted_total")} tile(s) added to library")
+                    if (d.optInt("windows_saved_total") > 0) extra.add("${d.optInt("windows_saved_total")} window(s) saved")
+                    if (extra.isNotEmpty()) line("(" + extra.joinToString(", ") + ")")
+                }
+                val errs = d.optJSONArray("errors")
+                if (errs != null) for (i in 0 until errs.length()) {
+                    val e = errs.optJSONObject(i) ?: continue
+                    line("✗ ${e.optString("candidate")}: ${e.optString("error").take(120)}")
+                }
+            }
             step == "provenance" -> line("${d.optString("verdict")} (${d.optInt("candidates_verified")}/${d.optInt("candidates")})")
             step == "trust" -> {
                 line(d.optString("decision") + (if (d.has("note")) " -- " + d.optString("note") else ""))
