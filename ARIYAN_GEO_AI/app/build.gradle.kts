@@ -111,6 +111,11 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
+    // ap-v1 (2026-10-05): AutoPipelineWorker -- the automatic run of a
+    // Wide-Area job survives process death and reboots and re-schedules
+    // itself after quota/throttle pauses.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
     // Real-data-first design: MainActivity.kt saves the user's
     // OpenTopography API key and Copernicus OAuth client ID/secret
     // on-device (so real data can be attempted automatically, with no
