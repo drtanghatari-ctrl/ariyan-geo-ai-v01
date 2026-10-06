@@ -175,8 +175,15 @@ def _step_library(root, run, creds, deadline):
     if r.get("error"):
         raise RuntimeError(r["error"])
     if r.get("stopped") == "budget":
-        raise PauseStep("live-call budget used up while filling the library",
-                        _budget_wait(root), {"fill": _slim(r)})
+        # libcont-v1 (2026-10-06): do NOT pause the whole run. The library
+        # only speeds up Pass 2; the sweep reads the offline copy first, and
+        # Pass 2 adds tiles (when budget frees) or saves/reuses windows.
+        got = len(r.get("downloaded") or [])
+        missing = int(plan.get("missing_total") or 0)
+        return {"fill": _slim(r), "partial": True,
+                "note": (f"library partly filled ({got} of {missing} missing tile(s) added) -- "
+                         f"live-call budget used up; continuing: sweep reads the offline copy "
+                         f"first, Pass 2 adds tiles or saves windows when budget frees")}
     return {"fill": _slim(r)}
 
 
