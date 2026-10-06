@@ -281,13 +281,15 @@ def _step_pass2(root, run, creds, deadline):
             demtype=opts["pass2_demtype"], ndvi_client_id=creds["ndvi_id"],
             ndvi_client_secret=creds["ndvi_secret"], require_live_dem=True)
         lib = r.get("dem_library") or {}
-        live = sum((lib.get("library_misses") or {}).values())
-        for _ in range(live):
-            dlm._record_call(root, "pass2")
+        # dem_source_mobile enters every live call in the 24 h budget log
+        # itself (save-once, 2026-10-06); only read the count here.
+        live = lib.get("live_calls", sum((lib.get("library_misses") or {}).values()))
         detail = {"batch": [c["id"][:8] for c in batch], "attempted": r.get("attempted", 0),
                   "refined": r.get("refined"), "reproduced": r.get("reproduced"),
                   "failed": r.get("failed", 0), "library_cuts": lib.get("library_cuts", 0),
-                  "live_dem_calls": live, "seconds": r.get("seconds")}
+                  "live_dem_calls": live, "tiles_promoted": lib.get("tiles_promoted", 0),
+                  "windows_saved": lib.get("windows_saved", 0),
+                  "window_cache_hits": lib.get("window_cache_hits", 0), "seconds": r.get("seconds")}
         _event(root, run["id"], "pass2", "PROGRESS", detail)
         done_total += detail["attempted"]
         failed_total += detail["failed"]
