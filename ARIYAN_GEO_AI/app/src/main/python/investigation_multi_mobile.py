@@ -310,6 +310,7 @@ Wording only: status tokens, sources lists and thresholds unchanged.
 """
 from __future__ import annotations
 
+import time
 import json
 import math
 import os
@@ -1089,15 +1090,24 @@ def _get_shared_copernicus_token(
             "your free client credentials (dataspace.copernicus.eu) to "
             "enable live real per-candidate NDVI/Thermal/Optical/SAR checks."
         )
-    try:
-        token = ndvi_source_mobile.get_access_token(client_id, client_secret, timeout=timeout)
-        return token, None
-    except NDVIFetchError as exc:
+    exc = None
+    for attempt, wait in enumerate((0, 3, 10)):   # 2026-10-06: a single sign-in
+        if wait:                                  # blip used to cost the whole
+            time.sleep(wait)                      # candidate its 4 satellite checks
+        try:
+            token = ndvi_source_mobile.get_access_token(client_id, client_secret, timeout=timeout)
+            return token, None
+        except NDVIFetchError as e:
+            exc = e
+            low = str(e).lower()
+            if any(w in low for w in ("401", "400", "invalid_client", "unauthor")):
+                break                             # really rejected: retrying won't help
+    if exc is not None:
         return None, (
             f"Could not obtain a Copernicus access token: {exc}. This "
             f"usually means no network connection is available right "
-            f"now, or the credentials are invalid. Checked once for "
-            f"this entire run rather than retried per candidate/source."
+            f"now, or the credentials are invalid. Tried 3 times (0/3/10 s) "
+            f"once for this whole run, not per candidate/source."
         )
 
 
