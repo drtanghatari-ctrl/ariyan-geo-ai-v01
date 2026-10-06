@@ -329,6 +329,83 @@ def as_ascii_grid(g: dict):
                      cell_is_center=False, nodata_value=None)
 
 
+
+# ------------------------------------------------- live-window store (win-v1) --
+# 2026-10-06: every live AAIGrid window that could not be cut from a tile
+# (near-tie, straddles a tile edge, tile could not be downloaded) is kept,
+# byte-for-byte as OpenTopography sent it, so the SAME box is never fetched
+# twice. Keyed by demtype + exact box; SHA-256 recorded and re-checked.
+# LAYOUT  <root>/dem_library/<DEMTYPE>/windows/<key>.asc + windows/index.json
+WINDOW_STORE_VERSION = "win-v1"
+
+
+def _win_dir(root: str, demtype: str) -> str:
+    return os.path.join(_dir(root, demtype), "windows")
+
+
+def window_key(south: float, north: float, west: float, east: float) -> str:
+    box = f"{south:.9f},{north:.9f},{west:.9f},{east:.9f}"
+    return hashlib.sha1(box.encode()).hexdigest()[:20]
+
+
+def _win_index(root, demtype) -> Dict[str, dict]:
+    try:
+        with open(os.path.join(_win_dir(root, demtype), "index.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_window(root: str, demtype: str, south, north, west, east, data: bytes) -> dict:
+    d = _win_dir(root, demtype)
+    os.makedirs(d, exist_ok=True)
+    key = window_key(south, north, west, east)
+    path = os.path.join(d, key + ".asc")
+    tmp = path + ".part"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+    meta = {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data),
+            "box": [south, north, west, east], "demtype": demtype,
+            "saved_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "store_version": WINDOW_STORE_VERSION}
+    with _lock:
+        idx = _win_index(root, demtype)
+        idx[key] = meta
+        itmp = os.path.join(d, "index.json.part")
+        with open(itmp, "w") as f:
+            json.dump(idx, f)
+        os.replace(itmp, os.path.join(d, "index.json"))
+    return {"key": key, "path": path, **meta}
+
+
+def load_window(root: str, demtype: str, south, north, west, east):
+    """-> (bytes, meta incl. path/key) or (None, reason)."""
+    key = window_key(south, north, west, east)
+    meta = _win_index(root, demtype).get(key)
+    if meta is None:
+        return None, "window_not_saved"
+    path = os.path.join(_win_dir(root, demtype), key + ".asc")
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return None, f"window_unreadable: {e}"
+    if hashlib.sha256(data).hexdigest() != meta["sha256"]:
+        return None, "window_sha_mismatch"
+    return data, {"key": key, "path": path, **meta}
+
+
+def tile_for_window(south, north, west, east) -> Optional[Tuple[int, int]]:
+    """The single 1-degree tile (with its margin) that would contain the
+    box, or None if the box straddles a tile edge beyond the margin."""
+    la, lo = math.floor((south + north) / 2), math.floor((west + east) / 2)
+    m = TILE_MARGIN_DEG - 1e-6
+    if la - m <= south and north <= la + 1 + m and lo - m <= west and east <= lo + 1 + m:
+        return la, lo
+    return None
+
+
 # ------------------------------------------------------------ downloading ----
 def _http_get(params: dict, timeout_s: float) -> bytes:
     import requests
