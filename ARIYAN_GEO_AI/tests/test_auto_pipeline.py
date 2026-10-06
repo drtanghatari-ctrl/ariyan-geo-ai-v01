@@ -161,3 +161,21 @@ def test_failure_retried_successfully_does_not_block_trust(env):
     assert t["decision"] == "TRUSTED" and "succeeded on retry" in t["note"]
     p2 = json.loads(ap.auto_run_status_json(root, rid))["steps"][ap.STEPS.index("pass2")]["detail"]
     assert p2["failed_total"] == 1 and p2["remaining_strong"] == 0
+
+
+def test_library_budget_used_up_continues_instead_of_pausing(env, monkeypatch):
+    """libcont-v1: an out-of-budget library fill no longer pauses the run."""
+    root, jid, mode = env
+    monkeypatch.setattr(dlm, "dem_library_plan_json",
+                        lambda r, j, *a: json.dumps({"missing_total": 2, "demtypes": {}}))
+    monkeypatch.setattr(dlm, "fill_dem_library_json",
+                        lambda *a: json.dumps({"calls": 0, "downloaded": [], "failed": [],
+                                               "stopped": "budget", "spot_checks": []}))
+    rid = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
+    first = json.loads(ap.run_slice_json(root, rid, "K"))
+    assert first["state"] != "PAUSED"
+    assert _drive(root, rid) == "DONE"
+    lib = json.loads(ap.auto_run_status_json(root, rid))["steps"][0]
+    assert lib["status"] == "DONE" and lib["detail"]["partial"] is True
+    assert "0 of 2" in lib["detail"]["note"]
+    assert _trust(root, rid)["decision"] == "TRUSTED"
