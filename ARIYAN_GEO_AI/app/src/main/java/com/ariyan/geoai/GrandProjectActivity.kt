@@ -1634,10 +1634,12 @@ appendReviewSection(sb, detail)
                     if (result.has("error")) {
                         Toast.makeText(this@GrandProjectActivity, result.optString("error"), Toast.LENGTH_LONG).show()
                     } else {
+                        val checkedJobId = result.optString("job_id")
                         AlertDialog.Builder(this@GrandProjectActivity)
-                            .setTitle("Provenance: job " + result.optString("job_id").take(6))
+                            .setTitle("Provenance: job " + checkedJobId.take(6))
                             .setMessage(result.optString("report_text"))
                             .setPositiveButton("Close", null)
+                            .setNeutralButton("Code files…") { _, _ -> showJobCodeBundles(checkedJobId) }
                             .show()
                     }
                 } catch (e: PyException) {
@@ -1651,6 +1653,103 @@ appendReviewSection(sb, detail)
                 } finally {
                     setLoading(false)
                 }
+            }
+        }
+    }
+
+    /** cbv-v1 (ADDED 2026-10-06): the code bundle(s) this job's evidence
+     * was made with (code_bundle_view.job_bundles_json), newest first. Tap
+     * one to see its files. Read-only. */
+    private fun showJobCodeBundles(jobId: String) {
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr("job_code_bundles_json", offlineDataRoot, jobId).toString()
+                }
+                val result = JSONObject(jsonText)
+                if (result.has("error")) {
+                    Toast.makeText(this@GrandProjectActivity, result.optString("error"), Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                val bundles = result.optJSONArray("bundles") ?: JSONArray()
+                if (bundles.length() == 0) {
+                    AlertDialog.Builder(this@GrandProjectActivity)
+                        .setTitle("Code files: job " + jobId.take(6))
+                        .setMessage("No provenance records for this job, so no code bundle is recorded.")
+                        .setPositiveButton("Close", null)
+                        .show()
+                    return@launch
+                }
+                val md5s = ArrayList<String>()
+                val labels = Array(bundles.length()) { i ->
+                    val b = bundles.getJSONObject(i)
+                    val md5 = if (b.isNull("bundle_md5")) "" else b.optString("bundle_md5")
+                    md5s.add(md5)
+                    val day = b.optString("last", "").take(10)
+                    if (md5.isEmpty()) {
+                        "(no bundle recorded)  ${b.optInt("rows")} rows"
+                    } else {
+                        val c = b.optJSONObject("counts") ?: JSONObject()
+                        val changed = c.optInt("CHANGED since") + c.optInt("not in app now")
+                        val state = if (changed == 0) "all files same as now"
+                        else "$changed of ${b.optInt("files")} files changed since"
+                        "${md5.take(8)}  ${b.optInt("rows")} rows  $day\n$state"
+                    }
+                }
+                AlertDialog.Builder(this@GrandProjectActivity)
+                    .setTitle("Code files: job " + jobId.take(6))
+                    .setItems(labels) { _, which ->
+                        val md5 = md5s[which]
+                        if (md5.isEmpty()) {
+                            Toast.makeText(this@GrandProjectActivity,
+                                "These rows were written before code bundles were recorded.",
+                                Toast.LENGTH_LONG).show()
+                        } else {
+                            showCodeBundleFiles(md5)
+                        }
+                    }
+                    .setPositiveButton("Close", null)
+                    .show()
+            } catch (e: PyException) {
+                Toast.makeText(this@GrandProjectActivity,
+                    "Could not read code bundles: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@GrandProjectActivity, "Could not read code bundles: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    /** cbv-v1: one bundle's files, each compared with the code installed
+     * now (code_bundle_view.bundle_files_json). Read-only. */
+    private fun showCodeBundleFiles(bundleMd5: String) {
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val jsonText = withContext(Dispatchers.Default) {
+                    python.getModule("grand_project_query_mobile")
+                        .callAttr("code_bundle_files_json", offlineDataRoot, bundleMd5).toString()
+                }
+                val result = JSONObject(jsonText)
+                if (result.has("error")) {
+                    Toast.makeText(this@GrandProjectActivity, result.optString("error"), Toast.LENGTH_LONG).show()
+                } else {
+                    AlertDialog.Builder(this@GrandProjectActivity)
+                        .setTitle("Code bundle " + bundleMd5.take(8))
+                        .setMessage(result.optString("report_text"))
+                        .setPositiveButton("Close", null)
+                        .show()
+                }
+            } catch (e: PyException) {
+                Toast.makeText(this@GrandProjectActivity,
+                    "Could not read the bundle: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@GrandProjectActivity, "Could not read the bundle: ${e.message}", Toast.LENGTH_LONG).show()
+            } finally {
+                setLoading(false)
             }
         }
     }
