@@ -251,6 +251,18 @@ def _pass2_queue(root, run):
     return q, None
 
 
+_P2_SUMS = ("library_cuts", "live_dem_calls", "tiles_promoted", "windows_saved", "window_cache_hits")
+
+
+def _p2_totals(prior):
+    """DEM-origin totals over all of this run's Pass 2 batches (display fix 2026-10-06)."""
+    out = {k + "_total": sum(e["detail"].get(k, 0) or 0 for e in prior) for k in _P2_SUMS}
+    errs = [x for e in prior for x in (e["detail"].get("errors") or [])]
+    if errs:
+        out["errors"] = errs[-5:]
+    return out
+
+
 def _step_pass2(root, run, creds, deadline):
     import dem_library_mobile as dlm
     import grand_project_refinement as gpr
@@ -267,7 +279,7 @@ def _step_pass2(root, run, creds, deadline):
         if not queue or room <= 0:
             return {"refined_total": done_total, "failed_total": failed_total,
                     "remaining_strong": len(queue),
-                    "stopped_at_cap": bool(queue) and room <= 0}
+                    "stopped_at_cap": bool(queue) and room <= 0, **_p2_totals(prior)}
         if not creds["api_key"]:
             return {"skipped": "no OpenTopography API key", "remaining_strong": len(queue)}
         if dlm.budget_left(root) < opts["pass2_min_budget"]:
@@ -289,8 +301,13 @@ def _step_pass2(root, run, creds, deadline):
                   "failed": r.get("failed", 0), "library_cuts": lib.get("library_cuts", 0),
                   "live_dem_calls": live, "tiles_promoted": lib.get("tiles_promoted", 0),
                   "windows_saved": lib.get("windows_saved", 0),
-                  "window_cache_hits": lib.get("window_cache_hits", 0), "seconds": r.get("seconds")}
+                  "window_cache_hits": lib.get("window_cache_hits", 0), "seconds": r.get("seconds"),
+                  # why candidates failed, so the dialog can say (2026-10-06)
+                  "errors": [{"candidate": f.get("candidate_id", "")[:8],
+                              "error": str(f.get("error", ""))[:200]}
+                             for f in (r.get("failures") or [])][:5]}
         _event(root, run["id"], "pass2", "PROGRESS", detail)
+        prior.append({"detail": detail})
         done_total += detail["attempted"]
         failed_total += detail["failed"]
         batches += 1
@@ -301,7 +318,7 @@ def _step_pass2(root, run, creds, deadline):
             raise PauseStep("Copernicus throttling (circuit breaker tripped)", COPERNICUS_PAUSE_S)
         if detail["attempted"] == 0:
             return {"refined_total": done_total, "failed_total": failed_total,
-                    "note": "batch attempted nothing; stopping Pass 2"}
+                    "note": "batch attempted nothing; stopping Pass 2", **_p2_totals(prior)}
 
 
 def _step_provenance(root, run, creds, deadline):
@@ -358,6 +375,14 @@ def _step_trust(root, run, creds, deadline):
                              f"{AUTO_PREFIX} run {run['id'][:8]}: provenance VERIFIED, 0 failed tiles, "
                              f"no offline-guard pause, no Pass 2 failures")
         return {"decision": "TRUSTED"}
+    if cur and cur["trust"] == "TRUSTED":
+        # Our own earlier mark no longer holds (2026-10-06). A user mark was
+        # returned above and is never touched; never CORRUPTED.
+        review.set_job_trust(root, run["job_id"], "UNVERIFIED",
+                             f"{AUTO_PREFIX} run {run['id'][:8]}: earlier automatic TRUSTED "
+                             f"withdrawn -- " + "; ".join(reasons))
+        return {"decision": "withdrawn", "note": "earlier automatic TRUSTED mark set back to UNVERIFIED",
+                "reasons": reasons}
     return {"decision": "not marked", "reasons": reasons}
 
 
