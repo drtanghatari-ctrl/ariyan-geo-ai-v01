@@ -135,6 +135,7 @@ from typing import Any, Dict, List, Optional
 
 import debate_mobile
 import dem_source_mobile
+import sat_response_store
 import grand_project_db as db
 import grand_project_sync as sync
 import provenance_ledger
@@ -931,7 +932,8 @@ def _run_refinement_loop(
     sh_backoff.arm()
     dem_source_mobile.arm_live_dem_quota_breaker()
     dem_source_mobile.arm_dem_library(data_root)
-    copernicus = live_dem = dem_library = None
+    sat_response_store.arm(data_root)   # sat-v1: save-once satellite answers
+    copernicus = live_dem = dem_library = sat_store = None
     try:
         for i, cand in enumerate(chosen):
             _write_refine_status(
@@ -986,6 +988,7 @@ def _run_refinement_loop(
                     pass
             tally.dem_library = dem_source_mobile.dem_library_summary(
                 dem_source_mobile.dem_library_events() or [])
+            tally.sat_store = sat_response_store.current()
             _write_refine_status(
                 data_root, job_id, i + 1, total,
                 f"refined {i + 1}/{total}", health=was._render_run_health(tally))
@@ -995,6 +998,9 @@ def _run_refinement_loop(
         dem_library = dem_source_mobile.disarm_dem_library()
         if dem_library is not None:
             tally.dem_library = dem_library
+        sat_store = sat_response_store.disarm()
+        if sat_store is not None:
+            tally.sat_store = sat_store
 
     if stopped_reason:
         final_detail = f"stopped: live DEM unavailable, {len(not_started)} not started"
@@ -1031,6 +1037,7 @@ def _run_refinement_loop(
         "copernicus_throttle": copernicus,
         "opentopography_live_dem": live_dem,
         "dem_library": dem_library,
+        "satellite_store": sat_store,
     }
 
 
