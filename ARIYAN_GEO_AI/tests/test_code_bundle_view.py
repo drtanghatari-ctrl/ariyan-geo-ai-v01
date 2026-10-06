@@ -56,3 +56,4 @@ def test_job_bundles_and_errors(tmp_path):
     assert "error" in json.loads(cbv.bundle_files_json(root, "ab1"))
     assert "error" in json.loads(cbv.bundle_files_json(root, "ffffff"))
     assert "error" in json.loads(cbv.job_bundles_json(root, "zzzzzz"))
+
