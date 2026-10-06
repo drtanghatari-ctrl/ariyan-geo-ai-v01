@@ -54,9 +54,11 @@ def env(tmp_path, monkeypatch):
     def refine(r, j, refs, **k):
         assert k["require_live_dem"]
         mode["batches"].append(len(refs))
-        for c in refs:
+        f = 1 if mode["p2_fail"] else 0     # p2_fail = how many times refs[0] fails
+        if f:
+            mode["p2_fail"] -= 1
+        for c in refs[f:]:
             db.add_evidence_link(r, c, "DEM", gpr.REFINEMENT_RELATION, {"x": 1})
-        f = 1 if mode["p2_fail"] else 0
         return {"attempted": len(refs), "refined": len(refs) - f, "failed": f,
                 "failures": [{"candidate_id": refs[0], "error": "RuntimeError: token"}] if f else [],
                 "dem_library": {"library_cuts": 3, "library_misses": {}}, "copernicus_throttle": {"trips": 0}}
@@ -97,7 +99,7 @@ def test_happy_path_trusts_and_refines_only_strong(env):
 
 def test_pauses_recorded_and_trust_withheld_with_reasons(env):
     root, jid, mode = env
-    mode.update(sweep_pause=1, lc_problem=1, p2_fail=1, prov_ok=False)
+    mode.update(sweep_pause=1, lc_problem=1, p2_fail=10**6, prov_ok=False)
     rid = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
     assert _drive(root, rid) == "DONE"
     t = _trust(root, rid)
@@ -134,7 +136,7 @@ def test_auto_trust_withdrawn_when_later_run_falls_short(env):
     root, jid, mode = env
     rid = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
     assert _drive(root, rid) == "DONE" and _trust(root, rid)["decision"] == "TRUSTED"
-    mode.update(p2_fail=1)
+    mode.update(p2_fail=10**6)
     # second run needs strong candidates left: clear refinement links
     c = db.get_connection(root)
     with c:
@@ -142,8 +144,20 @@ def test_auto_trust_withdrawn_when_later_run_falls_short(env):
     rid2 = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
     assert _drive(root, rid2) == "DONE"
     t = _trust(root, rid2)
-    assert t["decision"] == "withdrawn" and any("Pass 2" in r for r in t["reasons"])
+    assert t["decision"] == "withdrawn" and any("still failed after retry" in r for r in t["reasons"])
     cur = review.list_job_trust(root)[0]
     assert cur["trust"] == "UNVERIFIED" and cur["reason"].startswith(ap.AUTO_PREFIX)
     p2 = json.loads(ap.auto_run_status_json(root, rid2))["steps"][ap.STEPS.index("pass2")]["detail"]
     assert "library_cuts_total" in p2 and p2["errors"]
+
+
+
+def test_failure_retried_successfully_does_not_block_trust(env):
+    root, jid, mode = env
+    mode.update(p2_fail=1)
+    rid = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
+    assert _drive(root, rid) == "DONE"
+    t = _trust(root, rid)
+    assert t["decision"] == "TRUSTED" and "succeeded on retry" in t["note"]
+    p2 = json.loads(ap.auto_run_status_json(root, rid))["steps"][ap.STEPS.index("pass2")]["detail"]
+    assert p2["failed_total"] == 1 and p2["remaining_strong"] == 0
