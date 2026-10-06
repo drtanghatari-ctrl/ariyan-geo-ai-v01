@@ -58,6 +58,7 @@ def env(tmp_path, monkeypatch):
             db.add_evidence_link(r, c, "DEM", gpr.REFINEMENT_RELATION, {"x": 1})
         f = 1 if mode["p2_fail"] else 0
         return {"attempted": len(refs), "refined": len(refs) - f, "failed": f,
+                "failures": [{"candidate_id": refs[0], "error": "RuntimeError: token"}] if f else [],
                 "dem_library": {"library_cuts": 3, "library_misses": {}}, "copernicus_throttle": {"trips": 0}}
     monkeypatch.setattr(gpr, "run_selected_refinement", refine)
     monkeypatch.setattr(pc, "check_job", lambda r, j: {"candidates": 18,
@@ -127,3 +128,22 @@ def test_budget_pause_and_repeated_failure(env, monkeypatch):
     monkeypatch.setattr(tcl, "label_job", lambda r, j: 1 / 0)
     rid2 = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
     assert _drive(root, rid2) == "FAILED"
+
+
+def test_auto_trust_withdrawn_when_later_run_falls_short(env):
+    root, jid, mode = env
+    rid = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
+    assert _drive(root, rid) == "DONE" and _trust(root, rid)["decision"] == "TRUSTED"
+    mode.update(p2_fail=1)
+    # second run needs strong candidates left: clear refinement links
+    c = db.get_connection(root)
+    with c:
+        c.execute("DELETE FROM evidence_link")
+    rid2 = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
+    assert _drive(root, rid2) == "DONE"
+    t = _trust(root, rid2)
+    assert t["decision"] == "withdrawn" and any("Pass 2" in r for r in t["reasons"])
+    cur = review.list_job_trust(root)[0]
+    assert cur["trust"] == "UNVERIFIED" and cur["reason"].startswith(ap.AUTO_PREFIX)
+    p2 = json.loads(ap.auto_run_status_json(root, rid2))["steps"][ap.STEPS.index("pass2")]["detail"]
+    assert "library_cuts_total" in p2 and p2["errors"]
