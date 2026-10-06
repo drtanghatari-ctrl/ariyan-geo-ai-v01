@@ -523,3 +523,4 @@ def list_auto_runs_json(root, job_ref):
 
 def cancel_auto_run_json(root, run_ref, reason=""):
     return _wrap(cancel_auto_run, root, run_ref, reason)
+
