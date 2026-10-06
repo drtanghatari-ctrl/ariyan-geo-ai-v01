@@ -632,10 +632,26 @@ class WideAreaSearchActivity : AppCompatActivity() {
             setPadding(pad, (8 * density).toInt(), pad, 0)
             addView(buttonDemLibrary)
         }
+        // ap-v1 (2026-10-05): whole-job automation (auto_pipeline.py +
+        // AutoPipelineWorker). Shows the current run if there is one.
+        val buttonAutoRun = MaterialButton(this).apply {
+            text = "Auto run…"
+            setAllCaps(false)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val autoRunRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            val pad = (16 * density).toInt()
+            setPadding(pad, (8 * density).toInt(), pad, 0)
+            addView(buttonAutoRun)
+        }
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(failedTileRow)
             addView(demLibraryRow)
+            addView(autoRunRow)
             addView(stageText)
             addView(progressText)
         }
@@ -650,6 +666,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
             .create()
         buttonWhyFailed.setOnClickListener { showTileFailures(jobId, title) }
         buttonDemLibrary.setOnClickListener { showDemLibraryPlan(jobId, title) }
+        buttonAutoRun.setOnClickListener { showAutoRun(jobId, title) }
         buttonRetryFailed.setOnClickListener {
             // Closed first so that, when reopened, it re-reads the true
             // counts instead of the pre-retry numbers.
@@ -991,6 +1008,140 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 Toast.makeText(this@WideAreaSearchActivity, "DEM library download failed: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
             }
         }
+    }
+
+    private fun autoPipeline() = python.getModule("auto_pipeline")
+
+    /** ap-v1: shows the newest automatic run of this job (with its 10
+     * steps) or offers to start one. */
+    private fun showAutoRun(jobId: String, title: String) {
+        lifecycleScope.launch {
+            try {
+                val runs = JSONArray(withContext(Dispatchers.Default) {
+                    autoPipeline().callAttr("list_auto_runs_json", offlineDataRoot, jobId).toString()
+                }.let { if (it.trimStart().startsWith("{")) "[]" else it })
+                val latest = if (runs.length() > 0) runs.getJSONObject(0) else null
+                if (latest == null) { offerAutoRunStart(jobId, title); return@launch }
+                val runId = latest.getString("run_id")
+                val st = JSONObject(withContext(Dispatchers.Default) {
+                    autoPipeline().callAttr("auto_run_status_json", offlineDataRoot, runId).toString()
+                })
+                val state = st.optString("state")
+                val body = buildString {
+                    append("Run ").append(runId.take(8)).append(" -- ").append(state)
+                    if (st.optInt("paused_for_s") > 0) {
+                        append(" (paused, resumes in ~").append(st.optInt("paused_for_s") / 60).append(" min)")
+                    }
+                    append("\nStarted ").append(st.optString("created_at").take(19)).append(" UTC\n\n")
+                    val steps = st.optJSONArray("steps") ?: JSONArray()
+                    for (i in 0 until steps.length()) {
+                        val s = steps.getJSONObject(i)
+                        val mark = when (s.optString("status")) {
+                            "DONE" -> "✓"; "SKIPPED" -> "–"; "PAUSED" -> "⏸"; "FAILED" -> "✗"; else -> "·"
+                        }
+                        append(mark).append(" ").append(i + 1).append(". ").append(s.optString("step"))
+                        append("  ").append(s.optString("status")).append("\n")
+                        val d = s.optJSONObject("detail")
+                        if (d != null && d.length() > 0) append(autoStepLine(s.optString("step"), d))
+                    }
+                }
+                val b = AlertDialog.Builder(this@WideAreaSearchActivity)
+                    .setTitle("Auto run -- $title")
+                    .setView(scrollableText(body))
+                    .setPositiveButton("Close", null)
+                if (state == "RUNNING") {
+                    b.setNegativeButton("Stop run") { _, _ -> confirmCancelAutoRun(runId) }
+                    b.setNeutralButton("Resume now") { _, _ ->
+                        AutoPipelineWorker.enqueue(this@WideAreaSearchActivity, runId, offlineDataRoot)
+                        Toast.makeText(this@WideAreaSearchActivity, "Automatic run resumed.", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    b.setNeutralButton("New run…") { _, _ -> offerAutoRunStart(jobId, title) }
+                }
+                b.show()
+            } catch (e: PyException) {
+                Toast.makeText(this@WideAreaSearchActivity, "Auto run: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun autoStepLine(step: String, d: JSONObject): String = buildString {
+        fun line(t: String) { append("     ").append(t).append("\n") }
+        when {
+            d.has("reason") -> line(d.optString("reason"))
+            d.has("error") -> line(d.optString("error").take(160))
+            d.has("skipped") -> line(d.optString("skipped"))
+            step == "pass2" && d.has("refined_total") ->
+                line("refined ${d.optInt("refined_total")}, failed ${d.optInt("failed_total")}, " +
+                     "strong left ${d.optInt("remaining_strong")}")
+            step == "provenance" -> line("${d.optString("verdict")} (${d.optInt("candidates_verified")}/${d.optInt("candidates")})")
+            step == "trust" -> {
+                line(d.optString("decision") + (if (d.has("note")) " -- " + d.optString("note") else ""))
+                val rs = d.optJSONArray("reasons")
+                if (rs != null) for (i in 0 until rs.length()) line("• " + rs.optString(i))
+            }
+            step == "report" -> line("${d.optInt("rows_shown")} rows -> " + d.optString("html_path").substringAfterLast('/'))
+            d.has("note") -> line(d.optString("note"))
+        }
+    }
+
+    private fun offerAutoRunStart(jobId: String, title: String) {
+        val body = "Runs the whole job automatically, in the background, in this order:\n\n" +
+            "1. DEM library (download the 1-degree tiles, spot-check)\n" +
+            "2. Pass 1 sweep: DEM-only, offline-first, COP30\n" +
+            "3. Land-cover flags\n4. Terrain labels\n5. Auto-review\n" +
+            "6. Pass 2 on every calib-v1 strong, non-rejected candidate, strongest first " +
+            "(library-first; max 40 live DEM calls per rolling 24 h; up to 50 candidates)\n" +
+            "7. Auto-review again\n8. Provenance check\n" +
+            "9. Automatic trust: TRUSTED only if provenance VERIFIED, 0 failed tiles, no offline-guard " +
+            "pause, no Pass 2 failures and identical spot-checks. A trust mark you set is never changed; " +
+            "nothing is ever marked Corrupted.\n" +
+            "10. Report (top 50, rounded coordinates)\n\n" +
+            "Quota, throttling and no-internet pause the run and it resumes by itself. It survives " +
+            "the app being closed and the phone restarting. Every step is logged."
+        AlertDialog.Builder(this)
+            .setTitle("Auto run -- $title")
+            .setView(scrollableText(body))
+            .setPositiveButton("Start automatic run") { _, _ -> startAutoRun(jobId) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun startAutoRun(jobId: String) {
+        lifecycleScope.launch {
+            try {
+                val r = JSONObject(withContext(Dispatchers.Default) {
+                    autoPipeline().callAttr("start_auto_run_json", offlineDataRoot, jobId, "").toString()
+                })
+                if (r.has("error")) {
+                    Toast.makeText(this@WideAreaSearchActivity, "Auto run: ${r.optString("error")}", Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                val runId = r.getString("run_id")
+                AutoPipelineWorker.enqueue(this@WideAreaSearchActivity, runId, offlineDataRoot)
+                Toast.makeText(this@WideAreaSearchActivity,
+                    "Automatic run ${runId.take(8)} started. Tap Auto run… to follow it.", Toast.LENGTH_LONG).show()
+            } catch (e: PyException) {
+                Toast.makeText(this@WideAreaSearchActivity, "Auto run: ${cleanErrorMessage(e.message)}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun confirmCancelAutoRun(runId: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Stop automatic run ${runId.take(8)}?")
+            .setMessage("Steps already done stay done and recorded. The run cannot be resumed; you can start a new one later (it will skip finished work).")
+            .setPositiveButton("Stop run") { _, _ ->
+                AutoPipelineWorker.cancel(this, runId)
+                lifecycleScope.launch {
+                    withContext(Dispatchers.Default) {
+                        autoPipeline().callAttr("cancel_auto_run_json", offlineDataRoot, runId, "stopped by user").toString()
+                    }
+                    Toast.makeText(this@WideAreaSearchActivity, "Automatic run stopped.", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Keep running", null)
+            .show()
     }
 
     private fun retryFailedTiles(jobId: String, title: String) {
