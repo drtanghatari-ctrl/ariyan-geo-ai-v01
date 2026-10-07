@@ -31,7 +31,7 @@ import traceback
 
 import srtm_library as lib
 
-VERSION = "libfill-v1"
+VERSION = "libfill-v1.1"  # cop-bulk-v1: bulk COP30 counts as present
 DAILY_LIVE_CAP = 40
 WINDOW_S = 24 * 3600
 SPOT_HALF_DEG = 0.005   # spot-check window: ~1.1 km x ~0.9 km
@@ -84,19 +84,39 @@ def _plan(root, job_id, demtypes):
         idx = lib.load_index(root, dt)
         needed = lib.tiles_for_box(s - lib.TILE_MARGIN_DEG, n + lib.TILE_MARGIN_DEG,
                                    w - lib.TILE_MARGIN_DEG, e + lib.TILE_MARGIN_DEG)
-        present, missing = [], []
+        present, missing, bulk = [], [], []
         for la, lo in needed:
             name = lib.tile_name(la, lo)
             if name in idx:
                 present.append({"tile": name, "sha256": idx[name]["sha256"],
-                                "bytes": idx[name].get("bytes")})
+                                "bytes": idx[name].get("bytes"), "source": "library"})
+                continue
+            bpath = _bulk_cover(root, dt, la, lo)
+            if bpath is not None:
+                # cop-bulk-v1: cells already on the device in the bulk COP30
+                # store; never downloaded again (sha256 shown on demand only --
+                # hashing ~40 MB per tile would slow this read-only dialog).
+                bulk.append({"tile": name, "source": "bulk",
+                             "file": os.path.relpath(bpath, root)})
             else:
                 missing.append(name)
-        out["demtypes"][dt] = {"needed": len(needed), "present": present, "missing": missing}
+        out["demtypes"][dt] = {"needed": len(needed), "present": present,
+                               "bulk": bulk, "missing": missing}
         out["missing_total"] += len(missing)
     out["budget_left_24h"] = budget_left(root)
     out["daily_cap"] = DAILY_LIVE_CAP
     return out
+
+
+def _bulk_cover(root, demtype, la, lo):
+    """Path of a usable bulk COP30 tile for this degree, else None."""
+    if demtype != "COP30":
+        return None
+    try:
+        import cop30_bulk
+        return cop30_bulk.covered(root, la, lo)
+    except Exception:
+        return None
 
 
 def dem_library_plan_json(root, job_id, demtypes_csv="SRTMGL1,COP30"):
@@ -105,6 +125,14 @@ def dem_library_plan_json(root, job_id, demtypes_csv="SRTMGL1,COP30"):
         return json.dumps(_plan(root, job_id, dts))
     except Exception as ex:
         return json.dumps({"error": f"{type(ex).__name__}: {ex}"})
+
+
+def _bulk_cut_ok(root, win):
+    try:
+        import cop30_bulk
+        return cop30_bulk.cut_window(root, *win)[0] is not None
+    except Exception:
+        return False
 
 
 def fill_dem_library_json(root, job_id, api_key, max_calls=10, spot_check=True,
@@ -122,7 +150,8 @@ def fill_dem_library_json(root, job_id, api_key, max_calls=10, spot_check=True,
             _record_call(root, label)
             return True
 
-        report = lib.ensure_tiles(root, dts, s, n, w, e, api_key, int(max_calls), on_live_call=gate)
+        report = lib.ensure_tiles(root, dts, s, n, w, e, api_key, int(max_calls), on_live_call=gate,
+                                  covered=lambda dt, la, lo: _bulk_cover(root, dt, la, lo) is not None)
         report["downloaded"] = [{k: d[k] for k in ("tile", "demtype", "sha256", "bytes")}
                                 for d in report["downloaded"]]
 
@@ -131,14 +160,21 @@ def fill_dem_library_json(root, job_id, api_key, max_calls=10, spot_check=True,
             cy, cx = (s + n) / 2.0, (w + e) / 2.0
             win = (cy - SPOT_HALF_DEG, cy + SPOT_HALF_DEG, cx - SPOT_HALF_DEG, cx + SPOT_HALF_DEG)
             for dt in dts:
+                use_bulk = False
                 if lib.cut_window(root, dt, *win)[0] is None:
-                    checks.append({"demtype": dt, "skipped": "window not cuttable (near-tie or tile missing)"})
-                    continue
+                    use_bulk = dt == "COP30" and _bulk_cut_ok(root, win)
+                    if not use_bulk:
+                        checks.append({"demtype": dt, "skipped": "window not cuttable (near-tie or tile missing)"})
+                        continue
                 if not gate(f"{dt}/spot_check"):
                     checks.append({"demtype": dt, "skipped": "24 h budget used up"})
                     continue
                 try:
-                    r = lib.spot_check(root, dt, *win, api_key)
+                    if use_bulk:
+                        import cop30_bulk
+                        r = cop30_bulk.spot_check(root, *win, api_key)
+                    else:
+                        r = lib.spot_check(root, dt, *win, api_key)
                     checks.append({"demtype": dt, **{k: v for k, v in r.items()
                                                      if isinstance(v, (bool, int, float, str, list, type(None)))}})
                 except Exception as ex:
