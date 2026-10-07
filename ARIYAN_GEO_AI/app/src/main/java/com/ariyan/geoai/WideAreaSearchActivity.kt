@@ -936,6 +936,15 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 append("  ✓ ").append(t.optString("tile")).append("  sha ")
                 append(t.optString("sha256").take(12)).append("…\n")
             }
+            // cop-bulk-v1 (2026-10-07): COP30 cells already on the device in
+            // the bulk Copernicus store (the files Pass 1 reads) -- proven
+            // identical to the library copy, so they are never downloaded.
+            val bulk = o.optJSONArray("bulk")
+            if (bulk != null) for (i in 0 until bulk.length()) {
+                val t = bulk.getJSONObject(i)
+                append("  ✓ ").append(t.optString("tile")).append("  bulk store (")
+                append(t.optString("file")).append(")\n")
+            }
             val miss = o.optJSONArray("missing")
             if (miss != null) for (i in 0 until miss.length()) {
                 append("  ✗ ").append(miss.optString(i)).append("  missing\n")
