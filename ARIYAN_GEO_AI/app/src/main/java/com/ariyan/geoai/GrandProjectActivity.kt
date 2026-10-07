@@ -653,6 +653,11 @@ class GrandProjectActivity : AppCompatActivity() {
             if (knownSiteText.isNotEmpty() && knownSiteText != "null") {
                 append("\nknown site: ").append(knownSiteText)
             }
+            // lc-v2 (2026-10-07): land-cover context line, display only.
+            val landText = row.optString("land_cover_text", "")
+            if (landText.isNotEmpty() && landText != "null") {
+                append("\nland cover: ").append(landText)
+            }
             append("\n(tap for confidence history + evidence)")
         }
         return TextView(this).apply {
