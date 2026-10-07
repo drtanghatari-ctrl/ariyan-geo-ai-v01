@@ -49,6 +49,10 @@ CHANGELOG
     2. the candidate is land-cover flagged (water, or trees/buildings
        >= 20 % within ~60 m; land_cover_flags.flag_reason() -- the SAME
        rule Pass 2 uses, not a copy)                       -> Rejected
+       (lc-v2, 2026-10-07: rule 2 now rejects only when the CENTRE
+       (~15 m) is >= 50 % trees + buildings + water; trees, springs or
+       buildings merely nearby never reject. Same land_cover_flags
+       decision Pass 2 uses. Test T1 PASS.)
     3. Pass 2 refinement markers exist and at least one was a LIVE DEM
        fetch that reproduced the anomaly                  -> Supported
     4. Pass 2 markers exist but none is a live reproduction (offline
@@ -797,33 +801,34 @@ def review_summary_for_project(db_root: str, grand_project_id: str) -> Dict[str,
 # ---------------------------------------------------------------------------
 
 _LAND_COVER_TEXT = {
+    # lc-v1 (old rule) -- still used for candidates not yet re-checked.
     "water": "open water within ~60 m (ESA WorldCover 2021)",
     "tree_or_built": "trees or buildings cover at least 20 % within ~60 m (ESA WorldCover 2021)",
+}
+_LAND_COVER_TEXT_V2 = {
+    # lc-v2 (2026-10-07): only the centre itself can reject.
+    "water": "the centre (~15 m) is mostly open water (ESA WorldCover 2021, lc-v2)",
+    "tree_or_built": "the centre (~15 m) is mostly trees or buildings, so the DEM bump is "
+                     "likely canopy or roof (ESA WorldCover 2021, lc-v2)",
 }
 
 
 def _land_cover_reasons(conn, candidate_ids: set) -> Optional[Dict[str, str]]:
-    """candidate_id -> flag reason for flagged candidates, using
-    land_cover_flags.flag_reason() itself. None if the land-cover table or
-    module is unavailable (then rule 2 is simply not applied)."""
+    """candidate_id -> human reason for land-cover REJECTED candidates.
+    lc-v2 (2026-10-07) decides wherever a v2 reading exists; candidates
+    read only under the old rule keep the old rule until re-read (see
+    land_cover_flags.py CHANGELOG). Trees / water / buildings merely
+    NEAR a candidate never reject it. None if the module is unavailable
+    (then rule 2 is simply not applied)."""
     try:
         import land_cover_flags
-        has_table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='candidate_land_cover'"
-        ).fetchone()
-        if not has_table:
-            return {}
-        rows = conn.execute(
-            "SELECT candidate_id, center_class, frac_tree, frac_built, frac_water "
-            "FROM candidate_land_cover"
-        ).fetchall()
+        flagged, _near = land_cover_flags.land_cover_decisions(conn, candidate_ids)
         out: Dict[str, str] = {}
-        for row in rows:
-            if row["candidate_id"] not in candidate_ids:
-                continue
-            reason = land_cover_flags.flag_reason(row)
-            if reason:
-                out[row["candidate_id"]] = reason
+        for cid, (reason, method) in flagged.items():
+            if method == land_cover_flags.LC2_METHOD:
+                out[cid] = _LAND_COVER_TEXT_V2.get(reason, reason)
+            else:
+                out[cid] = _LAND_COVER_TEXT.get(reason, reason) + " (old rule lc-v1; not yet re-checked)"
         return out
     except Exception:
         return None
@@ -930,7 +935,7 @@ def auto_review_project(db_root: str, grand_project_id: str) -> Dict[str, Any]:
                 why = f"Job {job_id[:6]} is marked CORRUPTED ({t['reason']})."
             elif land is not None and cid in land:
                 status = STATUS_REJECTED
-                why = "Land cover: " + _LAND_COVER_TEXT.get(land[cid], land[cid]) + "."
+                why = "Land cover: " + land[cid] + "."
             elif hillside and cid in hillside:
                 status = STATUS_REJECTED
                 why = hillside[cid]
