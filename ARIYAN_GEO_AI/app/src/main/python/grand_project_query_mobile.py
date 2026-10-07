@@ -94,7 +94,25 @@ def list_candidates_json(db_root: str, grand_project_id: str) -> str:
         profile = calib_profile.active_profile(db_root)
     except Exception:
         calib_profile, profile = None, None
+    # ADDED 2026-10-07 (lc-v2): one short land-cover line per row. Extra
+    # key only: land_cover_text (null when nothing to say). Trees, water
+    # or buildings NEAR a candidate are context, never a rejection. A
+    # failure never breaks the list.
+    land_flagged, land_near = {}, {}
+    try:
+        import land_cover_flags
+        _conn = db.get_connection(db_root)
+        try:
+            land_flagged, land_near = land_cover_flags.land_cover_decisions(
+                _conn, {r["id"] for r in rows})
+        finally:
+            _conn.close()
+    except Exception:
+        land_cover_flags = None
     for row in rows:
+        row["land_cover_text"] = (land_cover_flags.land_cover_text(
+            land_flagged.get(row["id"]), land_near.get(row["id"]))
+            if land_cover_flags is not None else None)
         row["calib_label"] = (calib_profile.LABEL_TEXT
                               if profile is not None and calib_profile.is_strong(row.get("score"), profile)
                               else None)
