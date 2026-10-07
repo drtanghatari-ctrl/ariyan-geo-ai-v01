@@ -201,15 +201,46 @@ def dem_library_summary(events: list) -> dict:
             # save-once (2026-10-06): how the misses were turned into data
             # that will not need fetching again.
             "window_cache_hits": sum(1 for e in events if e.get("via") == "window_cache"),
+            # cop-bulk-v1 (2026-10-07): COP30 windows cut from the bulk tiles
+            # (also counted in library_cuts).
+            "bulk_cop30_cuts": sum(1 for e in events if e.get("via") == "bulk_cop30"),
             "tiles_promoted": sum(1 for e in events if e.get("via") == "promoted_tile"),
             "windows_saved": sum(1 for e in events if e.get("window_saved")),
             "live_calls": sum(e.get("live_calls", 0) for e in events)}
+
+
+def _try_bulk_cop30(lib: dict, aoi) -> Optional[tuple]:
+    """cop-bulk-v1 (2026-10-07): a COP30 window is cut from the bulk
+    Copernicus tiles Pass 1 already uses (offline_data/<country>/dem/), proven
+    cell-for-cell identical to the library/OpenTopography copy (csc-v1).
+    -> (grid, g) or None; the miss reason is returned for the event log."""
+    try:
+        import cop30_bulk
+        g, why = cop30_bulk.cut_window(lib["root"], aoi.min_lat, aoi.max_lat,
+                                       aoi.min_lon, aoi.max_lon)
+    except Exception as exc:
+        return None, f"bulk_error: {type(exc).__name__}: {exc}"[:200]
+    if g is None:
+        return None, why
+    lib["events"].append({"demtype": "COP30", "served": True, "reason": "ok",
+                          "via": "bulk_cop30", "tile": g["library_tile"],
+                          "sha256": g["library_sha256"]})
+    for f in g["bulk_files"]:
+        _note_library_file(f["path"], f"bulk/{f['name']}.tif", f["sha256"],
+                           g["library_version"], aoi)
+    import srtm_library
+    return (srtm_library.as_ascii_grid(g), g), None
 
 
 def _try_library(demtype: str, aoi) -> Optional[tuple]:
     lib = getattr(_tl, "library", None)
     if lib is None:
         return None
+    bulk_miss = None
+    if demtype == "COP30":
+        hit, bulk_miss = _try_bulk_cop30(lib, aoi)
+        if hit is not None:
+            return hit
     try:
         import srtm_library
         if demtype not in srtm_library.SUPPORTED_DEMTYPES:
@@ -221,6 +252,8 @@ def _try_library(demtype: str, aoi) -> Optional[tuple]:
         g, why = None, f"library_error: {type(exc).__name__}: {exc}"[:200]
     ev = {"demtype": demtype, "served": g is not None, "reason": why,
           "tile": g and g["library_tile"], "sha256": g and g["library_sha256"]}
+    if bulk_miss is not None:
+        ev["bulk_miss"] = bulk_miss
     lib["events"].append(ev)
     if g is None:
         return None
@@ -440,6 +473,12 @@ class OpenTopographyAAIGridSource:
 
     def fetch(self, aoi: AreaOfInterest) -> DEM:
         hit = _try_library(self.demtype, aoi)
+        if hit is not None and hit[1].get("bulk_files"):
+            grid, g = hit
+            return self._grid_to_dem(grid, aoi, (
+                f"Cut from this device's bulk Copernicus GLO-30 tile(s) {g['library_tile']} "
+                f"({g['library_version']}, sha256 {g['library_sha256'][:16]}); proven "
+                "cell-for-cell identical to the OpenTopography COP30 copy (csc-v1)."))
         if hit is not None:
             grid, g = hit
             return self._grid_to_dem(grid, aoi, (
