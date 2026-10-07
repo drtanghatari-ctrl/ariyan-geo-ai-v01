@@ -83,6 +83,26 @@ CHANGELOG:
   manual logic trace) only -- NOT yet run on real hardware against this
   candidate or any other. Treat the water-fraction path specifically as
   unverified on-device until it has been.
+- 2026-10-07 (lc-v2, user's request + frozen test T1 PASS): land cover now
+  judges the EVIDENCE, not the place. Ancient sites often sit beside
+  trees, springs and qanats, so "trees or water nearby" must not throw a
+  candidate away. The same 13 x 13 window is now also split into a CENTRE
+  (3 x 3 px, about +/-15 m -- the same core box the satellite checks use)
+  and a RING (the rest of the window). lc-v2 rule:
+    REJECT only when tree (10, 95) + built-up (50) + water (80) make up
+    >= 50 % of the valid centre pixels (the bump itself is a treetop, a
+    roof or a pond). Fewer than 5 valid centre pixels -> not rejected.
+    Ring shares >= 20 % (trees / water / built) are LABELS only.
+  The lc-v2 reject reason is reported with the existing keys ("water" if
+  water is the largest of the three centre shares, else "tree_or_built"),
+  so every existing caller and dialog keeps working unchanged.
+  Stored in a NEW table candidate_land_cover_v2 (old rows untouched).
+  job_flags() uses lc-v2 where a v2 row exists; a candidate checked only
+  under the old rule keeps the OLD rule until ensure_job_land_cover()
+  re-reads it (fail-safe: nothing is un-rejected without a real reading).
+  Test T1 (t1_lc_v2_test.py, md5 4b490fda077497384f97f4f930def8e1, run on
+  device 2026-10-07 over 4194 candidates): rejected 2018 -> 1627,
+  near-site (<= 500 m) rejected 26 -> 24, VERDICT PASS.
 """
 
 from __future__ import annotations
@@ -122,6 +142,17 @@ WATER_CLASS = 80
 
 REASON_TREE_OR_BUILT = "tree_or_built"
 REASON_WATER = "water"
+
+# lc-v2 (2026-10-07) -- frozen by test T1, see CHANGELOG.
+LC2_METHOD = "lc-v2"
+CENTRE_HALF_PX = 1            # 3 x 3 px, about +/-15 m
+CENTRE_MIN_VALID = 5
+CENTRE_REJECT_SHARE = 0.50
+RING_LABEL_SHARE = 0.20
+_TREE_CLASSES = (10, 95)
+_BUILT_CLASSES = (50,)
+_WATER_CLASSES = (80,)
+_CROP_CLASSES = (40,)
 
 # ESA WorldCover class codes -> the share column each one counts toward.
 # 10 tree cover, 95 mangroves (tree-like), 20 shrubland, 30 grassland,
@@ -180,6 +211,26 @@ CREATE TABLE IF NOT EXISTS candidate_land_cover (
     frac_bare     REAL,
     frac_water    REAL,
     frac_other    REAL
+)
+"""
+
+_TABLE_V2_SQL = """
+CREATE TABLE IF NOT EXISTS candidate_land_cover_v2 (
+    candidate_id  TEXT PRIMARY KEY,
+    computed_at   TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    method        TEXT NOT NULL,
+    centre_px     INTEGER NOT NULL,
+    centre_valid  INTEGER NOT NULL,
+    c_tree        REAL,
+    c_built       REAL,
+    c_water       REAL,
+    c_crop        REAL,
+    ring_valid    INTEGER NOT NULL,
+    r_tree        REAL,
+    r_built       REAL,
+    r_water       REAL,
+    r_crop        REAL
 )
 """
 
@@ -458,6 +509,74 @@ def flag_reason(row: Any) -> Optional[str]:
     return None
 
 
+def _share(window, valid, classes) -> float:
+    n = int(valid.sum())
+    if n == 0:
+        return 0.0
+    hit = 0
+    for c in classes:
+        hit += int(((window == c) & valid).sum())
+    return hit / n
+
+
+def sample_centre_ring(reader: WorldCoverHttpTile, lat: float, lon: float,
+                       half_px: int = WINDOW_HALF_PX
+                       ) -> Optional[Dict[str, Any]]:
+    """lc-v2: shares in the CENTRE (3 x 3 px) and the RING (rest of the
+    13 x 13 window) around the candidate's pixel -- the same pixel and
+    window sample_fractions() uses. None when the point is outside the
+    tile."""
+    col_f, row_f = reader.pixel_of(lon, lat)
+    r = int(math.floor(row_f))
+    c = int(math.floor(col_f))
+    if r < 0 or c < 0 or r >= reader.height or c >= reader.width:
+        return None
+    w = reader.read_window(r - half_px, r + half_px + 1, c - half_px, c + half_px + 1)
+    k = half_px - CENTRE_HALF_PX
+    size = 2 * CENTRE_HALF_PX + 1
+    cw = w[k:k + size, k:k + size]
+    cvalid = cw != 0
+    ring_mask = np.ones(w.shape, dtype=bool)
+    ring_mask[k:k + size, k:k + size] = False
+    rvalid = (w != 0) & ring_mask
+    return {
+        "centre_px": size * size,
+        "centre_valid": int(cvalid.sum()),
+        "c_tree": _share(cw, cvalid, _TREE_CLASSES),
+        "c_built": _share(cw, cvalid, _BUILT_CLASSES),
+        "c_water": _share(cw, cvalid, _WATER_CLASSES),
+        "c_crop": _share(cw, cvalid, _CROP_CLASSES),
+        "ring_valid": int(rvalid.sum()),
+        "r_tree": _share(w, rvalid, _TREE_CLASSES),
+        "r_built": _share(w, rvalid, _BUILT_CLASSES),
+        "r_water": _share(w, rvalid, _WATER_CLASSES),
+        "r_crop": _share(w, rvalid, _CROP_CLASSES),
+    }
+
+
+def flag_reason_v2(row: Any) -> Optional[str]:
+    """lc-v2 rule on one stored candidate_land_cover_v2 row. Returns
+    REASON_WATER, REASON_TREE_OR_BUILT or None (not rejected)."""
+    if (row["centre_valid"] or 0) < CENTRE_MIN_VALID:
+        return None
+    tree = row["c_tree"] or 0.0
+    built = row["c_built"] or 0.0
+    water = row["c_water"] or 0.0
+    if tree + built + water < CENTRE_REJECT_SHARE:
+        return None
+    return REASON_WATER if water >= max(tree, built) else REASON_TREE_OR_BUILT
+
+
+def ring_labels(row: Any) -> List[str]:
+    """lc-v2 context labels (never a rejection): what covers >= 20 % of
+    the ring around the candidate."""
+    out = []
+    for name, key in (("trees", "r_tree"), ("water", "r_water"), ("buildings", "r_built")):
+        if (row[key] or 0.0) >= RING_LABEL_SHARE:
+            out.append(name)
+    return out
+
+
 # ============================ DATABASE ============================
 
 def _now_iso() -> str:
@@ -468,6 +587,7 @@ def _ensure_table(conn) -> None:
     db.initialize_schema(conn)
     with conn:
         conn.execute(_TABLE_SQL)
+        conn.execute(_TABLE_V2_SQL)
 
 
 def _job_candidate_rows(conn, job_id: str, only_unchecked: bool) -> List[Any]:
@@ -480,44 +600,105 @@ def _job_candidate_rows(conn, job_id: str, only_unchecked: bool) -> List[Any]:
         )
     """
     if only_unchecked:
-        sql += " AND c.id NOT IN (SELECT candidate_id FROM candidate_land_cover)"
+        # lc-v2 (2026-10-07): a candidate needs a reading when EITHER
+        # table lacks it (one window read fills both).
+        sql += (" AND (c.id NOT IN (SELECT candidate_id FROM candidate_land_cover)"
+                " OR c.id NOT IN (SELECT candidate_id FROM candidate_land_cover_v2))")
     return conn.execute(sql, (job_id,)).fetchall()
+
+
+def _decide(conn, candidate_ids: Optional[set] = None
+            ) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, List[str]], set]:
+    """(flagged, near, checked). flagged: candidate_id -> (reason, method)
+    for rejected candidates -- lc-v2 where a v2 row exists, else the old
+    rule (method "lc-v1"). near: candidate_id -> lc-v2 ring labels.
+    checked: every candidate with a row in either table. candidate_ids
+    limits the result (None = all)."""
+    flagged: Dict[str, Tuple[str, str]] = {}
+    near: Dict[str, List[str]] = {}
+    checked: set = set()
+    v2_ids: set = set()
+    for row in conn.execute("SELECT * FROM candidate_land_cover_v2").fetchall():
+        cid = row["candidate_id"]
+        if candidate_ids is not None and cid not in candidate_ids:
+            continue
+        v2_ids.add(cid)
+        checked.add(cid)
+        reason = flag_reason_v2(row)
+        if reason:
+            flagged[cid] = (reason, LC2_METHOD)
+        labels = ring_labels(row)
+        if labels:
+            near[cid] = labels
+    for row in conn.execute(
+            "SELECT candidate_id, center_class, frac_tree, frac_built, frac_water "
+            "FROM candidate_land_cover").fetchall():
+        cid = row["candidate_id"]
+        if candidate_ids is not None and cid not in candidate_ids:
+            continue
+        checked.add(cid)
+        if cid in v2_ids:
+            continue
+        reason = flag_reason(row)
+        if reason:
+            flagged[cid] = (reason, "lc-v1")
+    return flagged, near, checked
+
+
+def land_cover_decisions(conn, candidate_ids: set
+                         ) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, List[str]]]:
+    """For other modules (auto-review, candidate list): (flagged, near)
+    for the given candidates, read-only, no network."""
+    _ensure_tables_readonly_safe(conn)
+    flagged, near, _ = _decide(conn, candidate_ids)
+    return flagged, near
+
+
+def _ensure_tables_readonly_safe(conn) -> None:
+    with conn:
+        conn.execute(_TABLE_SQL)
+        conn.execute(_TABLE_V2_SQL)
+
+
+def land_cover_text(reason_method: Optional[Tuple[str, str]], labels: Optional[List[str]]) -> Optional[str]:
+    """One short line for the candidate list, or None when nothing to say."""
+    if reason_method:
+        reason, method = reason_method
+        if method == LC2_METHOD:
+            what = "water" if reason == REASON_WATER else "trees or buildings"
+            return "centre (~15 m) mostly %s -- rejected (lc-v2)" % what
+        return "flagged by old rule (lc-v1), not yet re-checked with lc-v2"
+    if labels:
+        return "near %s (context only, not a rejection)" % ", ".join(labels)
+    return None
 
 
 def job_flags(db_root: str, job_id: str) -> Dict[str, Any]:
     """Read-only: {"candidates": N, "checked": N, "flagged": {candidate_id:
-    reason}, "by_reason": {reason: count}} for a job. Never touches the
+    reason}, "by_reason": {reason: count}, "by_method": {method: count},
+    "near": {candidate_id: [labels]}} for a job. Never touches the
     network. Candidates that were never checked simply are not in
-    "flagged" (they are treated as not flagged)."""
+    "flagged" (they are treated as not flagged). lc-v2 decides wherever a
+    v2 row exists; otherwise the old rule (lc-v1) still applies."""
     conn = db.get_connection(db_root)
     try:
         _ensure_table(conn)
-        n_candidates = len(_job_candidate_rows(conn, job_id, only_unchecked=False))
-        rows = conn.execute(
-            """
-            SELECT l.candidate_id, l.center_class, l.frac_tree, l.frac_built,
-                   l.frac_water
-            FROM candidate_land_cover l
-            JOIN candidate c ON c.id = l.candidate_id
-            WHERE c.investigation_id IN (
-                SELECT investigation_id FROM wide_area_search_tile
-                WHERE job_id = ? AND investigation_id IS NOT NULL
-            )
-            """,
-            (job_id,),
-        ).fetchall()
+        ids = {r["id"] for r in _job_candidate_rows(conn, job_id, only_unchecked=False)}
+        decided, near, checked = _decide(conn, ids)
         flagged: Dict[str, str] = {}
         by_reason: Dict[str, int] = {}
-        for row in rows:
-            reason = flag_reason(row)
-            if reason:
-                flagged[row["candidate_id"]] = reason
-                by_reason[reason] = by_reason.get(reason, 0) + 1
+        by_method: Dict[str, int] = {}
+        for cid, (reason, method) in decided.items():
+            flagged[cid] = reason
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+            by_method[method] = by_method.get(method, 0) + 1
         return {
-            "candidates": n_candidates,
-            "checked": len(rows),
+            "candidates": len(ids),
+            "checked": len(checked),
             "flagged": flagged,
             "by_reason": by_reason,
+            "by_method": by_method,
+            "near": near,
         }
     finally:
         conn.close()
@@ -566,10 +747,20 @@ def ensure_job_land_cover(
                 unavailable += len(rows)
                 continue
 
+            have_v1 = {r["candidate_id"] for r in conn.execute(
+                "SELECT candidate_id FROM candidate_land_cover").fetchall()}
+            have_v2 = {r["candidate_id"] for r in conn.execute(
+                "SELECT candidate_id FROM candidate_land_cover_v2").fetchall()}
             inserts = []
+            inserts_v2 = []
             for k, row in enumerate(rows):
                 try:
-                    s = sample_fractions(reader, row["lat"], row["lon"])
+                    s = None
+                    if row["id"] not in have_v1:
+                        s = sample_fractions(reader, row["lat"], row["lon"])
+                    s2 = None
+                    if row["id"] not in have_v2:
+                        s2 = sample_centre_ring(reader, row["lat"], row["lon"])
                 except LandCoverError as exc:
                     # A block failed mid-way (network): stop this tile, keep
                     # what was read, report the rest as unavailable.
@@ -580,15 +771,23 @@ def ensure_job_land_cover(
                     problems.append(f"{tile_name}: {type(exc).__name__}: {exc}")
                     unavailable += len(rows) - k
                     break
-                if s is None:
+                if s is None and s2 is None:
                     no_data += 1
                     continue
-                inserts.append((
-                    row["id"], _now_iso(), WORLDCOVER_SOURCE, s["window_px"], s["valid_px"],
-                    s["center_class"], s["frac_tree"], s["frac_shrub"], s["frac_grass"],
-                    s["frac_crop"], s["frac_built"], s["frac_bare"], s["frac_water"],
-                    s["frac_other"],
-                ))
+                if s is not None:
+                    inserts.append((
+                        row["id"], _now_iso(), WORLDCOVER_SOURCE, s["window_px"], s["valid_px"],
+                        s["center_class"], s["frac_tree"], s["frac_shrub"], s["frac_grass"],
+                        s["frac_crop"], s["frac_built"], s["frac_bare"], s["frac_water"],
+                        s["frac_other"],
+                    ))
+                if s2 is not None:
+                    inserts_v2.append((
+                        row["id"], _now_iso(), WORLDCOVER_SOURCE, LC2_METHOD,
+                        s2["centre_px"], s2["centre_valid"], s2["c_tree"], s2["c_built"],
+                        s2["c_water"], s2["c_crop"], s2["ring_valid"], s2["r_tree"],
+                        s2["r_built"], s2["r_water"], s2["r_crop"],
+                    ))
             if inserts:
                 with conn:
                     conn.executemany(
@@ -601,7 +800,19 @@ def ensure_job_land_cover(
                         """,
                         inserts,
                     )
-                newly += len(inserts)
+            if inserts_v2:
+                with conn:
+                    conn.executemany(
+                        """
+                        INSERT OR REPLACE INTO candidate_land_cover_v2
+                            (candidate_id, computed_at, source, method, centre_px,
+                             centre_valid, c_tree, c_built, c_water, c_crop,
+                             ring_valid, r_tree, r_built, r_water, r_crop)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        inserts_v2,
+                    )
+            newly += len({t[0] for t in inserts} | {t[0] for t in inserts_v2})
     finally:
         conn.close()
 
@@ -616,6 +827,9 @@ def ensure_job_land_cover(
         "could_not_read": unavailable,
         "flagged_total": len(flags["flagged"]),
         "flagged_by_reason": flags["by_reason"],
+        "flagged_by_method": flags["by_method"],
+        "near_trees_water_buildings": len(flags["near"]),
+        "method": LC2_METHOD,
         "seconds": round(time.time() - started, 1),
     }
     if problems:
@@ -641,6 +855,11 @@ def job_land_cover_summary_json(db_root: str, job_id: str) -> str:
         "checked": flags["checked"],
         "flagged_total": len(flags["flagged"]),
         "flagged_by_reason": flags["by_reason"],
+        "flagged_by_method": flags["by_method"],
+        "near_trees_water_buildings": len(flags["near"]),
+        "method": LC2_METHOD,
+        "centre_reject_share": CENTRE_REJECT_SHARE,
+        "ring_label_share": RING_LABEL_SHARE,
         "threshold_tree_plus_built": TREE_BUILT_THRESHOLD,
         "threshold_water_fraction": WATER_FRACTION_THRESHOLD,
     })
