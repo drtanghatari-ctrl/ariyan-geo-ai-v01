@@ -458,13 +458,18 @@ def missing_tiles(root: str, demtype: str, south, north, west, east) -> List[Tup
 
 
 def ensure_tiles(root: str, demtypes, south, north, west, east, api_key: str,
-                 max_calls: int, on_live_call: Optional[Callable[[str], bool]] = None) -> dict:
+                 max_calls: int, on_live_call: Optional[Callable[[str], bool]] = None,
+                 covered: Optional[Callable[[str, int, int], bool]] = None) -> dict:
     """Downloads missing tiles for the box (+ margin), at most max_calls.
     on_live_call(label) is asked BEFORE each call; returning False stops
-    (the 40/day budget lives in the caller). Stops cleanly on quota."""
+    (the 40/day budget lives in the caller). Stops cleanly on quota.
+    covered(demtype, lat_floor, lon_floor) -> True skips a tile whose cells
+    are already on the device elsewhere (cop-bulk-v1: bulk COP30)."""
     report = {"downloaded": [], "failed": [], "stopped": None, "calls": 0}
     for dt in demtypes:
         for la, lo in missing_tiles(root, dt, south, north, west, east):
+            if covered is not None and covered(dt, la, lo):
+                continue
             label = f"{dt}/{tile_name(la, lo)}"
             if report["calls"] >= max_calls:
                 report["stopped"] = "max_calls"
