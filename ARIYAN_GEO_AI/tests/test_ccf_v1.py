@@ -63,8 +63,8 @@ def _xc(lat, lon, confirmed=True, error=None):
 
 def test_cc_fields_not_reproduced_is_untested():
     out = gpr._cc_fields({"seventh_evidence_detail": [_stab(32, 48)]}, None)
-    assert out == {"cc_fields_version": "ccf-v1", "stability": None,
-                   "dem_cross_check": None}
+    assert out == {"cc_fields_version": "ccf-v2", "stability": None,
+                   "dem_cross_check": None, "steward_gate": None}
 
 
 def test_cc_fields_copies_both_results_for_matched_anomaly():
@@ -146,7 +146,8 @@ def test_refine_forces_stability_and_records_results(tmp_path, monkeypatch):
     assert seen["stability_target_lon"] == 48.3
     assert seen["stability_target_tolerance_m"] >= gpr.MIN_MATCH_TOLERANCE_M
     m = _marker(root, cid)
-    assert m["cc_fields_version"] == "ccf-v1"
+    assert m["cc_fields_version"] == "ccf-v2"
+    assert m["steward_gate"] is None # debate failed -> untested
     assert m["stability"]["stability_score"] == 1.0
     assert m["dem_cross_check"]["tested"] is True
     assert m["dem_cross_check"]["confirmed"] is True
@@ -164,3 +165,71 @@ def test_refine_not_reproduced_records_untested(tmp_path, monkeypatch):
     gpr.refine_candidate(root, cid)
     m = _marker(root, cid)
     assert m["stability"] is None and m["dem_cross_check"] is None
+
+
+# -- ccf-v2: Steward gate inputs ---------------------------------------------
+
+import steward_confidence_ceiling as scc
+import steward_evidence_matrix as sem
+
+
+def _matrix(*entries):
+    m = sem.EvidenceMatrix()
+    for cat, q in entries:
+        m.add(cat, available=True, quality=q, used=True)
+    return m
+
+
+def test_steward_reports_the_numbers_it_gated_on():
+    E, Q = sem.EvidenceCategory, sem.EvidenceQuality
+    m = _matrix((E.DEM, Q.HIGH), (E.SAR, Q.MEDIUM), (E.GPS, Q.LOW))
+    r = scc.govern_confidence(0.9, m)
+    eff, avg = scc._gate_inputs(m)
+    assert r.effective_sources == eff == m.effective_independent_sources
+    assert r.avg_quality == round(avg, 4) == 0.8 # (1.0 + 0.6) / 2, GPS excluded
+    d = r.as_dict()
+    assert d["effective_sources"] == eff and d["avg_quality"] == 0.8
+    assert d["band"] == "MODERATE" # confounders gate still shut: unchanged
+
+
+def test_steward_band_unchanged_by_reporting():
+    E, Q = sem.EvidenceCategory, sem.EvidenceQuality
+    for m in (_matrix(), _matrix((E.DEM, Q.LOW)),
+              _matrix((E.DEM, Q.HIGH), (E.SAR, Q.HIGH))):
+        band, _ = scc.compute_confidence_band(m, False, False, False)
+        assert scc.govern_confidence(0.5, m).band == band
+
+
+def _debate_with(conf):
+    def run(_):
+        return json.dumps({"debates": [{"candidate_id": "#1",
+                                        "steward": {"reasoning_trace": {"confidence": conf}}}]})
+    return run
+
+
+def test_refine_records_steward_gate(tmp_path, monkeypatch):
+    root, cid = _setup(tmp_path)
+    monkeypatch.setattr(imm, "run_investigation_multi_json", _fake_investigation(
+        {}, [{"lat": 32.1, "lon": 48.3, "peak_zscore": 8.0,
+              "peak_residual_m": 2.0, "evidence_type": "DEM"}],
+        [_stab(32.1, 48.3)], [_xc(32.1, 48.3)]))
+    monkeypatch.setattr(debate_mobile, "run_debate_json", _debate_with(
+        {"band": "MODERATE", "clamped_confidence": 0.55, "reasoning": ["r"],
+         "effective_sources": 2.0, "avg_quality": 0.8}))
+    gpr.refine_candidate(root, cid)
+    m = _marker(root, cid)
+    assert m["steward_gate"] == {"effective_sources": 2.0, "avg_quality": 0.8,
+                                 "band": "MODERATE"}
+    assert m["confidence_recorded"] is True
+
+
+def test_refine_old_steward_output_leaves_gate_untested(tmp_path, monkeypatch):
+    root, cid = _setup(tmp_path)
+    monkeypatch.setattr(imm, "run_investigation_multi_json", _fake_investigation(
+        {}, [{"lat": 32.1, "lon": 48.3, "peak_zscore": 8.0,
+              "peak_residual_m": 2.0, "evidence_type": "DEM"}], [], []))
+    monkeypatch.setattr(debate_mobile, "run_debate_json", _debate_with(
+        {"band": "MODERATE", "clamped_confidence": 0.55, "reasoning": ["r"]}))
+    gpr.refine_candidate(root, cid)
+    m = _marker(root, cid)
+    assert m["steward_gate"] is None and m["confidence_recorded"] is True
