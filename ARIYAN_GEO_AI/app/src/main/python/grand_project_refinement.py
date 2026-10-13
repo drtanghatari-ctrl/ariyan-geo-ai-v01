@@ -629,7 +629,7 @@ def _anomaly_summary(lat: float, lon: float, a: Dict[str, Any]) -> Dict[str, Any
     return out
 
 
-CC_FIELDS_VERSION = "ccf-v1"
+CC_FIELDS_VERSION = "ccf-v2"
 _CC_DETAIL_TOLERANCE_M = 5.0 # same as debate_mobile's per-candidate rule
 
 
@@ -646,9 +646,14 @@ def _cc_fields(investigation: Dict[str, Any],
     dem_cross_check: the COP30 result. tested=False when the second
     dataset could not be fetched/run; confirmed is meaningful only when
     tested is True.
+    steward_gate (ccf-v2): filled later by refine_candidate from the
+    Steward's own result -- effective independent sources, average
+    content-evidence quality and band. None = the Steward did not
+    evaluate the reproduced anomaly (untested, never "failed").
     """
     out: Dict[str, Any] = {"cc_fields_version": CC_FIELDS_VERSION,
-                           "stability": None, "dem_cross_check": None}
+                           "stability": None, "dem_cross_check": None,
+                           "steward_gate": None}
     if matched_anomaly is None:
         return out
     mlat, mlon = matched_anomaly["lat"], matched_anomaly["lon"]
@@ -896,6 +901,12 @@ def _refine_candidate_impl(
             conf = ((entry.get("steward") or {}).get("reasoning_trace") or {}).get("confidence") or {}
             band = conf.get("band")
             numeric = conf.get("clamped_confidence")
+            if conf.get("effective_sources") is not None and conf.get("avg_quality") is not None:
+                cc_fields["steward_gate"] = {
+                    "effective_sources": conf.get("effective_sources"),
+                    "avg_quality": conf.get("avg_quality"),
+                    "band": band,
+                }
             if band is not None or numeric is not None:
                 db.record_confidence_history(
                     db_root, candidate_id,
