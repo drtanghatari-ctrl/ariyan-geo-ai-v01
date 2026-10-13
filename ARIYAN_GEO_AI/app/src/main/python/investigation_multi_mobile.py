@@ -617,6 +617,25 @@ class StabilityResult:
     offset_errors: list[str]     # honest per-offset failure reasons, if any
 
 
+def _force_stability_target(dem_candidates, stability_candidates,
+                            target_lat, target_lon, tolerance_m):
+    """ccf-v1: return stability_candidates with the DEM candidate nearest
+    (target_lat, target_lon) put first, if it lies within tolerance_m and
+    is not already selected. Any of the three target values None, or no
+    DEM candidates, returns the list unchanged (default behaviour)."""
+    if (target_lat is None or target_lon is None or tolerance_m is None
+            or not dem_candidates):
+        return stability_candidates
+    tgt = GeoPoint(target_lat, target_lon)
+    forced = min(dem_candidates,
+                 key=lambda c: haversine_distance_m(tgt, GeoPoint(c.lat, c.lon)))
+    if haversine_distance_m(tgt, GeoPoint(forced.lat, forced.lon)) > tolerance_m:
+        return stability_candidates
+    if any(c is forced for c in stability_candidates):
+        return stability_candidates
+    return [forced] + list(stability_candidates)
+
+
 class StabilityCheckEvidence:
     """Wrapper satisfying build_investigation_record's `seventh_evidence`
     interface (.as_evidence_record(), .source, .synthetic), describing
@@ -2033,6 +2052,9 @@ def run_investigation_multi_json(
     dem_cross_check_dataset: str = DEM_CROSS_CHECK_DATASET_DEFAULT,
     dem_offline_first: bool = False,
     run_dem_cross_check: bool = True,
+    stability_target_lat: float | None = None,
+    stability_target_lon: float | None = None,
+    stability_target_tolerance_m: float | None = None,
 ) -> str:
     """Run a DEM + NDVI + Thermal + Optical + SAR investigation and
     return the InvestigationRecord as a JSON string. This is the
@@ -2230,6 +2252,19 @@ def run_investigation_multi_json(
     stability_candidates = _select_stability_candidates(
         dem_candidates, dem_zscore_threshold, stability_margin, max_auto_stability_candidates,
     )
+    # ccf-v1 FORCED TARGET (Pass 2 refinement only): when a caller names
+    # one point it cares about, the DEM candidate nearest that point (if
+    # one lies within stability_target_tolerance_m) is ALWAYS stability-
+    # tested, whatever its z-score and on top of the borderline cap. The
+    # borderline-only rule above was a cost limit; it left the strongest
+    # anomalies -- the very ones the confounders-controlled gate (cc-v1,
+    # check 1) must judge -- untested. Absent the three arguments,
+    # behaviour is unchanged. A stability result can only ever LOWER the
+    # Steward's ceiling (steward_confidence_ceiling.py), never raise it.
+    stability_candidates = _force_stability_target(
+        dem_candidates, stability_candidates,
+        stability_target_lat, stability_target_lon,
+        stability_target_tolerance_m)
     stability_results: list[StabilityResult] = []
     if stability_candidates:
         _write_investigation_status(
