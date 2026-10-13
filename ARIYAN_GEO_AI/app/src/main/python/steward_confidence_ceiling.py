@@ -288,6 +288,12 @@ class ConfidenceCeilingResult:
     # (and every band other than the persistence-capped HIGH) is
     # completely unaffected.
     persistence_capped: bool = False
+    # ccf-v2 (2026-10-13): the two numbers the multi-source and HIGH gates
+    # are judged on, REPORTED (not re-derived elsewhere) so a stored result
+    # shows exactly what the Steward used. Recording only -- no gate reads
+    # these fields. None on results built outside govern_confidence().
+    effective_sources: float | None = None
+    avg_quality: float | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -298,7 +304,23 @@ class ConfidenceCeilingResult:
             "was_clamped": self.was_clamped,
             "reasoning": self.reasoning,
             "persistence_capped": self.persistence_capped,
+            "effective_sources": self.effective_sources,
+            "avg_quality": self.avg_quality,
         }
+
+
+def _gate_inputs(matrix: EvidenceMatrix) -> tuple[float, float]:
+    """(effective independent sources, average content-evidence quality):
+    the two numbers compute_confidence_band() gates on. One helper so the
+    values govern_confidence() reports (ccf-v2) are exactly the ones the
+    gates used. Quality average is over content evidence only (excludes
+    GPS, which is positional metadata -- see steward_evidence_matrix.py)."""
+    effective_sources = matrix.effective_independent_sources
+    avg_quality = 0.0
+    used_entries = matrix.content_used_entries
+    if used_entries:
+        avg_quality = sum(_quality_score(e.quality) for e in used_entries) / len(used_entries)
+    return effective_sources, avg_quality
 
 
 def _quality_score(quality: EvidenceQuality) -> float:
@@ -357,13 +379,7 @@ def compute_confidence_band(
     reasoning: list[str] = []
 
     raw_sources = matrix.independent_used_sources
-    effective_sources = matrix.effective_independent_sources
-    avg_quality = 0.0
-    # Restricted to content evidence (excludes GPS, which is positional
-    # metadata, not corroborating evidence -- see steward_evidence_matrix.py).
-    used_entries = matrix.content_used_entries
-    if used_entries:
-        avg_quality = sum(_quality_score(e.quality) for e in used_entries) / len(used_entries)
+    effective_sources, avg_quality = _gate_inputs(matrix)
 
     if effective_sources == 0.0:
         reasoning.append("No evidence categories were actually used for this candidate.")
@@ -588,4 +604,6 @@ def govern_confidence(
         was_clamped=was_clamped,
         reasoning=reasoning,
         persistence_capped=persistence_capped,
+        effective_sources=_gate_inputs(matrix)[0],
+        avg_quality=round(_gate_inputs(matrix)[1], 4),
     )
