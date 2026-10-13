@@ -629,6 +629,58 @@ def _anomaly_summary(lat: float, lon: float, a: Dict[str, Any]) -> Dict[str, Any
     return out
 
 
+CC_FIELDS_VERSION = "ccf-v1"
+_CC_DETAIL_TOLERANCE_M = 5.0 # same as debate_mobile's per-candidate rule
+
+
+def _cc_fields(investigation: Dict[str, Any],
+               matched_anomaly: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """ccf-v1: the two elevation-robustness results cc-v1 check 1 needs,
+    copied into the Pass 2 marker row so they can be read later without
+    re-running anything. Both are taken for the REPRODUCED anomaly only.
+
+    stability: the forced window re-check (always requested for the
+    candidate since ccf-v1). None means it was NOT run for this anomaly
+    (nothing reproduced, or no DEM candidate near the target) -- that is
+    "untested", never "unstable".
+    dem_cross_check: the COP30 result. tested=False when the second
+    dataset could not be fetched/run; confirmed is meaningful only when
+    tested is True.
+    """
+    out: Dict[str, Any] = {"cc_fields_version": CC_FIELDS_VERSION,
+                           "stability": None, "dem_cross_check": None}
+    if matched_anomaly is None:
+        return out
+    mlat, mlon = matched_anomaly["lat"], matched_anomaly["lon"]
+    st = sync._nearest_within(mlat, mlon,
+                              investigation.get("seventh_evidence_detail") or [],
+                              _CC_DETAIL_TOLERANCE_M)
+    if st is not None:
+        out["stability"] = {
+            "stability_score": st.get("stability_score"),
+            "n_windows_attempted": st.get("n_windows_attempted"),
+            "n_windows_fetched": st.get("n_windows_fetched"),
+            "n_windows_detected": st.get("n_windows_detected"),
+            "target_zscore": st.get("target_zscore"),
+            "z_min": st.get("z_min"),
+            "z_max": st.get("z_max"),
+            "offset_errors": st.get("offset_errors") or [],
+        }
+    xc = sync._nearest_within(mlat, mlon,
+                              investigation.get("tenth_evidence_detail") or [],
+                              _CC_DETAIL_TOLERANCE_M)
+    if xc is not None:
+        out["dem_cross_check"] = {
+            "tested": xc.get("error") is None,
+            "confirmed": bool(xc.get("cross_dem_confirmed")),
+            "cross_dem_peak_zscore": xc.get("cross_dem_peak_zscore"),
+            "cross_dem_peak_residual_m": xc.get("cross_dem_peak_residual_m"),
+            "distance_m": xc.get("distance_m"),
+            "error": xc.get("error"),
+        }
+    return out
+
+
 def refine_candidate(
     db_root: str,
     candidate_id: str,
@@ -695,6 +747,11 @@ def _refine_candidate_impl(
     window = was.derive_analysis_window(REFINEMENT_TILE_SIZE_M)
     radius_m, grid_size, refine_cell_m = (
         window["radius_m"], int(window["grid_size"]), window["cell_size_m"])
+    # Match tolerance is known BEFORE the run so the same value both
+    # forces the stability re-check (ccf-v1) and judges reproduction.
+    pass1_cell_m = _pass1_cell_size_m(db_root, cand["investigation_id"])
+    tolerance_m = max(MIN_MATCH_TOLERANCE_M,
+                      MATCH_TOLERANCE_CELLS * max(pass1_cell_m, refine_cell_m))
 
     investigation_json = investigation_multi_mobile.run_investigation_multi_json(
         lat, lon, radius_m, grid_size,
@@ -704,6 +761,9 @@ def _refine_candidate_impl(
         ndvi_client_id=ndvi_client_id,
         ndvi_client_secret=ndvi_client_secret,
         offline_data_root=db_root,
+        stability_target_lat=lat,
+        stability_target_lon=lon,
+        stability_target_tolerance_m=tolerance_m,
     )
     try:
         debate_json: Optional[str] = debate_mobile.run_debate_json(investigation_json)
@@ -749,9 +809,6 @@ def _refine_candidate_impl(
     dem_anoms = [(i, a) for i, a in enumerate(anomalies)
                  if a.get("evidence_type", "DEM") == "DEM"
                  and a.get("lat") is not None and a.get("lon") is not None]
-    pass1_cell_m = _pass1_cell_size_m(db_root, cand["investigation_id"])
-    tolerance_m = max(MIN_MATCH_TOLERANCE_M,
-                      MATCH_TOLERANCE_CELLS * max(pass1_cell_m, refine_cell_m))
     matched_index: Optional[int] = None
     matched_anomaly: Optional[Dict[str, Any]] = None
     match_distance_m: Optional[float] = None
@@ -773,6 +830,7 @@ def _refine_candidate_impl(
         key=lambda x: x["distance_m"])[:_MAX_ANOMALY_SUMMARY]
     if not reproduced:
         matched_index, matched_anomaly = None, None
+    cc_fields = _cc_fields(investigation, matched_anomaly)
 
     # -- Persist: investigation row first (provenance anchor) -----------
     objective = (
@@ -885,6 +943,7 @@ def _refine_candidate_impl(
             "dem_library": dem_info["dem_library"],
             "repeat_refinement": bool(previous),
             "previous_refinements": len(previous),
+            **cc_fields,
             "note": note,
         }, refinement_investigation_id, candidate_id),
     )
