@@ -53,6 +53,11 @@ CHANGELOG
        (~15 m) is >= 50 % trees + buildings + water; trees, springs or
        buildings merely nearby never reject. Same land_cover_flags
        decision Pass 2 uses. Test T1 PASS.)
+       (rp-v1, 2026-10-14: rule 3 counts only a SAME-polarity live
+       reproduction (pol-v1; older rows are checked from the stored
+       matched anomaly). An opposite-polarity or unreadable one is
+       Inconclusive. Every automatic Supported reason quotes the T3
+       measurement: supporting evidence (~x3), not confirmation.)
     3. Pass 2 refinement markers exist and at least one was a LIVE DEM
        fetch that reproduced the anomaly                  -> Supported
     4. Pass 2 markers exist but none is a live reproduction (offline
@@ -185,6 +190,15 @@ AUTO_REASON_PREFIX = "[auto] "
 # load the heavy refinement module unless markers actually exist).
 _REFINEMENT_RELATION = "refinement_dem_check"
 _DEM_SOURCE_LIVE = "LIVE"
+
+# rp-v1 (2026-10-14): what a Pass 2 reproduction is worth, as MEASURED by
+# frozen test T3 (t3-v1). Quoted in every automatic Supported reason so the
+# word "Supported" is never read as "confirmed".
+REPRODUCTION_EVIDENCE_NOTE = (
+    "Supporting evidence only: in test T3 (2026-10-14, mound/tell bench, "
+    "Susiana and Kangavar) live SRTM reproduced 26% of candidates on recorded "
+    "sites vs 8% of matched controls (about x3, p = 0.03). Most real sites are "
+    "not reproduced, and a reproduced candidate is not a confirmed site.")
 
 # Job target (2026-10-01, see CHANGELOG). Only MOUND_TELL switches the
 # Hillside rule on.
@@ -862,13 +876,31 @@ def _refinement_verdicts(db_root: str, conn, candidate_ids: set
         if not history:
             unreadable.add(cid)
             continue
+        # rp-v1 (2026-10-14): only a SAME-polarity live reproduction counts
+        # (pol-v1). T3 measured this on the mound/tell bench and found it
+        # supporting evidence, not confirmation -- the reason says so.
         live_hits = [h for h in history
-                     if h.get("reproduced") and h.get("dem_source") == _DEM_SOURCE_LIVE]
+                     if h.get("reproduced") and h.get("dem_source") == _DEM_SOURCE_LIVE
+                     and h.get("polarity_ok") is True]
         if live_hits:
             d = live_hits[-1].get("match_distance_m")
             where = f" {d:.0f} m from the original position" if isinstance(d, (int, float)) else ""
             verdicts[cid] = (STATUS_SUPPORTED,
-                             f"Pass 2 with a LIVE DEM fetch reproduced the anomaly{where}.")
+                             f"Pass 2 with a LIVE DEM fetch reproduced the anomaly{where} "
+                             f"(same polarity). {REPRODUCTION_EVIDENCE_NOTE}")
+            continue
+        live_odd = [h for h in history
+                    if h.get("reproduced") and h.get("dem_source") == _DEM_SOURCE_LIVE]
+        if live_odd:
+            if any(h.get("polarity_ok") is False for h in live_odd):
+                why = ("Pass 2 'reproduced' the anomaly only with an anomaly of the "
+                       "OPPOSITE polarity (a bump matched by a hollow or the reverse), "
+                       "which no longer counts since pol-v1. Refine again to re-check.")
+            else:
+                why = ("Pass 2 reproduced the anomaly, but whether the match had the "
+                       "same polarity could not be read, so it is not counted. "
+                       "Refine again to re-check.")
+            verdicts[cid] = (STATUS_INCONCLUSIVE, why)
             continue
         last = history[-1]
         src = last.get("dem_source") or "NOT_RECORDED"
