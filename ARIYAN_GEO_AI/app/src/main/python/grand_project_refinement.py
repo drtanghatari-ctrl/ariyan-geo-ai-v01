@@ -629,6 +629,55 @@ def _anomaly_summary(lat: float, lon: float, a: Dict[str, Any]) -> Dict[str, Any
     return out
 
 
+POLARITY_RULE_VERSION = "pol-v1"
+# pol-v1 (ADDED 2026-10-14, after diagnostic d1-v1): a Pass 2 anomaly can
+# only reproduce a Pass 1 candidate of the SAME polarity. Before pol-v1 the
+# nearest anomaly of either sign counted, so a raised Pass 1 bump could be
+# "reproduced" by a hollow (seen on device: b626e79c, +1.7 m matched by a
+# -4.9 m SRTM anomaly 38 m away). If the Pass 1 polarity cannot be read the
+# old any-sign rule is used and pass1_polarity is recorded as None, so the
+# row says plainly that the rule could not be applied.
+
+
+def _polarity_of(d: Dict[str, Any]) -> Optional[str]:
+    """'positive' / 'negative' from an anomaly or detection dict: its own
+    polarity field first, else the sign of its residual, else of its z."""
+    if not isinstance(d, dict):
+        return None
+    p = d.get("polarity")
+    if p in ("positive", "negative"):
+        return p
+    for k in ("peak_residual_m", "peak_zscore"):
+        v = d.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v != 0:
+            return "positive" if v > 0 else "negative"
+    return None
+
+
+def _pass1_polarity(db_root: str, candidate_id: str,
+                    score: Optional[float]) -> Optional[str]:
+    """Polarity of the Pass 1 detection: the candidate's DEM
+    primary_detection evidence (first row), else the sign of the stored
+    signed score (peak_zscore). Read-only; never raises."""
+    try:
+        conn = db.get_connection(db_root)
+        try:
+            db.initialize_schema(conn)
+            r = conn.execute(
+                "SELECT detail_json FROM evidence_link WHERE candidate_id = ? "
+                "AND evidence_type = 'DEM' AND relation = 'primary_detection' "
+                "ORDER BY id ASC LIMIT 1", (candidate_id,)).fetchone()
+        finally:
+            conn.close()
+        if r is not None:
+            p = _polarity_of(json.loads(r["detail_json"] or "{}"))
+            if p is not None:
+                return p
+    except Exception:
+        pass
+    return _polarity_of({"peak_zscore": score})
+
+
 CC_FIELDS_VERSION = "ccf-v2"
 _CC_DETAIL_TOLERANCE_M = 5.0 # same as debate_mobile's per-candidate rule
 
@@ -814,10 +863,23 @@ def _refine_candidate_impl(
     dem_anoms = [(i, a) for i, a in enumerate(anomalies)
                  if a.get("evidence_type", "DEM") == "DEM"
                  and a.get("lat") is not None and a.get("lon") is not None]
+    # pol-v1: only same-polarity anomalies may reproduce the candidate.
+    pass1_pol = _pass1_polarity(db_root, candidate_id, cand.get("score"))
+    if pass1_pol is None:
+        match_pool = dem_anoms
+    else:
+        match_pool = [(i, a) for i, a in dem_anoms if _polarity_of(a) == pass1_pol]
+    opposite_within: Optional[Dict[str, Any]] = None
+    if pass1_pol is not None:
+        opp = sorted(((sync._haversine_distance_m(lat, lon, a["lat"], a["lon"]), a)
+                      for _, a in dem_anoms if _polarity_of(a) not in (None, pass1_pol)),
+                     key=lambda t: t[0])
+        if opp and opp[0][0] <= tolerance_m:
+            opposite_within = _anomaly_summary(lat, lon, opp[0][1])
     matched_index: Optional[int] = None
     matched_anomaly: Optional[Dict[str, Any]] = None
     match_distance_m: Optional[float] = None
-    for i, a in dem_anoms:
+    for i, a in match_pool:
         d = sync._haversine_distance_m(lat, lon, a["lat"], a["lon"])
         if match_distance_m is None or d < match_distance_m:
             match_distance_m, matched_index, matched_anomaly = d, i, a
@@ -941,6 +1003,9 @@ def _refine_candidate_impl(
             "refinement_analysis_radius_m": radius_m,
             "n_refinement_dem_anomalies": len(dem_anoms),
             "refinement_anomaly": matched_anomaly,
+            "polarity_rule": POLARITY_RULE_VERSION,
+            "pass1_polarity": pass1_pol,
+            "opposite_polarity_within_tolerance": opposite_within,
             "nearest_unmatched_anomaly": nearest_unmatched,
             "refinement_dem_anomalies_nearest": anomaly_summaries,
             "satellite_sources_recorded": satellite_recorded,
