@@ -229,9 +229,29 @@ def _refined_candidate_ids(db_root: str) -> set:
         conn.close()
 
 
+def _candidate_score(db_root: str, candidate_id: str) -> Optional[float]:
+    try:
+        conn = db.get_connection(db_root)
+        try:
+            db.initialize_schema(conn)
+            r = conn.execute("SELECT score FROM candidate WHERE id = ?",
+                             (candidate_id,)).fetchone()
+        finally:
+            conn.close()
+        return r["score"] if r is not None else None
+    except Exception:
+        return None
+
+
 def _refinement_history(db_root: str, candidate_id: str) -> List[Dict[str, Any]]:
     """Earlier refinement markers of one candidate, oldest first, as
-    {"reproduced", "match_distance_m", "dem_source"}. For markers written
+    {"reproduced", "match_distance_m", "dem_source", "polarity_ok"}.
+    polarity_ok (rp-v1, 2026-10-14): True when a reproduction was by an
+    anomaly of the SAME polarity as the Pass 1 detection (always so for
+    pol-v1 rows that knew the Pass 1 polarity; for older rows it is
+    checked from the stored matched anomaly), False when it was by the
+    opposite polarity (a bump "reproduced" by a hollow, the pre-pol-v1
+    bug), None when not reproduced or the polarity cannot be read. For markers written
     before 2026-09-23 (no dem_source key) the source is inferred from the
     stored limitations ONLY when they contain an offline-DEM note
     ("..._INFERRED"); otherwise it is "NOT_RECORDED". Never raises."""
@@ -247,6 +267,7 @@ def _refinement_history(db_root: str, candidate_id: str) -> List[Dict[str, Any]]
         finally:
             conn.close()
         out = []
+        pass1_pol: Any = "unread"
         for r in rows:
             try:
                 d = json.loads(r["detail_json"]) if r["detail_json"] else {}
@@ -265,10 +286,22 @@ def _refinement_history(db_root: str, candidate_id: str) -> List[Dict[str, Any]]
                     src = DEM_SOURCE_OFFLINE_FALLBACK + "_INFERRED"
                 else:
                     src = "NOT_RECORDED"
+            polarity_ok = None
+            if d.get("reproduced"):
+                if d.get("polarity_rule") == POLARITY_RULE_VERSION and d.get("pass1_polarity"):
+                    polarity_ok = True
+                else:
+                    if pass1_pol == "unread":
+                        pass1_pol = _pass1_polarity(db_root, candidate_id,
+                                                    _candidate_score(db_root, candidate_id))
+                    matched = _polarity_of(d.get("refinement_anomaly") or {})
+                    if pass1_pol is not None and matched is not None:
+                        polarity_ok = (pass1_pol == matched)
             out.append({
                 "reproduced": d.get("reproduced"),
                 "match_distance_m": d.get("match_distance_m"),
                 "dem_source": src,
+                "polarity_ok": polarity_ok,
             })
         return out
     except Exception:
