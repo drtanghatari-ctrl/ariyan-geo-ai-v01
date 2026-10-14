@@ -58,6 +58,10 @@ CHANGELOG
        matched anomaly). An opposite-polarity or unreadable one is
        Inconclusive. Every automatic Supported reason quotes the T3
        measurement: supporting evidence (~x3), not confirmation.)
+       (rp-v1.1, 2026-10-14: the Supported reason now also quotes T4, the
+       same frozen test repeated on fresh ground -- Urmia plain, Solduz,
+       Deh Luran: 37 % of site candidates vs 6 % of controls, p = 0.001.
+       Wording only; rule 3 is unchanged.)
     3. Pass 2 refinement markers exist and at least one was a LIVE DEM
        fetch that reproduced the anomaly                  -> Supported
     4. Pass 2 markers exist but none is a live reproduction (offline
@@ -194,11 +198,16 @@ _DEM_SOURCE_LIVE = "LIVE"
 # rp-v1 (2026-10-14): what a Pass 2 reproduction is worth, as MEASURED by
 # frozen test T3 (t3-v1). Quoted in every automatic Supported reason so the
 # word "Supported" is never read as "confirmed".
+# rp-v1.1 (2026-10-14): also quotes frozen test T4 (t4-v1), the same rules
+# repeated on fresh ground the project had never searched (Urmia plain,
+# Solduz, Deh Luran): sites 13/35 vs controls 2/35, one-sided Fisher
+# p = 0.0013. Text only; the Supported rule itself is unchanged.
 REPRODUCTION_EVIDENCE_NOTE = (
-    "Supporting evidence only: in test T3 (2026-10-14, mound/tell bench, "
-    "Susiana and Kangavar) live SRTM reproduced 26% of candidates on recorded "
-    "sites vs 8% of matched controls (about x3, p = 0.03). Most real sites are "
-    "not reproduced, and a reproduced candidate is not a confirmed site.")
+    "Supporting evidence only: in two tests on recorded mound/tell sites "
+    "(T3 Susiana/Kangavar; T4 fresh ground, Urmia/Solduz/Deh Luran, "
+    "2026-10-14) live SRTM reproduced 26% and 37% of candidates on recorded "
+    "sites vs 8% and 6% of matched controls (p = 0.03 and 0.001). Most real "
+    "sites are not reproduced, and a reproduced candidate is not a confirmed site.")
 
 # Job target (2026-10-01, see CHANGELOG). Only MOUND_TELL switches the
 # Hillside rule on.
@@ -877,8 +886,8 @@ def _refinement_verdicts(db_root: str, conn, candidate_ids: set
             unreadable.add(cid)
             continue
         # rp-v1 (2026-10-14): only a SAME-polarity live reproduction counts
-        # (pol-v1). T3 measured this on the mound/tell bench and found it
-        # supporting evidence, not confirmation -- the reason says so.
+        # (pol-v1). T3 (bench) and T4 (fresh ground) measured this and found
+        # it supporting evidence, not confirmation -- the reason says so.
         live_hits = [h for h in history
                      if h.get("reproduced") and h.get("dem_source") == _DEM_SOURCE_LIVE
                      and h.get("polarity_ok") is True]
