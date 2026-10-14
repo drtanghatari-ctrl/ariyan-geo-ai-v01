@@ -1,6 +1,7 @@
 """rp-v1: the automatic review counts a live Pass 2 reproduction as
 Supported only when the matching anomaly had the SAME polarity as the
-Pass 1 detection, and its reason quotes the T3 measurement."""
+Pass 1 detection, and its reason quotes the T3 and T4 measurements
+(rp-v1.1, 2026-10-14)."""
 import grand_project_db as db
 import grand_project_review as review
 
@@ -41,6 +42,15 @@ def test_pol_v1_reproduction_is_supported_with_t3_note(tmp_path):
     status, why = _verdict(root, cid)
     assert status == review.STATUS_SUPPORTED
     assert "same polarity" in why and "T3" in why and "not a confirmed site" in why
+    assert "T4" in why and "37%" in why and "6%" in why and "p = 0.03 and 0.001" in why
+
+
+def test_evidence_note_quotes_both_tests_and_keeps_the_caveat():
+    note = review.REPRODUCTION_EVIDENCE_NOTE
+    assert note.startswith("Supporting evidence only")
+    for part in ("T3", "26%", "8%", "T4", "37%", "6%", "Urmia", "Deh Luran",
+                 "Most real sites are not reproduced", "not a confirmed site"):
+        assert part in note
 
 
 def test_old_row_same_polarity_still_supported(tmp_path):
