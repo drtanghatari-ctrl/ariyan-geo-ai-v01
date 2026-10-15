@@ -1,5 +1,5 @@
 """
-grand_project_report.py  --  Phase 6 (Report + Dashboard), report version "rp-v1"
+grand_project_report.py  --  Phase 6 (Report + Dashboard), report version "rp-v1.2"
 
 Part of ARIYAN GEO AI's Grand Project framework. Added 2026-10-04.
 
@@ -28,6 +28,11 @@ export. In rounded mode the known-site distances are also rounded to whole
 kilometres, because "415 m from <a public gazetteer point>" would give the
 exact position back. The screen itself always stays exact.
 
+INDUSTRY CONTEXT (rp-v1.2, ind-label-v1, 2026-10-15): one more column per
+candidate -- mapped industry (OpenStreetMap) within 300 m, from
+industrial_label.py. Context only, never a rejection. In rounded mode the
+distance is withheld ("within 1 km"), for the same reason as above.
+
 ORDER OF THE CANDIDATE TABLE: candidates that are not Rejected first, then
 Steward confidence (high to low), then |DEM z-score| (high to low). "Top N"
 means the first N rows in that order. The rule is printed in the report.
@@ -47,7 +52,7 @@ from typing import Any, Dict, List, Optional
 import grand_project_db as db
 import grand_project_review as review
 
-REPORT_VERSION = "rp-v1"
+REPORT_VERSION = "rp-v1.2"   # rp-v1.2 (2026-10-15): industry-context column (ind-label-v1)
 ROUND_DECIMALS = 2          # 0.01 degree, about 1.1 km north-south
 DEFAULT_TOP_N = 50
 REPORTS_DIR_NAME = "reports"
@@ -348,6 +353,30 @@ def _known_site(lat, lon, exact: bool) -> Dict[str, str]:
     return {"label": label, "text_en": en, "text_fa": _known_site_fa(a, exact)}
 
 
+def _industry(lat, lon, exact: bool) -> Dict[str, str]:
+    """rp-v1.2 (ind-label-v1): mapped industry within 300 m, as context
+    only. Rounded mode withholds the distance. Never raises; empty text
+    when nothing is mapped (or the lookup fails)."""
+    try:
+        import industrial_label
+        n = industrial_label.nearest(lat, lon) if lat is not None and lon is not None else None
+    except Exception:
+        n = None
+    if not n:
+        return {"text_en": "", "text_fa": ""}
+    if exact:
+        en = industrial_label.text_for(n) or ""
+        d = float(n.get("distance_m") or 0.0)
+        where_fa = "درون کادر نقشه‌شده" if d <= 0.0 else "%.0f متر" % d
+    else:
+        date = industrial_label._data_date()
+        en = ("mapped industry within 1 km (%s, OpenStreetMap%s; distance withheld in rounded export)"
+              " -- context only, not a rejection" % (n.get("kind") or "?", " " + date if date else ""))
+        where_fa = "کمتر از ۱ کیلومتر"
+    fa = "صنعت نقشه‌شده: %s (%s) — فقط زمینه، نه رد" % (where_fa, n.get("kind") or "?")
+    return {"text_en": en, "text_fa": fa}
+
+
 def _known_site_fa(a: Dict[str, Any], exact: bool) -> str:
     label = a.get("label")
     name = a.get("nearest_name") or ""
@@ -507,6 +536,8 @@ def build_job_report(db_root: str, grand_project_id: str, job_ref: str,
         ks = (_known_site(lat0, lon0, exact) if lat0 is not None and lon0 is not None
               else {"label": "", "text_en": "no coordinates", "text_fa": "بدون مختصات"})
         r["known_site_label"], r["known_site_en"], r["known_site_fa"] = ks["label"], ks["text_en"], ks["text_fa"]
+        ind = _industry(lat0, lon0, exact)
+        r["ind_label_en"], r["ind_label_fa"] = ind["text_en"], ind["text_fa"]
 
     led = {"rows": 0, "with_record": 0, "dem_file": 0, "dem_live": 0, "dem_not_recorded": 0}
     for s in ledger.values():
@@ -770,7 +801,8 @@ def _render_html(info: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
     P.append("<h2>Candidates / نامزدها</h2><div class='wrap'><table><tr>"
              "<th>#</th><th>Candidate id</th><th>Lat</th><th>Lon</th><th>DEM z</th>"
              "<th>Status / وضعیت</th><th>Confidence</th><th>calib-v1</th>"
-             "<th>Terrain (F3)</th><th>Known-site context</th><th class='fa'>زمینهٔ محوطهٔ ثبت‌شده</th></tr>")
+             "<th>Terrain (F3)</th><th>Known-site context</th><th class='fa'>زمینهٔ محوطهٔ ثبت‌شده</th>"
+             "<th>Industry context</th><th class='fa'>زمینهٔ صنعتی</th></tr>")
     for r in rows:
         status = "%s%s / %s" % (r["status_en"], " (auto)" if r["review_source"] == "auto" else "", r["status_fa"])
         terrain = r["terrain_shape"]
@@ -779,13 +811,14 @@ def _render_html(info: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
         if r["terrain_method"]:
             terrain += " [%s]" % r["terrain_method"]
         P.append("<tr><td>%d</td><td class='mono'>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-                 "<td>%s</td><td>%s</td><td>%s</td><td class='ks'>%s</td><td class='fa ks'>%s</td></tr>"
+                 "<td>%s</td><td>%s</td><td>%s</td><td class='ks'>%s</td><td class='fa ks'>%s</td>"
+                 "<td class='ks'>%s</td><td class='fa ks'>%s</td></tr>"
                  % (r["rank"], _e(r["id"][:8]), _e(_fmt_coord(r["lat"], exact)), _e(_fmt_coord(r["lon"], exact)),
                     _e(_fmt_z(r["score"])), _e(status), _e(_fmt_conf(r)),
                     "strong" if r["calib_strong"] else "", _e(terrain), _e(r["known_site_en"]),
-                    _e(r["known_site_fa"])))
+                    _e(r["known_site_fa"]), _e(r["ind_label_en"]), _e(r["ind_label_fa"])))
     if not rows:
-        P.append("<tr><td colspan='11'>No candidates / بدون نامزد</td></tr>")
+        P.append("<tr><td colspan='13'>No candidates / بدون نامزد</td></tr>")
     P.append("</table></div>")
     P.append("<p style='font-size:0.8em;color:#555'>Generated by ARIYAN GEO AI %s. This file was written "
              "by the app; its MD5 is recorded on the project timeline (REPORT_EXPORTED).</p>" % REPORT_VERSION)
@@ -795,7 +828,7 @@ def _render_html(info: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
 
 _CSV_COLUMNS = ["rank", "candidate_id", "lat", "lon", "coordinate_precision", "dem_z", "status",
                 "status_source", "confidence_band", "confidence", "calib_v1", "terrain_shape",
-                "hillside", "terrain_method", "known_site_label", "known_site_context", "job_id",
+                "hillside", "terrain_method", "known_site_label", "known_site_context", "industry_context", "job_id",
                 "report_version"]
 
 
@@ -811,7 +844,7 @@ def _render_csv(info: Dict[str, Any], rows: List[Dict[str, Any]]) -> str:
             r["confidence_band"],
             ("%.2f" % r["confidence_numeric"]) if isinstance(r["confidence_numeric"], (int, float)) else "",
             "strong" if r["calib_strong"] else "", r["terrain_shape"], r["hillside"], r["terrain_method"],
-            r["known_site_label"], r["known_site_en"], info["job_id"], REPORT_VERSION,
+            r["known_site_label"], r["known_site_en"], r["ind_label_en"], info["job_id"], REPORT_VERSION,
         ])
     return buf.getvalue()
 
