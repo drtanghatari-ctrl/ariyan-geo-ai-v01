@@ -125,7 +125,20 @@ def list_candidates_json(db_root: str, grand_project_id: str) -> str:
         # Context, never evidence -- see known_sites.py. A lookup
         # failure never breaks the list; it is reported on the row.
         row.update(_known_site_brief(row.get("lat"), row.get("lon")))
+        # ADDED 2026-10-15 (ind-label-v1): mapped industry within 300 m,
+        # one line. Extra key only: ind_label_text (null when none).
+        # Context only, never a rejection; a lookup failure never breaks
+        # the list -- the row simply carries no label.
+        row["ind_label_text"] = _ind_label(row.get("lat"), row.get("lon"))
     return json.dumps(rows)
+
+
+def _ind_label(lat, lon):
+    try:
+        import industrial_label
+        return industrial_label.label(lat, lon)
+    except Exception:
+        return None
 
 
 def _known_site_brief(lat, lon) -> dict:
@@ -272,6 +285,15 @@ def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
     except Exception as exc:
         provenance = {"error": "%s: %s" % (type(exc).__name__, exc)}
 
+    # ADDED 2026-10-15 (ind-label-v1): mapped industry within 300 m
+    # (nearest up to 5 features, label, whether Pass 2 defers it).
+    # Context only; never a rejection. A failure never hides the detail.
+    try:
+        import industrial_label
+        industry = industrial_label.detail(candidate.get("lat"), candidate.get("lon"))
+    except Exception as exc:
+        industry = {"text": "industrial lookup failed: %s" % type(exc).__name__}
+
     return json.dumps({
         "candidate": candidate,
         "investigation": investigation,
@@ -282,6 +304,7 @@ def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
         "review": review_entry,
         "known_site": known_site,
         "provenance": provenance,
+        "industry": industry,
     })
 
 
