@@ -200,7 +200,8 @@ def _step_sweep(root, run, creds, deadline):
             return {"note": "sweep already complete", "progress": prog}
     payload = json.loads(was.run_wide_area_search_job(
         root, run["job_id"], api_key=creds["api_key"], demtype=run["options"]["sweep_demtype"],
-        dem_only=True, dem_offline_first=True))
+        dem_only=True, dem_offline_first=True,
+        read_land_cover=False))   # lc-auto-v1: the land_cover step does it, with retries
     if payload.get("paused"):
         raise PauseStep("sweep: offline guard paused -- " + str(payload.get("pause_reason")),
                         NO_LIVE_DEM_PAUSE_S, {"sweep": payload, "offline_guard_paused": True})
@@ -298,7 +299,8 @@ def _step_pass2(root, run, creds, deadline):
         r = gpr.run_selected_refinement(
             root, run["job_id"], [c["id"] for c in batch], api_key=creds["api_key"],
             demtype=opts["pass2_demtype"], ndvi_client_id=creds["ndvi_id"],
-            ndvi_client_secret=creds["ndvi_secret"], require_live_dem=True)
+            ndvi_client_secret=creds["ndvi_secret"], require_live_dem=True,
+            read_land_cover=False)   # lc-auto-v1: done by the land_cover step
         lib = r.get("dem_library") or {}
         # dem_source_mobile enters every live call in the 24 h budget log
         # itself (save-once, 2026-10-06); only read the count here.
