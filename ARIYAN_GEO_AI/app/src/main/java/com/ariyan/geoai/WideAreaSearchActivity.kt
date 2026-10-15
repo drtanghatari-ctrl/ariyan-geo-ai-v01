@@ -1525,6 +1525,10 @@ class WideAreaSearchActivity : AppCompatActivity() {
         val byReason = preview.optJSONObject("skipped_flagged_by_reason")
         val flaggedTreesOrBuildings = byReason?.optInt("tree_or_built", 0) ?: 0
         val flaggedWater = byReason?.optInt("water", 0) ?: 0
+        // ind-label-v1 (2026-10-15): candidates within 300 m of mapped
+        // industry are queued after all others; never excluded.
+        val industrialDeferred = preview.optInt("industrial_deferred", 0)
+        val industrialDeferredSelected = preview.optInt("industrial_deferred_selected", 0)
 
         if (selected.length() == 0) {
             val flaggedText = if (skipFlagged && skippedFlagged > 0) {
@@ -1563,6 +1567,11 @@ class WideAreaSearchActivity : AppCompatActivity() {
             if (!skipFlagged) {
                 append("The land-cover filter is OFF for this run: trees, buildings and water candidates can be included.\n")
             }
+            if (industrialDeferred > 0) {
+                append(industrialDeferred).append(" eligible candidate(s) lie within 300 m of mapped industry ")
+                append("(OpenStreetMap); they are queued after open-ground candidates, not excluded. ")
+                append(industrialDeferredSelected).append(" of them are in this run.\n")
+            }
             append("\n")
             for (i in 0 until selected.length()) {
                 val c = selected.getJSONObject(i)
@@ -1572,6 +1581,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 append(String.format(java.util.Locale.US, "%.5f, %.5f", c.optDouble("lat"), c.optDouble("lon")))
                 append(" z=").append(scoreText)
                 append(" (").append(reliefText(c)).append(")\n")
+                industrialText(c)?.let { append("   industry: ").append(it).append("\n") }
             }
             append("\nz = how unusual the bump/dip is; m = its peak height or depth ")
             append("against the smoothed ground (from Pass 1).\n")
@@ -1731,6 +1741,7 @@ class WideAreaSearchActivity : AppCompatActivity() {
                 append("\n ")
                 append(String.format(java.util.Locale.US, "%.5f, %.5f", c.optDouble("lat"), c.optDouble("lon")))
                 append("\n")
+                industrialText(c)?.let { append(" industry: ").append(it).append("\n") }
                 val history = c.optJSONArray("previous_refinements") ?: JSONArray()
                 if (history.length() == 0) {
                     append(" never refined\n")
@@ -1955,4 +1966,12 @@ class WideAreaSearchActivity : AppCompatActivity() {
     private fun reliefText(c: JSONObject): String =
         if (!c.has("relief_m") || c.isNull("relief_m")) "?\u00A0m"
         else String.format(java.util.Locale.US, "%+.1f\u00A0m", c.optDouble("relief_m"))
+
+    /** ind-label-v1 (2026-10-15): the preview's industrial_text (mapped
+     * industry within 300 m, OpenStreetMap) or null. Context only. */
+    private fun industrialText(c: JSONObject): String? {
+        if (!c.has("industrial_text") || c.isNull("industrial_text")) return null
+        val t = c.optString("industrial_text", "")
+        return if (t.isEmpty() || t == "null") null else t
+    }
 }
