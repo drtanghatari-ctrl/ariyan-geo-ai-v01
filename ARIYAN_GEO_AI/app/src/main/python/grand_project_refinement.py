@@ -387,7 +387,8 @@ def select_refinement_candidates(
     "already_refined": int, "skipped_near_duplicates": int,
     "job_candidates": int, "skip_flagged": bool, "skipped_flagged": int,
     "skipped_flagged_by_reason": {reason: count},
-    "land_cover_unchecked": int}.
+    "land_cover_unchecked": int, "industrial_deferred": int,
+    "industrial_deferred_selected": int, "industrial_order": str}.
 
     skip_flagged (default True): candidates flagged by land_cover_flags
     (trees / buildings / water) are left out and counted in
@@ -398,7 +399,10 @@ def select_refinement_candidates(
     0 when skip_flagged is False.
 
     Ranking is abs(score) descending; a candidate with no score ranks last
-    (never dropped). A candidate is skipped as a near-duplicate when it is
+    (never dropped). ind-label-v1: candidates with mapped industry within
+    300 m (industrial_label.py) rank after every other eligible candidate;
+    "industrial_deferred" counts them, "industrial_deferred_selected"
+    counts how many still made the selection. A candidate is skipped as a near-duplicate when it is
     within `min_separation_m` of one already selected in this call OR of
     one already refined earlier in this job, so re-running the pass after
     a partial run does not re-spend budget on a twin of finished work.
@@ -436,7 +440,20 @@ def select_refinement_candidates(
                 kept.append(c)
         eligible = kept
 
-    eligible.sort(key=_abs_score, reverse=True)
+    # ind-label-v1 (2026-10-15, user-approved): candidates with mapped
+    # industry within 300 m go AFTER all others (still abs(score) order
+    # within each group), so live DEM budget goes to open ground first.
+    # Never excluded. Any lookup failure = not deferred.
+    near_industry: Dict[str, float] = {}
+    try:
+        import industrial_label
+        for c in eligible:
+            hit = industrial_label.nearest(c.get("lat"), c.get("lon"))
+            if hit is not None:
+                near_industry[c["id"]] = float(hit.get("distance_m") or 0.0)
+    except Exception:
+        near_industry = {}
+    eligible.sort(key=lambda c: (c["id"] in near_industry, -_abs_score(c)))
 
     occupied = [(c["lat"], c["lon"]) for c in already
                 if c.get("lat") is not None and c.get("lon") is not None]
@@ -467,6 +484,9 @@ def select_refinement_candidates(
         "skipped_flagged": skipped_flagged,
         "skipped_flagged_by_reason": skipped_flagged_by_reason,
         "land_cover_unchecked": land_cover_unchecked,
+        "industrial_deferred": len(near_industry),
+        "industrial_deferred_selected": sum(1 for c in selected if c["id"] in near_industry),
+        "industrial_order": "ind-label-v1",
     }
 
 
@@ -501,6 +521,15 @@ def _relief_by_candidate(db_root: str, candidate_ids: List[str]) -> Dict[str, Op
     return out
 
 
+def _industrial_text(c: Dict[str, Any]) -> Optional[str]:
+    """ind-label-v1 label for a preview row (None = nothing mapped); never raises."""
+    try:
+        import industrial_label
+        return industrial_label.label(c.get("lat"), c.get("lon"))
+    except Exception:
+        return None
+
+
 def preview_refinement_selection_json(
     db_root: str, job_id: str, n: int = 5,
     min_separation_m: float = DEFAULT_MIN_SEPARATION_M,
@@ -513,7 +542,7 @@ def preview_refinement_selection_json(
     relief = _relief_by_candidate(db_root, [c["id"] for c in result["selected"]])
     result["selected"] = [
         {"candidate_id": c["id"], "lat": c["lat"], "lon": c["lon"], "score": c["score"],
-         "relief_m": relief.get(c["id"])}
+         "relief_m": relief.get(c["id"]), "industrial_text": _industrial_text(c)}
         for c in result["selected"]
     ]
     return json.dumps(result)
@@ -607,6 +636,7 @@ def preview_selected_refinement_json(db_root: str, job_id: str, refs: Any) -> st
             "candidate_id": c["id"], "lat": c["lat"], "lon": c["lon"],
             "score": c["score"], "relief_m": relief.get(c["id"]),
             "confidence_band": c.get("confidence_band"),
+            "industrial_text": _industrial_text(c),
             "previous_refinements": history,
         })
     return json.dumps({"selected": selected, "problems": res["problems"]})
