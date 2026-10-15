@@ -658,6 +658,12 @@ class GrandProjectActivity : AppCompatActivity() {
             if (landText.isNotEmpty() && landText != "null") {
                 append("\nland cover: ").append(landText)
             }
+            // ind-label-v1 (2026-10-15): mapped industry within 300 m,
+            // display only -- never a rejection.
+            val indText = row.optString("ind_label_text", "")
+            if (indText.isNotEmpty() && indText != "null") {
+                append("\nindustry: ").append(indText)
+            }
             append("\n(tap for confidence history + evidence)")
         }
         return TextView(this).apply {
@@ -923,6 +929,7 @@ class GrandProjectActivity : AppCompatActivity() {
         }
 appendReviewSection(sb, detail)
         appendKnownSiteSection(sb, detail)
+        appendIndustrySection(sb, detail)
         appendProvenanceSection(sb, detail)
         val history = detail.optJSONArray("confidence_history")
         if (history != null && history.length() > 0) {
@@ -1798,6 +1805,32 @@ appendReviewSection(sb, detail)
      * bundled ANE gazetteer (Pedersen, Zenodo 10.5281/zenodo.6384045,
      * CC-BY-4.0). Context only -- never evidence, never changes
      * confidence. "Not in gazetteer" does not mean "new site". */
+    private fun appendIndustrySection(sb: StringBuilder, detail: JSONObject) {
+        // ind-label-v1 (2026-10-15): mapped industry within 300 m
+        // (OpenStreetMap, distance to the feature's bounding box). Context
+        // only -- never a rejection, never changes status or confidence.
+        val ind = detail.optJSONObject("industry") ?: return
+        sb.append("Industry nearby (OpenStreetMap context, not a rejection)\n")
+        val text = ind.optString("text", "")
+        if (text.isNotEmpty() && text != "null") {
+            sb.append("  ").append(text).append("\n")
+        }
+        val feats = ind.optJSONArray("features")
+        if (feats != null && feats.length() > 1) {
+            for (i in 0 until feats.length()) {
+                val f = feats.getJSONObject(i)
+                val d = f.optDouble("distance_m", 0.0)
+                sb.append("  - ").append(f.optString("kind")).append(": ")
+                    .append(if (d <= 0.0) "inside its mapped box" else String.format(java.util.Locale.US, "%.0f m", d))
+                    .append("\n")
+            }
+        }
+        if (ind.optBoolean("deferred_in_pass2", false)) {
+            sb.append("  Pass 2: queued after open-ground candidates (still refined if budget allows; you can pick it by hand).\n")
+        }
+        sb.append("\n")
+    }
+
     private fun appendKnownSiteSection(sb: StringBuilder, detail: JSONObject) {
         val ks = detail.optJSONObject("known_site") ?: return
         sb.append("Known Sites (gazetteer context, not evidence)\n")
