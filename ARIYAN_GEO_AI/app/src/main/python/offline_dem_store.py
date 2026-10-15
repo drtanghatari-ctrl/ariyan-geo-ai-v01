@@ -87,37 +87,70 @@ unchanged (no shift, no interpolation); if the neighbour file isn't
 downloaded either, the result is still None, never a guess. Neighbour
 reads go through _get_cached_tile(), so the provenance ledger records
 whichever file actually supplied the value.
+
+TILE-CACHE FIX (2026-10-15, tc-v1): closes the HONEST TRADEOFF above.
+Each cache entry now also remembers the tile file's size and
+modification time (st_size, st_mtime_ns) taken when it was opened. Every
+_get_cached_tile() call re-stats the file (one cheap stat, the same cost
+as the os.path.isfile() check get_offline_elevation() already makes);
+if either value differs, the old object is dropped and the file is
+opened fresh. This matters beyond stale values: CopernicusDemTile parses
+the file's tile offsets ONCE at open and reads blocks lazily later, so a
+stale object over a replaced file could read the new file's bytes at the
+old file's offsets -- wrong numbers, not just old ones. The check sits
+in the one function every reader goes through (get_offline_elevation,
+cop30_bulk, terrain_context_labels, the provenance ledger wrapper), so it
+covers every download path (Download Offline Data, cop-bulk, library
+fill) without wiring each of them. A file that has disappeared raises
+FileNotFoundError exactly as before and its entry is removed.
+clear_tile_cache() and wide_area_search_mobile's every-20-tiles clearing
+are kept unchanged (they bound memory; this fix bounds staleness).
 """
 
 from __future__ import annotations
 
 import math
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from geotiff_cog_reader import CopernicusDemTile
 
-_tile_cache: Dict[str, CopernicusDemTile] = {}
+TILE_CACHE_VERSION = "tc-v1"
+
+# path -> ((st_size, st_mtime_ns) when opened, opened tile)
+_tile_cache: Dict[str, Tuple[Tuple[int, int], CopernicusDemTile]] = {}
 
 
 def clear_tile_cache() -> None:
-    """Drops all cached, already-opened DEM tile objects. Not yet called
-    automatically anywhere (see module docstring's PER-TILE CACHING FIX
-    note) -- available for OfflineDataActivity.kt / offline_data_manager.py
-    to call after a fresh download completes, once that wiring is added."""
+    """Drops all cached, already-opened DEM tile objects. Called every
+    OFFLINE_TILE_CACHE_CLEAR_EVERY_TILES tiles by wide_area_search_mobile
+    to bound memory. Since tc-v1 it is no longer needed for correctness
+    after a download: a changed file is re-opened automatically."""
     _tile_cache.clear()
+
+
+def _file_signature(path: str) -> Tuple[int, int]:
+    st = os.stat(path)
+    return (st.st_size, st.st_mtime_ns)
 
 
 def _get_cached_tile(path: str) -> CopernicusDemTile:
     """Returns the cached CopernicusDemTile for this path, opening and
     decoding it (once) if this is the first request for it this app
-    session. See module docstring's PER-TILE CACHING FIX note -- this is
-    the change that avoids re-parsing the same tile file thousands of
-    times within a single investigation."""
-    tile = _tile_cache.get(path)
-    if tile is None:
-        tile = CopernicusDemTile(path)
-        _tile_cache[path] = tile
+    session -- or again if the file on disk has changed since it was
+    opened (tc-v1, see module docstring TILE-CACHE FIX). Raises
+    FileNotFoundError for a missing file, as before."""
+    try:
+        sig = _file_signature(path)
+    except OSError:
+        _tile_cache.pop(path, None)
+        raise
+    entry = _tile_cache.get(path)
+    if entry is not None and entry[0] == sig:
+        return entry[1]
+    _tile_cache.pop(path, None)
+    tile = CopernicusDemTile(path)
+    _tile_cache[path] = (sig, tile)
     return tile
 
 
