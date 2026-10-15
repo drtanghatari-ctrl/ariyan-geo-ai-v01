@@ -121,6 +121,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 import grand_project_db as db
+import worldcover_store
 
 # ============================ CONSTANTS ============================
 
@@ -718,6 +719,14 @@ def ensure_job_land_cover(
     if db.get_wide_area_search_job(db_root, job_id) is None:
         raise LandCoverError(f"No wide-area search job with id {job_id!r} was found.")
 
+    # lc-auto-v1 (2026-10-15): save-once. Unless a caller (tests) passes its
+    # own http_get, every WorldCover byte range is read from the offline
+    # worldcover_library first and saved there after a live read.
+    store_stats: Optional[Dict[str, int]] = None
+    if http_get is None:
+        store_stats = {}
+        http_get = worldcover_store.saved_range_get(db_root, stats=store_stats)
+
     conn = db.get_connection(db_root)
     problems: List[str] = []
     newly = 0
@@ -832,12 +841,37 @@ def ensure_job_land_cover(
         "method": LC2_METHOD,
         "seconds": round(time.time() - started, 1),
     }
+    if store_stats is not None:
+        result["worldcover_store"] = dict(store_stats)
     if problems:
         # The key is ABSENT (not null) when there is no problem, because
         # org.json's optString() does not apply its fallback to a present
         # JSON null.
         result["problem"] = "; ".join(problems)[:600]
     return result
+
+
+LC_AUTO_VERSION = "lc-auto-v1"
+
+
+def read_job_land_cover_quietly(db_root: str, job_id: str) -> Dict[str, Any]:
+    """lc-auto-v1 (2026-10-15): the automatic land-cover read that runs at
+    the end of every sweep and before a "Refine selected" run, so DEM-only
+    jobs are no longer left without land cover. NEVER raises: any problem
+    (offline, no tile, unknown job) is returned under "problem" and the
+    caller carries on; the unchecked candidates are simply read the next
+    time (next sweep/refinement, Refine top N, or the Auto run). Returns a
+    small summary only (no candidate lists)."""
+    try:
+        r = ensure_job_land_cover(db_root, job_id)
+    except Exception as exc:
+        return {"version": LC_AUTO_VERSION,
+                "problem": f"{type(exc).__name__}: {exc}"[:300]}
+    keep = ("candidates", "already_checked", "newly_checked", "no_land_cover_data",
+            "could_not_read", "flagged_total", "seconds", "worldcover_store", "problem")
+    out = {k: r[k] for k in keep if k in r}
+    out["version"] = LC_AUTO_VERSION
+    return out
 
 
 def ensure_job_land_cover_json(db_root: str, job_id: str) -> str:
