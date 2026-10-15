@@ -1521,6 +1521,7 @@ def run_wide_area_search_job(
     ndvi_client_secret: str = "",
     dem_only: bool = False,
     dem_offline_first: bool = False,
+    read_land_cover: bool = True,
 ) -> str:
     """Runs (or RESUMES) one wide-area search job -- the full behavioural
     description is on _run_wide_area_search_job_impl() below.
@@ -1583,9 +1584,35 @@ def run_wide_area_search_job(
         sat_store = sat_response_store.disarm()
         if dem_only and dem_offline_first:
             _clear_offline_tile_cache()
-    return _attach_throttle_report(
+    report = _attach_throttle_report(
         result, copernicus, live_dem, getattr(_run_state, "summary", None),
         dem_library=dem_library, sat_store=sat_store)
+    if read_land_cover:
+        report = _attach_land_cover(data_root, job_id, report)
+    return report
+
+
+def _attach_land_cover(data_root: str, job_id: str, report: str) -> str:
+    """lc-auto-v1 (2026-10-15): after a sweep run that was not paused, read
+    WorldCover land cover for every unchecked candidate of the job (offline
+    worldcover_library first, live + save otherwise). Before this, DEM-only
+    sweeps left their candidates with no land cover at all unless the user
+    opened Refine top N or used the Auto run. Never fails the sweep: a
+    problem is reported under "land_cover" and the read is simply repeated
+    next time. The Auto run passes read_land_cover=False because it has its
+    own land-cover step with retries."""
+    try:
+        payload = json.loads(report)
+    except Exception:
+        return report
+    if not isinstance(payload, dict) or payload.get("paused"):
+        return report
+    try:
+        import land_cover_flags
+        payload["land_cover"] = land_cover_flags.read_job_land_cover_quietly(data_root, job_id)
+    except Exception as exc:   # import trouble only; the helper never raises
+        payload["land_cover"] = {"problem": f"{type(exc).__name__}: {exc}"[:300]}
+    return json.dumps(payload)
 
 
 def _paused_payload(data_root: str, job_id: str, dem_only: bool,
