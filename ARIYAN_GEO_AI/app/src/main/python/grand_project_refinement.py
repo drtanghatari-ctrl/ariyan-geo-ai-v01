@@ -1321,6 +1321,7 @@ def run_selected_refinement(
     ndvi_client_id: str = "",
     ndvi_client_secret: str = "",
     require_live_dem: bool = True,
+    read_land_cover: bool = True,
 ) -> Dict[str, Any]:
     """Refines exactly the named candidates of this job, in the order given,
     including ones refined before (see the 2026-09-23 note in the module
@@ -1335,6 +1336,12 @@ def run_selected_refinement(
         raise RefinementError(
             "Live DEM is required for this run, but no OpenTopography API key "
             "is saved on this device.")
+    # lc-auto-v1 (2026-10-15): make sure the job's candidates have land
+    # cover (the selected path never read it before, so DEM-only jobs
+    # refined by id -- T3/T4 -- had none). Still NO filter here: the user
+    # chose these candidates. Never raises; a problem is only reported.
+    land_cover = (land_cover_flags.read_job_land_cover_quietly(data_root, job_id)
+                  if read_land_cover else None)
     out = _run_refinement_loop(
         data_root, job_id, res["resolved"], api_key, demtype,
         ndvi_client_id, ndvi_client_secret,
@@ -1344,6 +1351,8 @@ def run_selected_refinement(
         "requested": len(res["resolved"]) + len(res["problems"]),
         "reference_problems": res["problems"],
     })
+    if land_cover is not None:
+        out["land_cover"] = land_cover
     return out
 
 
