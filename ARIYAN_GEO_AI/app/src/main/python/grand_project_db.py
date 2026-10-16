@@ -97,20 +97,247 @@ def _db_path(db_root: str) -> str:
     return os.path.join(db_root, DB_FILENAME)
 
 
+# ---------------------------------------------------------------------------
+# db-safe-v1 (2026-10-16): database safety guard + automatic daily backup.
+#
+# Background: on 16 Oct 2026 the real grand_project.db (all October jobs)
+# disappeared from offline_data and the app silently created a fresh, empty
+# 131 KB database in its place, because sqlite3.connect() creates a new file
+# whenever the path does not exist. Nothing in this codebase deletes the
+# file, so the loss came from outside the app (install/uninstall, file
+# manager, USB transfer...) -- but the SILENT re-creation is what turned a
+# missing file into a convincing "empty project". This guard makes that
+# impossible:
+#
+#   1. If grand_project.db is missing (or 0 bytes) but there is evidence a
+#      real database existed (backups, job status files, or the guard
+#      marker), get_connection() REFUSES to create a new one and raises
+#      DatabaseMissingError with restore instructions.
+#   2. If the file exists but is far smaller than the size last seen
+#      (< 25% of a previously >1 MB database), it raises DatabaseSuspectError
+#      instead of opening what is almost certainly an empty replacement.
+#      (SQLite never shrinks a file on its own without VACUUM, so normal use,
+#      including deleting jobs, cannot trigger this.)
+#   3. Once per day (per process) after a successful open, a consistent copy
+#      is taken with SQLite's online backup API into offline_data/db_backups/
+#      as grand_project_auto_YYYYMMDD.db. The newest AUTO_BACKUP_KEEP copies
+#      are kept, and the LARGEST backup is never pruned.
+#
+# Deliberate override (e.g. the user really wants a brand-new project): create
+# an empty file named ALLOW_NEW_GRAND_PROJECT_DB in offline_data. The next
+# open accepts the current state, resets the guard, and deletes the file.
+# ---------------------------------------------------------------------------
+
+BACKUP_DIRNAME = "db_backups"
+GUARD_FILENAME = "grand_project_db_guard.json"
+ALLOW_NEW_FILENAME = "ALLOW_NEW_GRAND_PROJECT_DB"
+AUTO_BACKUP_PREFIX = "grand_project_auto_"
+AUTO_BACKUP_KEEP = 10
+_SHRINK_MIN_PREVIOUS_BYTES = 1024 * 1024
+_SHRINK_RATIO = 0.25
+
+# db_root -> "YYYYMMDD" of the last day this process ran the daily
+# backup/guard step, so the 50+ call sites that open connections don't
+# repeat file I/O on every call.
+_daily_done: Dict[str, str] = {}
+
+
+class DatabaseMissingError(RuntimeError):
+    """grand_project.db is gone but a real database clearly existed."""
+
+
+class DatabaseSuspectError(RuntimeError):
+    """grand_project.db is much smaller than last seen -- likely replaced."""
+
+
+def _backup_dir(db_root: str) -> str:
+    return os.path.join(db_root, BACKUP_DIRNAME)
+
+
+def _guard_path(db_root: str) -> str:
+    return os.path.join(db_root, GUARD_FILENAME)
+
+
+def _read_guard(db_root: str) -> Optional[Dict[str, Any]]:
+    try:
+        with open(_guard_path(db_root), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _write_guard(db_root: str, size_bytes: int) -> None:
+    try:
+        path = _guard_path(db_root)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"last_seen_size": int(size_bytes),
+                       "last_seen_at": _now_iso(),
+                       "db_filename": DB_FILENAME}, fh)
+        os.replace(tmp, path)
+    except Exception:
+        pass  # the guard is a safety aid; never fail the caller over it
+
+
+def _list_backups(db_root: str) -> List[str]:
+    """All *.db files that look like Grand Project backups, newest first
+    (by mtime), from offline_data/ itself and offline_data/db_backups/."""
+    found: List[str] = []
+    for folder in (db_root, _backup_dir(db_root)):
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            if name == DB_FILENAME or not name.startswith("grand_project"):
+                continue
+            if name.endswith(".db") or name.endswith(".db.bak"):
+                full = os.path.join(folder, name)
+                if os.path.isfile(full):
+                    found.append(full)
+    found.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return found
+
+
+def _evidence_of_prior_database(db_root: str) -> List[str]:
+    reasons: List[str] = []
+    if _read_guard(db_root) is not None:
+        reasons.append("guard marker " + GUARD_FILENAME)
+    if _list_backups(db_root):
+        reasons.append("backup files present")
+    try:
+        if any(n.startswith("wide_area_search_status_") and n.endswith(".json")
+               for n in os.listdir(db_root)):
+            reasons.append("wide-area job status files present")
+    except OSError:
+        pass
+    return reasons
+
+
+def _restore_hint(db_root: str) -> str:
+    backups = _list_backups(db_root)
+    if not backups:
+        return "No backup file was found."
+    lines = []
+    for p in backups[:3]:
+        try:
+            st = os.stat(p)
+            when = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+            lines.append("  %s  (%.2f MB, %s)" % (p, st.st_size / 1048576.0, when))
+        except OSError:
+            lines.append("  " + p)
+    return "Newest backups:\n" + "\n".join(lines)
+
+
+def _consume_override(db_root: str) -> bool:
+    flag = os.path.join(db_root, ALLOW_NEW_FILENAME)
+    if not os.path.exists(flag):
+        return False
+    try:
+        os.remove(flag)
+    except OSError:
+        pass
+    try:
+        os.remove(_guard_path(db_root))
+    except OSError:
+        pass
+    return True
+
+
+def _check_database_safety(db_root: str) -> None:
+    path = _db_path(db_root)
+    size = os.path.getsize(path) if os.path.isfile(path) else -1
+    if _consume_override(db_root):
+        return
+    if size <= 0:
+        reasons = _evidence_of_prior_database(db_root)
+        if reasons:
+            raise DatabaseMissingError(
+                "grand_project.db is missing from %s, but a real database "
+                "existed before (%s). ARIYAN will NOT create a new empty "
+                "database over your data. Restore a backup by copying it to "
+                "%s, or -- only if you really want a brand-new empty "
+                "project -- create an empty file named %s in that folder.\n%s"
+                % (db_root, "; ".join(reasons), path, ALLOW_NEW_FILENAME,
+                   _restore_hint(db_root)))
+        return
+    guard = _read_guard(db_root)
+    if guard:
+        try:
+            last = int(guard.get("last_seen_size", 0))
+        except (TypeError, ValueError):
+            last = 0
+        if last >= _SHRINK_MIN_PREVIOUS_BYTES and size < last * _SHRINK_RATIO:
+            raise DatabaseSuspectError(
+                "grand_project.db is %.2f MB, but it was %.2f MB on %s. "
+                "SQLite never shrinks this much on its own, so the file was "
+                "probably replaced by an empty one. ARIYAN will not open it. "
+                "Restore a backup to %s, or create an empty file named %s in "
+                "that folder to accept the current file.\n%s"
+                % (size / 1048576.0, last / 1048576.0,
+                   guard.get("last_seen_at", "?"), path, ALLOW_NEW_FILENAME,
+                   _restore_hint(db_root)))
+
+
+def _prune_auto_backups(folder: str) -> None:
+    autos = [os.path.join(folder, n) for n in os.listdir(folder)
+             if n.startswith(AUTO_BACKUP_PREFIX) and n.endswith(".db")]
+    if len(autos) <= AUTO_BACKUP_KEEP:
+        return
+    largest = max(autos, key=os.path.getsize)
+    autos.sort(reverse=True)  # YYYYMMDD in the name -> newest first
+    for p in autos[AUTO_BACKUP_KEEP:]:
+        if p != largest:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def _daily_backup_and_guard(db_root: str, conn: sqlite3.Connection) -> None:
+    """Never raises. Takes today's backup if not already taken, then
+    records the current size in the guard marker."""
+    today = datetime.now().strftime("%Y%m%d")
+    if _daily_done.get(db_root) == today:
+        return
+    try:
+        path = _db_path(db_root)
+        size = os.path.getsize(path)
+        folder = _backup_dir(db_root)
+        os.makedirs(folder, exist_ok=True)
+        dest = os.path.join(folder, AUTO_BACKUP_PREFIX + today + ".db")
+        if size > 0 and not os.path.exists(dest):
+            tmp = dest + ".tmp"
+            target = sqlite3.connect(tmp)
+            try:
+                conn.backup(target)
+            finally:
+                target.close()
+            os.replace(tmp, dest)
+            _prune_auto_backups(folder)
+        _write_guard(db_root, size)
+        _daily_done[db_root] = today
+    except Exception:
+        pass  # a failed backup must never block normal use
+
+
 def get_connection(db_root: str) -> sqlite3.Connection:
-    """Opens (creating if necessary) the Grand Project database under
-    `db_root` -- the caller-supplied root, expected to be the SAME
+    """Opens the Grand Project database under `db_root` -- the
+    caller-supplied root, expected to be the SAME
     `offlineDataRoot`/`offline_data_root` value already used elsewhere
-    in this project (see module docstring). Ensures the directory
-    exists first, exactly like offline_data_manager.py's
-    os.makedirs(..., exist_ok=True) calls before writing a manifest.
-    Row factory is set to sqlite3.Row so callers get dict-like access
-    by column name rather than fragile positional tuples.
+    in this project (see module docstring). A new database is created
+    only on a genuine first run; see the db-safe-v1 block above for the
+    guard that refuses to silently replace a missing or swapped database,
+    and for the automatic daily backup. Row factory is set to sqlite3.Row
+    so callers get dict-like access by column name.
     """
     os.makedirs(db_root, exist_ok=True)
+    _check_database_safety(db_root)
     conn = sqlite3.connect(_db_path(db_root))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    _daily_backup_and_guard(db_root, conn)
     return conn
 
 
