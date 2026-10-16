@@ -130,7 +130,7 @@ class FinalImageActivity : AppCompatActivity() {
         val frame = FrameLayout(this)
         view = FinalImageView(this).apply {
             onViewChanged = { updateInfo() }
-            onMarkerTapped = { showMarker(it) }
+            onMarkersTapped = { if (it.size == 1) showMarker(it[0]) else showCluster(it) }
         }
         frame.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         progress = ProgressBar(this).apply { visibility = View.GONE }
@@ -267,7 +267,7 @@ class FinalImageActivity : AppCompatActivity() {
         val iv = ci.optDouble("interval_m")
         sb.append(if (iv.isNaN()) "No contours (terrain too flat for a useful interval).\n"
             else "Contours every ${trimNum(iv)} m (thick = every 5th).\n")
-        sb.append("Markers: colour = stored confidence (red HIGH, orange MODERATE, yellow LOW, blue unrated), grey \u00D7 = Rejected, white ring = this candidate.\n")
+        sb.append("Markers: colour = stored confidence (red HIGH, orange MODERATE, yellow LOW, blue unrated), grey \u00D7 = Rejected, white ring = this candidate. Labels that would overlap are hidden; tap a marker to list every candidate at that spot.\n")
         val utm = m.optJSONObject("utm_grid")
         if (utm != null) sb.append("UTM grid zone ").append(utm.opt("zone")).append(utm.optString("hemisphere")).append(".\n")
         for (key in listOf("problems", "notes")) {
@@ -335,6 +335,17 @@ class FinalImageActivity : AppCompatActivity() {
     private fun centreOnCandidate() {
         val f = meta?.optJSONObject("focus") ?: return
         view.focusOn(f.getDouble("x").toFloat(), f.getDouble("y").toFloat(), 8f * resources.displayMetrics.density)
+    }
+
+    /** Several markers under the finger: list them all so none is lost behind a hidden label. */
+    private fun showCluster(list: List<FinalImageView.Marker>) {
+        val items = list.map { mk ->
+            mk.id.take(8) + "  " + (mk.confidenceLabel ?: "not rated") + "  \u00B7 " + mk.status +
+                (if (mk.focus) "  (this candidate)" else "")
+        }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("${list.size} candidates here")
+            .setItems(items) { _, i -> showMarker(list[i]) }
+            .setPositiveButton("Close", null).show()
     }
 
     private fun showMarker(mk: FinalImageView.Marker) {
