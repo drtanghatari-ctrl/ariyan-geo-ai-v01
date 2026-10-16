@@ -327,3 +327,74 @@ def test_hillshade_matches_existing_gdaldem_equivalent():
     ref = td.compute_hillshade(SimpleNamespace(elevation_m=z, resolution_m=30.0, source="t"),
                                315.0, 45.0).values / 255.0
     assert np.allclose(fi.hillshade(z, 30.0, 30.0, 315.0, 45.0), ref)
+
+
+# -- final_image_mobile bridge -------------------------------------------------
+
+def _bridge_env(tmp_path):
+    import grand_project_db as db
+    import offline_country_registry as ocr
+    ods.clear_tile_cache()
+    root = str(tmp_path)
+    lat, lon = _centre()
+    folder = ocr.get_country_for_point(lat, lon).storage_folder
+    path = ods.local_tile_path(folder, root, lat, lon)
+    os.makedirs(os.path.dirname(path))
+    write_tile(path, mound_tile())
+    gp = db.create_grand_project(root, "t")
+    inv = db.create_investigation(root, gp, "", "", {})
+    cid = db.create_candidate(root, gp, inv, lat, lon, score=3.0)
+    near = db.create_candidate(root, gp, inv, lat + 0.004, lon, score=1.0)
+    far = db.create_candidate(root, gp, inv, lat + 0.3, lon, score=1.0)
+    return root, cid, near, far
+
+
+def _db_snapshot(root):
+    import grand_project_db as db
+    conn = db.get_connection(root)
+    try:
+        return [tuple(r) for r in conn.execute("SELECT * FROM candidate ORDER BY id")]
+    finally:
+        conn.close()
+
+
+def test_bridge_open_draws_window_and_never_writes(tmp_path):
+    import final_image_mobile as fim
+    root, cid, near, far = _bridge_env(tmp_path)
+    before = _db_snapshot(root)
+    d = json.loads(fim.open_final_image_json(root, cid, 1000.0, "relief"))
+    assert "error" not in d, d
+    ids = {m["id"] for m in d["candidates"]}
+    assert cid in ids and near in ids and far not in ids
+    assert [m for m in d["candidates"] if m["focus"]][0]["id"] == cid
+    assert d["contours"]["levels"] and len(d["contours"]["levels"][0]["flat"]) % 4 == 0
+    raw = fim.image_rgba(d["session_id"])
+    assert len(raw) == d["width"] * d["height"] * 4
+    view = fim.render_view_rgba(d["session_id"], 0, 0, d["width"], d["height"], 64, 64, "cells")
+    assert len(view) == 64 * 64 * 4
+    out = json.loads(fim.export_final_image_json(root, d["session_id"]))
+    assert out["ok"] and all(os.path.isfile(p) for p in out["paths"].values())
+    assert _db_snapshot(root) == before
+    ods.clear_tile_cache()
+
+
+def test_bridge_errors_are_reported_not_hidden(tmp_path):
+    import final_image_mobile as fim
+    assert json.loads(fim.open_final_image_json(str(tmp_path), "nope"))["error"] == "candidate not found"
+    import grand_project_db as db
+    root = str(tmp_path)
+    gp = db.create_grand_project(root, "t")
+    inv = db.create_investigation(root, gp, "", "", {})
+    cid = db.create_candidate(root, gp, inv, 33.5, 51.5)
+    err = json.loads(fim.open_final_image_json(root, cid))["error"]
+    assert "FileNotFoundError" in err
+    with pytest.raises(KeyError):
+        fim.image_rgba("expired")
+
+
+def test_bridge_transparent_pixels_are_zero_for_android():
+    import final_image_mobile as fim
+    img = np.full((2, 2, 4), 120, np.uint8)
+    img[0, 0, 3] = 0
+    c = fim._clean_rgba(img)
+    assert (c[0, 0] == 0).all() and (c[1, 1] == 120).all()
