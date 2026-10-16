@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -42,7 +43,11 @@ class FinalImageView(context: Context) : View(context) {
     )
 
     var onViewChanged: (() -> Unit)? = null
-    var onMarkerTapped: ((Marker) -> Unit)? = null
+    /** All markers under the finger, nearest first (a cluster can hold several). */
+    var onMarkersTapped: ((List<Marker>) -> Unit)? = null
+    /** Labels skipped on the last frame because they would have overlapped. */
+    var hiddenLabelCount = 0
+        private set
 
     private var bitmap: Bitmap? = null
     private var cellDxM = 30.0
@@ -172,8 +177,8 @@ class FinalImageView(context: Context) : View(context) {
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
             if (!showCandidates) return false
             val hitR = 22f * d
-            val hit = markers.minByOrNull { dist2(e.x, e.y, it) }
-            if (hit != null && dist2(e.x, e.y, hit) <= hitR * hitR) { onMarkerTapped?.invoke(hit); return true }
+            val hits = markers.filter { dist2(e.x, e.y, it) <= hitR * hitR }.sortedBy { dist2(e.x, e.y, it) }
+            if (hits.isNotEmpty()) { onMarkersTapped?.invoke(hits); return true }
             return false
         }
     })
@@ -205,14 +210,92 @@ class FinalImageView(context: Context) : View(context) {
             matrix.mapPoints(scratch, 0, lv.pts, 0, lv.pts.size / 2)
             canvas.drawLines(scratch, 0, lv.pts.size, if (lv.index) contourIndexPaint else contourPaint)
         }
+        // Shapes first, then every text label in priority order. A label that
+        // would overlap one already drawn, a marker, the north arrow or the
+        // scale bar is skipped rather than piled on top.
+        placed.clear(); hiddenLabelCount = 0
         if (showUtm) drawUtm(canvas)
         if (showCandidates) drawMarkers(canvas)
         drawScaleBar(canvas)
         drawNorth(canvas)
+        if (showLabels) drawLabels(canvas)
+    }
+
+    private val placed = ArrayList<RectF>()
+    private val utmLabels = ArrayList<Pair<String, FloatArray>>()   // text, (x, baseline, axis 0=E 1=N)
+    private val tmp = RectF()
+
+    private fun textRect(t: String, x: Float, baseline: Float, p: Paint, out: RectF): RectF {
+        val fm = p.fontMetrics
+        val pad = 2f * d
+        out.set(x - pad, baseline + fm.ascent - pad, x + p.measureText(t) + pad, baseline + fm.descent + pad)
+        return out
+    }
+
+    private fun free(r: RectF): Boolean {
+        if (r.right < 0 || r.bottom < 0 || r.left > width || r.top > height) return false
+        for (q in placed) if (RectF.intersects(q, r)) return false
+        return true
+    }
+
+    /** Try each spot in turn; draw at the first free one, else count it hidden. */
+    private fun place(canvas: Canvas, t: String, p: Paint, spots: List<Pair<Float, Float>>, force: Boolean = false): Boolean {
+        for ((x, y) in spots) {
+            textRect(t, x, y, p, tmp)
+            if (free(tmp)) { placed.add(RectF(tmp)); canvas.drawText(t, x, y, p); return true }
+        }
+        if (force && spots.isNotEmpty()) {
+            val (x, y) = spots[0]
+            placed.add(RectF(textRect(t, x, y, p, tmp))); canvas.drawText(t, x, y, p); return true
+        }
+        hiddenLabelCount++
+        return false
+    }
+
+    private fun markerLabel(m: Marker) = m.id.take(6) + (m.confidenceLabel?.let { " $it" } ?: "")
+
+    private fun markerSpots(m: Marker, t: String): List<Pair<Float, Float>> {
+        val sx = tx + m.x * scale; val sy = ty + m.y * scale
+        val r = (if (m.focus) 12f else 7f) * d
+        val w = labelText.measureText(t)
+        return listOf(
+            (sx + r + 4 * d) to (sy + 4 * d),          // right
+            (sx - r - 4 * d - w) to (sy + 4 * d),      // left
+            (sx - w / 2) to (sy - r - 4 * d),          // above
+            (sx - w / 2) to (sy + r + 14 * d),         // below
+        )
+    }
+
+    private fun rank(m: Marker) = when (m.style) {
+        "high" -> 0; "moderate" -> 1; "low" -> 2; "rejected" -> 4; else -> 3
+    }
+
+    private fun drawLabels(canvas: Canvas) {
+        val focus = if (showCandidates) markers.firstOrNull { it.focus } else null
+        // 1. the candidate this image is about always gets its label
+        if (focus != null) markerLabel(focus).let { place(canvas, it, labelText, markerSpots(focus, it), force = true) }
+        // 2. grid labels: eastings along the top first, then northings down the left
+        for ((t, a) in utmLabels.sortedBy { it.second[2] }) {
+            val spots = if (a[2] == 0f) listOf(a[0] to a[1])
+                else listOf(a[0] to a[1], a[0] to (a[1] + 16 * d), a[0] to (a[1] + 30 * d))
+            place(canvas, t, utmText, spots)
+        }
+        // 3. other candidates: higher confidence first, then nearest to the focus
+        if (!showCandidates) return
+        val fx = focus?.x ?: 0f; val fy = focus?.y ?: 0f
+        val rest = markers.filter { !it.focus && onScreen(it) }
+            .sortedWith(compareBy<Marker>({ rank(it) }, { (it.x - fx) * (it.x - fx) + (it.y - fy) * (it.y - fy) }))
+        for (m in rest) markerLabel(m).let { place(canvas, it, labelText, markerSpots(m, it)) }
+    }
+
+    private fun onScreen(m: Marker): Boolean {
+        val sx = tx + m.x * scale; val sy = ty + m.y * scale
+        return sx >= 0 && sy >= 0 && sx <= width && sy <= height
     }
 
     private fun drawUtm(canvas: Canvas) {
         val margin = 14f * d
+        utmLabels.clear()
         for (ln in utmLines) {
             if (ln.pts.size < 4) continue
             path.reset()
@@ -230,8 +313,9 @@ class FinalImageView(context: Context) : View(context) {
             if (best >= 0 && showLabels) {
                 val sx = tx + ln.pts[best] * scale; val sy = ty + ln.pts[best + 1] * scale
                 val t = if (ln.axis == "easting") "E ${ln.value}" else "N ${ln.value}"
-                if (ln.axis == "easting") canvas.drawText(t, sx + 3 * d, max(sy, margin), utmText)
-                else canvas.drawText(t, max(sx, 2 * d) + 3 * d, sy - 3 * d, utmText)
+                // collected here, placed later by drawLabels so they cannot collide
+                if (ln.axis == "easting") utmLabels.add(t to floatArrayOf(sx + 3 * d, max(sy, margin), 0f))
+                else utmLabels.add(t to floatArrayOf(max(sx, 2 * d) + 3 * d, sy - 3 * d, 1f))
             }
         }
     }
@@ -256,10 +340,9 @@ class FinalImageView(context: Context) : View(context) {
                 markerStroke.color = Color.WHITE
                 canvas.drawCircle(sx, sy, r + 5 * d, markerStroke)
             }
-            if (showLabels) {
-                val t = m.id.take(6) + (m.confidenceLabel?.let { " $it" } ?: "")
-                canvas.drawText(t, sx + r + 4 * d, sy + 4 * d, labelText)
-            }
+            // the disc itself is an obstacle: no label may be written over a marker
+            val rr = if (m.focus) r + 6 * d else r
+            placed.add(RectF(sx - rr, sy - rr, sx + rr, sy + rr))
         }
     }
 
@@ -276,6 +359,7 @@ class FinalImageView(context: Context) : View(context) {
         canvas.drawLine(x0 + len, y0 - 5 * d, x0 + len, y0 + 5 * d, barPaint)
         val t = if (nice >= 1000) "${trim(nice / 1000)} km" else "${trim(nice)} m"
         canvas.drawText(t, x0, y0 - 8 * d, labelText)
+        placed.add(RectF(x0 - 4 * d, y0 - 24 * d, x0 + max(len, labelText.measureText(t)) + 4 * d, y0 + 8 * d))
     }
 
     private fun drawNorth(canvas: Canvas) {
@@ -287,6 +371,7 @@ class FinalImageView(context: Context) : View(context) {
         markerStroke.color = Color.BLACK
         canvas.drawPath(path, markerStroke)
         canvas.drawText("N", cx - 4 * d, cy + 22 * d, labelText)
+        placed.add(RectF(cx - 12 * d, cy - 16 * d, cx + 12 * d, cy + 26 * d))
     }
 
     private fun trim(v: Double) = if (v == floor(v)) v.toLong().toString() else v.toString()
