@@ -1014,6 +1014,18 @@ appendReviewSection(sb, detail)
             setTextColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_text_secondary))
             setPadding(pad, pad, pad, pad / 2)
         }
+        // fi-v1 (2026-10-16): Final Image of the real DEM around this
+        // candidate (FinalImageActivity). Read-only, opens its own screen.
+        if (lat != null && lon != null) {
+            column.addView(MaterialButton(this).apply {
+                this.text = "Final Image (terrain)"
+                isAllCaps = false
+                setOnClickListener { startActivity(FinalImageActivity.newIntent(this@GrandProjectActivity, candidateId)) }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { marginStart = pad; topMargin = pad / 2 }
+            })
+        }
         column.addView(textView)
         val scrollView = ScrollView(this).apply {
             addView(column)
