@@ -129,6 +129,15 @@
              separate section, same reasoning and same registration
              pattern as WideAreaSearchActivity above. See
              HistoricalResearchActivity.kt's own class doc. -->
+        <!-- fi-v1 (2026-10-16): Final Image screen, opened per candidate
+             from GrandProjectActivity's candidate detail dialog. See
+             FinalImageActivity.kt. configChanges keeps the loaded image and
+             zoom across rotation instead of rebuilding it. -->
+        <activity
+            android:name=".FinalImageActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
+
         <activity
             android:name=".HistoricalResearchActivity"
             android:exported="true"
