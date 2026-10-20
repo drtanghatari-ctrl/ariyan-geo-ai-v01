@@ -63,6 +63,17 @@ _grid = None        # {(ci, cj): [point index, ...]}
 _cache = {}         # (lat5, lon5, k) -> annotate() result
 
 
+def bracketed(name) -> str:
+    """kb-v1 (2026-10-20): wrap a site name in brackets for display, unless
+    it is already bracketed. In the ANE gazetteer a bracketed name such as
+    "(Teppe Farukhabad)" marks a modern site name; that meaning is kept, it
+    is just not wrapped a second time ("((Teppe Farukhabad))")."""
+    s = str(name or "").strip()
+    if len(s) >= 2 and s[0] == "(" and s[-1] == ")":
+        return s
+    return "(%s)" % s
+
+
 def _cell(lat: float, lon: float):
     return (int(math.floor(lat / CELL_DEG)), int(math.floor(lon / CELL_DEG)))
 
@@ -228,8 +239,8 @@ def annotate(lat: float, lon: float, k: int = 3) -> dict:
     else:
         label = LABEL_NOT_IN
         if best_d is not None:
-            text = ("not in gazetteer: nearest recorded site %.1f km (%s)"
-                    % (best_d / 1000.0, best_name))
+            text = ("not in gazetteer: nearest recorded site %.1f km %s"
+                    % (best_d / 1000.0, bracketed(best_name)))
         else:
             text = "not in gazetteer: no recorded site within 50 km"
 
