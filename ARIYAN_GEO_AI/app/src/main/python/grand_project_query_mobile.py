@@ -293,6 +293,11 @@ def get_candidate_detail_json(db_root: str, candidate_id: str) -> str:
         industry = industrial_label.detail(candidate.get("lat"), candidate.get("lon"))
     except Exception as exc:
         industry = {"text": "industrial lookup failed: %s" % type(exc).__name__}
+    # ind-label-v1.1 (2026-10-20, user-approved): a Rejected candidate is
+    # not waiting in the Pass 2 queue, so its detail shows only the
+    # industry context line, never the "Pass 2: queued" note.
+    if str(candidate.get("status") or "").upper() == "REJECTED" and isinstance(industry, dict):
+        industry["deferred_in_pass2"] = False
 
     return json.dumps({
         "candidate": candidate,
