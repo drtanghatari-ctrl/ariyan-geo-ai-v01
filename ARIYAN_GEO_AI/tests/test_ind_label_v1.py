@@ -142,3 +142,21 @@ def test_report_industry_text_exact_and_rounded():
     assert rpt._industry(None, None, False) == {"text_en": "", "text_fa": ""}
     assert "industry_context" in rpt._CSV_COLUMNS
     assert rpt.REPORT_VERSION == "rp-v1.2"
+
+
+def test_rejected_detail_has_no_pass2_note(tmp_path, monkeypatch):
+    """ind-label-v1.1: Rejected candidates keep the industry context line
+    but never show the 'Pass 2: queued' note; open ones still do."""
+    root, gp, jid, hi_ind, mid, low, lo_ind = _setup(tmp_path)
+    monkeypatch.setattr(il, "detail", lambda lat, lon: {
+        "method": "ind-label-v1", "text": "mapped industry 42 m (man_made=silo, OpenStreetMap)",
+        "features": [{"kind": "man_made=silo", "distance_m": 42.0}], "deferred_in_pass2": True})
+    d_open = json.loads(q.get_candidate_detail_json(root, hi_ind))
+    assert d_open["industry"]["deferred_in_pass2"] is True
+    conn = db.get_connection(root)
+    conn.execute("UPDATE candidate SET status='REJECTED' WHERE id=?", (hi_ind,))
+    conn.commit(); conn.close()
+    d_rej = json.loads(q.get_candidate_detail_json(root, hi_ind))
+    assert d_rej["industry"]["deferred_in_pass2"] is False
+    assert d_rej["industry"]["text"] == d_open["industry"]["text"]
+    assert d_rej["candidate"]["status"] == "REJECTED"
