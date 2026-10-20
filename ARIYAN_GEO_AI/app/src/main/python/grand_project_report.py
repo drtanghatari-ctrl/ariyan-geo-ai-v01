@@ -347,7 +347,7 @@ def _known_site(lat, lon, exact: bool) -> Dict[str, str]:
     elif label == "GAZETTEER_SPARSE":
         en = a.get("text") or "gazetteer too sparse here to judge"
     elif name is not None and d is not None:
-        en = "not in gazetteer: nearest recorded site about %d km (%s)" % (int(round(d / 1000.0)), name)
+        en = "not in gazetteer: nearest recorded site about %d km %s" % (int(round(d / 1000.0)), _bracketed(name))
     else:
         en = "not in gazetteer: no recorded site within 50 km"
     return {"label": label, "text_en": en, "text_fa": _known_site_fa(a, exact)}
@@ -377,6 +377,15 @@ def _industry(lat, lon, exact: bool) -> Dict[str, str]:
     return {"text_en": en, "text_fa": fa}
 
 
+def _bracketed(name) -> str:
+    # kb-v1 (2026-10-20): same rule as known_sites.bracketed -- no second
+    # pair of brackets around an ANE name that is already bracketed.
+    t = str(name or "").strip()
+    if len(t) >= 2 and t[0] == "(" and t[-1] == ")":
+        return t
+    return "(%s)" % t
+
+
 def _known_site_fa(a: Dict[str, Any], exact: bool) -> str:
     label = a.get("label")
     name = a.get("nearest_name") or ""
@@ -389,7 +398,7 @@ def _known_site_fa(a: Dict[str, Any], exact: bool) -> str:
         return "فهرست محوطه‌ها در این منطقه برای داوری بسیار کم‌تراکم است"
     if d is not None:
         km = ("%.1f" % (d / 1000.0)) if exact else ("%d" % int(round(d / 1000.0)))
-        return "در فهرست نیست؛ نزدیک‌ترین محوطهٔ ثبت‌شده حدود %s کیلومتر (%s)" % (km, name)
+        return "در فهرست نیست؛ نزدیک‌ترین محوطهٔ ثبت‌شده حدود %s کیلومتر %s" % (km, _bracketed(name))
     return "در فهرست نیست؛ هیچ محوطهٔ ثبت‌شده‌ای تا ۵۰ کیلومتر نیست"
 
 
