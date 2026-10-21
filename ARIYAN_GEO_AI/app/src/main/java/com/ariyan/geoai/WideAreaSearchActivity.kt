@@ -1114,6 +1114,38 @@ class WideAreaSearchActivity : AppCompatActivity() {
                     line("✗ ${e.optString("candidate")}: ${e.optString("error").take(120)}")
                 }
             }
+            // fi-v2 2026-10-21: satellite image layers, strongest candidate first
+            step == "images" && (d.has("fetched") || d.has("queued")) -> {
+                if (d.has("queued") && !d.has("fetched")) {
+                    line(d.optString("note", "nothing queued"))
+                } else {
+                    val tiers = d.optJSONObject("tiers")
+                    val total = d.optInt("fetched_total", d.optInt("fetched"))
+                    line("fetched $total candidate(s), ${d.optInt("already")} already saved")
+                    if (tiers != null) {
+                        line("queue: ${tiers.optInt("0")} high/substantial, " +
+                             "${tiers.optInt("1")} supported, ${tiers.optInt("2")} moderate")
+                    }
+                    val od = d.optJSONArray("order_detail")
+                    if (od != null && od.length() > 0) {
+                        val tierName = mapOf(0 to "top", 1 to "supported", 2 to "moderate")
+                        val parts = (0 until od.length()).mapNotNull { i ->
+                            val o = od.optJSONObject(i) ?: return@mapNotNull null
+                            "${o.optInt("rank")}. ${o.optString("candidate")}" +
+                                " (${o.optString("band").ifEmpty { tierName[o.optInt("tier")] ?: "" }.lowercase()})"
+                        }
+                        line("order, strongest first:")
+                        parts.chunked(3).forEach { line("  " + it.joinToString(", ")) }
+                    }
+                    if (d.optInt("remaining") > 0) line("${d.optInt("remaining")} still queued")
+                    if (d.has("note")) line(d.optString("note"))
+                    val errs = d.optJSONArray("failed")
+                    if (errs != null) for (i in 0 until errs.length()) {
+                        val e = errs.optJSONObject(i) ?: continue
+                        line("✗ ${e.optString("candidate")}: ${e.optString("error").take(120)}")
+                    }
+                }
+            }
             step == "provenance" -> line("${d.optString("verdict")} (${d.optInt("candidates_verified")}/${d.optInt("candidates")})")
             step == "trust" -> {
                 line(d.optString("decision") + (if (d.has("note")) " -- " + d.optString("note") else ""))
@@ -1132,11 +1164,16 @@ class WideAreaSearchActivity : AppCompatActivity() {
             "3. Land-cover flags\n4. Terrain labels\n5. Auto-review\n" +
             "6. Pass 2 on every calib-v1 strong, non-rejected candidate, strongest first " +
             "(library-first; max 40 live DEM calls per rolling 24 h; up to 50 candidates)\n" +
-            "7. Auto-review again\n8. Provenance check\n" +
-            "9. Automatic trust: TRUSTED only if provenance VERIFIED, 0 failed tiles, no offline-guard " +
+            "7. Auto-review again\n" +
+            "8. Satellite image layers (NDVI, thermal, radar VV/VH), strongest candidate first: " +
+            "high/substantial confidence, then Supported, then moderate; inside each group the " +
+            "highest confidence first. Up to 10 per run (high/substantial not counted); saved once, " +
+            "never fetched twice. Skipped without Copernicus login and never blocks trust.\n" +
+            "9. Provenance check\n" +
+            "10. Automatic trust: TRUSTED only if provenance VERIFIED, 0 failed tiles, no offline-guard " +
             "pause, no Pass 2 failures and identical spot-checks. A trust mark you set is never changed; " +
             "nothing is ever marked Corrupted.\n" +
-            "10. Report (top 50, rounded coordinates)\n\n" +
+            "11. Report (top 50, rounded coordinates)\n\n" +
             "Quota, throttling and no-internet pause the run and it resumes by itself. It survives " +
             "the app being closed and the phone restarting. Every step is logged."
         AlertDialog.Builder(this)

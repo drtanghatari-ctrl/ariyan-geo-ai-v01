@@ -74,6 +74,11 @@ class FinalImageActivity : AppCompatActivity() {
     private var colourBy = "relief"
     private var nativeRes = 30.0
 
+    // fi-v2 (2026-10-21): satellite layer over the terrain
+    private lateinit var satBtn: MaterialButton
+    private var satProduct: String? = null
+    private var satMeta: JSONObject? = null
+
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -85,7 +90,10 @@ class FinalImageActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        sessionId?.let { sid -> runCatching { python.getModule("final_image_mobile").callAttr("close_session", sid) } }
+        sessionId?.let { sid ->
+            runCatching { python.getModule("sat_image_mobile").callAttr("close_layers", sid) }
+            runCatching { python.getModule("final_image_mobile").callAttr("close_session", sid) }
+        }
         if (::view.isInitialized) view.clearImage()
         super.onDestroy()
     }
@@ -121,6 +129,8 @@ class FinalImageActivity : AppCompatActivity() {
         buttons.addView(modeBtn)
         buttons.addView(colourBtn)
         buttons.addView(windowBtn)
+        satBtn = button("Satellite: off") { chooseSatellite() }
+        buttons.addView(satBtn)
         buttons.addView(button("Layers") { chooseLayers() })
         buttons.addView(button("Fit") { view.fitToScreen() })
         buttons.addView(button("Centre") { centreOnCandidate() })
@@ -210,6 +220,9 @@ class FinalImageActivity : AppCompatActivity() {
         updateLegend(m)
         updateNotes(m)
         updateInfo()
+        // a new window / colour is a new session: re-open the chosen layer on it
+        // (saved images only; never fetches without asking)
+        satProduct?.let { openSatellite(it, fetch = false, quiet = true) }
     }
 
     private fun parseLevels(c: JSONObject): List<FinalImageView.Level> {
@@ -244,6 +257,8 @@ class FinalImageActivity : AppCompatActivity() {
     }
 
     private fun updateLegend(m: JSONObject) {
+        colourBtn.text = "Colour: " + if (colourBy == "relief") "relief" else "elevation"
+        satMeta?.let { updateSatLegend(it); return }
         val ramp = m.getJSONArray("ramp")
         val colours = IntArray(ramp.length()) { i ->
             val s = ramp.getJSONArray(i)
@@ -275,6 +290,7 @@ class FinalImageActivity : AppCompatActivity() {
             for (i in 0 until a.length()) sb.append(if (key == "problems") "! " else "\u2022 ").append(a.optString(i)).append('\n')
         }
         sb.append(m.optString("statement"))
+        satMeta?.let { sb.insert(0, satNotes(it) + "\n\n") }
         notes.text = sb.toString()
     }
 
@@ -387,6 +403,150 @@ class FinalImageActivity : AppCompatActivity() {
         }
     }
 
+    // ---------------------------------------------------------------- satellite layers (fi-v2)
+
+    private val satLabels = linkedMapOf(
+        "NDVI" to "NDVI (Sentinel-2, 10 m)",
+        "THERMAL" to "Thermal brightness temp. (Landsat, 30 m)",
+        "SAR_VV" to "Radar VV (Sentinel-1, 10 m)",
+        "SAR_VH" to "Radar VH (Sentinel-1, 10 m)")
+
+    private fun chooseSatellite() {
+        val sid = sessionId ?: return
+        setLoading(true)
+        lifecycleScope.launch {
+            val st = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("sat_image_mobile").callAttr("layers_status_json", offlineDataRoot, sid).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) } finally { setLoading(false) }
+            if (st.has("error")) { showError(st.optString("error")); return@launch }
+            val arr = st.getJSONArray("products")
+            val keys = mutableListOf<String?>(null)
+            val items = mutableListOf("Off (terrain only)")
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val p = o.getString("product")
+                keys.add(p)
+                val state = when {
+                    !o.optBoolean("saved") -> "not saved -- fetch"
+                    o.optBoolean("allowed") -> "saved, checked"
+                    else -> "saved, not shown yet: " + o.optString("check")
+                }
+                items.add((satLabels[p] ?: p) + "\n   " + state)
+            }
+            val b = AlertDialog.Builder(this@FinalImageActivity)
+                .setTitle("Satellite layer")
+                .setSingleChoiceItems(items.toTypedArray(), keys.indexOf(satProduct).coerceAtLeast(0)) { d, i ->
+                    d.dismiss()
+                    val p = keys[i]
+                    if (p == null) clearSatellite() else openSatellite(p, fetch = false, quiet = false)
+                }
+            if (view.hasOverlay) b.setNeutralButton("Opacity") { _, _ -> chooseOpacity() }
+            b.setNegativeButton("Close", null).show()
+        }
+    }
+
+    private fun chooseOpacity() {
+        val steps = listOf(1f, 0.75f, 0.5f, 0.25f)
+        AlertDialog.Builder(this).setTitle("Layer opacity")
+            .setItems(steps.map { "${(it * 100).toInt()} %" }.toTypedArray()) { _, i -> view.overlayOpacity = steps[i] }
+            .show()
+    }
+
+    private fun clearSatellite() {
+        satProduct = null; satMeta = null
+        view.setOverlay(null, 0f, 0f, 1f, 1f)
+        satBtn.text = "Satellite: off"
+        meta?.let { updateLegend(it); updateNotes(it) }
+    }
+
+    private fun openSatellite(product: String, fetch: Boolean, quiet: Boolean) {
+        val sid = sessionId ?: return
+        val creds = SecureCredentialStore(this)
+        val cid = creds.activeCopernicusClientId()
+        val sec = creds.activeCopernicusClientSecret()
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val (r, bmp) = withContext(Dispatchers.Default) {
+                    val mod = python.getModule("sat_image_mobile")
+                    val j = JSONObject(mod.callAttr("open_layer_json", offlineDataRoot, sid, product, cid, sec, fetch).toString())
+                    if (j.has("error") || j.optBoolean("needs_fetch") || !j.optBoolean("allowed")) Pair(j, null) else {
+                        val g = j.getJSONObject("grid")
+                        val bytes = mod.callAttr("layer_rgba", sid, product).toJava(ByteArray::class.java)
+                        val bm = Bitmap.createBitmap(g.getInt("width"), g.getInt("height"), Bitmap.Config.ARGB_8888)
+                        bm.copyPixelsFromBuffer(ByteBuffer.wrap(bytes))
+                        Pair(j, bm)
+                    }
+                }
+                when {
+                    r.has("error") -> { if (quiet) clearSatellite(); showError(r.optString("error")) }
+                    r.optBoolean("needs_fetch") -> {
+                        if (quiet) { clearSatellite(); return@launch }
+                        AlertDialog.Builder(this@FinalImageActivity)
+                            .setTitle(satLabels[product] ?: product)
+                            .setMessage("No saved image covers this window yet.\n\nFetch it from Copernicus now? " +
+                                "It is saved once and never fetched again for this area. The first image of each " +
+                                "layer is checked against the Statistical API before it is shown.")
+                            .setPositiveButton("Fetch") { _, _ -> openSatellite(product, fetch = true, quiet = false) }
+                            .setNegativeButton("Cancel", null).show()
+                    }
+                    bmp == null -> {           // saved but not checked / check failed: hidden, say why
+                        clearSatellite()
+                        AlertDialog.Builder(this@FinalImageActivity)
+                            .setTitle(satLabels[product] ?: product)
+                            .setMessage("Layer hidden: " + r.optString("hidden_reason", r.optString("check")) +
+                                if (cid.isEmpty()) "\n\nSave a Copernicus login in Settings so the one-time check can run." else "")
+                            .setPositiveButton("OK", null).show()
+                    }
+                    else -> {
+                        val pl = r.getJSONObject("placement")
+                        satProduct = product; satMeta = r
+                        view.setOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
+                            pl.getDouble("sx").toFloat(), pl.getDouble("sy").toFloat())
+                        satBtn.text = "Satellite: " + (satLabels[product]?.substringBefore(" (") ?: product)
+                        updateSatLegend(r)
+                        meta?.let { updateNotes(it) }
+                    }
+                }
+            } catch (e: PyException) {
+                showError(e.message ?: "satellite layer failed")
+            } catch (e: OutOfMemoryError) {
+                showError("Not enough memory for this layer; choose a smaller window.")
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    private fun updateSatLegend(r: JSONObject) {
+        val lg = r.getJSONObject("legend")
+        val ramp = lg.getJSONArray("ramp")
+        val colours = IntArray(ramp.length()) { i ->
+            val s = ramp.getJSONArray(i)
+            android.graphics.Color.rgb(s.getInt(1), s.getInt(2), s.getInt(3))
+        }
+        legendBar.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, colours)
+        val unit = r.optString("unit")
+        legendText.text = String.format(Locale.US, "%s  %.2f \u2026 %.2f %s  (empty cells transparent)",
+            r.optString("label"), lg.getDouble("vmin"), lg.getDouble("vmax"), unit)
+    }
+
+    private fun satNotes(r: JSONObject): String = buildString {
+        append("LAYER ").append(r.optString("label")).append(": ").append(r.optString("caption")).append('\n')
+        append("Scene ").append(r.optString("scene_date"))
+        if (!r.isNull("scene_cloud_cover")) append(String.format(Locale.US, ", scene cloud %.0f %%", r.optDouble("scene_cloud_cover")))
+        append(String.format(Locale.US, ", %.0f %% of this window has data.\n", 100 * r.optDouble("clear_fraction_window")))
+        append(String.format(Locale.US, "Pixel %.0f m (sensor detail ~%.0f m), each square is one image cell, not resampled.\n",
+            r.optDouble("pixel_m"), r.optDouble("sensor_detail_m")))
+        append(if (r.optBoolean("reused")) "From the saved library" else "Fetched now and saved")
+        append(" \u00B7 ").append(r.optString("check")).append('\n')
+        val pv = r.optJSONObject("provenance")
+        if (pv != null) append("File ").append(pv.optString("file")).append(" sha256 ")
+            .append(pv.optString("sha256").take(12)).append("\u2026 \u00B7 ").append(pv.optString("version"))
+    }
+
     private fun showError(msg: String) {
         AlertDialog.Builder(this).setTitle("Final Image")
             .setMessage(msg.removePrefix("Exception: ") +
@@ -396,7 +556,7 @@ class FinalImageActivity : AppCompatActivity() {
 
     private fun setLoading(on: Boolean) {
         progress.visibility = if (on) View.VISIBLE else View.GONE
-        listOf(modeBtn, colourBtn, windowBtn).forEach { it.isEnabled = !on }
+        listOf(modeBtn, colourBtn, windowBtn, satBtn).forEach { it.isEnabled = !on }
     }
 
     private fun trimNum(v: Double) = if (v == Math.floor(v)) v.toLong().toString() else String.format(Locale.US, "%.1f", v)

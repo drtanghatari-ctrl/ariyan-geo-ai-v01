@@ -179,3 +179,88 @@ def test_library_budget_used_up_continues_instead_of_pausing(env, monkeypatch):
     assert lib["status"] == "DONE" and lib["detail"]["partial"] is True
     assert "0 of 2" in lib["detail"]["note"]
     assert _trust(root, rid)["decision"] == "TRUSTED"
+
+
+# ---------------------------------------------------------------- fi-v2 images step
+
+import ndvi_source_mobile as ndvi
+import sat_image
+
+
+def _drive_creds(root, rid):
+    for _ in range(40):
+        r = json.loads(ap.run_slice_json(root, rid, "K", "id", "secret", 540))
+        if r["state"] in ("DONE", "FAILED", "CANCELLED"):
+            return r["state"]
+        if r["state"] == "PAUSED":
+            c = ap._conn(root)
+            with c:
+                c.execute("UPDATE auto_run_event SET detail_json=json_set(detail_json,'$.retry_at',0) WHERE run_id=?", (rid,))
+            c.close()
+    return "STUCK"
+
+
+def _step_detail(root, rid, step):
+    return json.loads(ap.auto_run_status_json(root, rid))["steps"][ap.STEPS.index(step)]
+
+
+def test_images_step_strongest_first_and_capped(env, monkeypatch):
+    root, jid, mode = env
+    c = db.get_connection(root)
+    with c:
+        ids = [r[0] for r in c.execute("select id from candidate order by id")]
+        c.execute("update candidate set confidence_band='MODERATE', confidence_numeric=0.55")
+        c.execute("update candidate set confidence_band='HIGH', confidence_numeric=0.8 where id=?", (ids[0],))
+    monkeypatch.setattr(ndvi, "get_access_token", lambda a, b, *k: "tok")
+    seen = {}
+
+    def fq(root_, queue, token, **k):
+        seen["queue"], seen["cap"] = queue, k["cap"]
+        return {"fetched": [q["id"] for q in queue[:3]], "already": 0, "counted": 2,
+                "failed": [], "stopped": "cap", "remaining": len(queue) - 3,
+                "order": [q["id"] for q in queue[:3]]}
+    monkeypatch.setattr(sat_image, "fetch_queue", fq)
+    rid = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
+    assert _drive_creds(root, rid) == "DONE"
+    q = seen["queue"]
+    assert q[0]["id"] == ids[0] and q[0]["tier"] == 0
+    key = [(x["tier"], -x["confidence_numeric"], 0 if x["calib_strong"] else 1, -x["abs_z"]) for x in q]
+    assert key == sorted(key)                                  # strongest to weakest
+    assert seen["cap"] == 10
+    d = _step_detail(root, rid, "images")
+    assert d["status"] == "DONE" and "left queued" in d["detail"]["note"]
+    assert [x["rank"] for x in q] == list(range(1, len(q) + 1))
+    od = d["detail"]["order_detail"]
+    assert [o["rank"] for o in od] == [1, 2, 3] and od[0]["band"] == "HIGH"
+    assert len(set(x["id"] for x in q)) == len(q)              # no duplicates from the tile join
+    assert _trust(root, rid)["decision"] == "TRUSTED"
+
+
+def test_images_failure_never_blocks_trust_or_report(env, monkeypatch):
+    root, jid, mode = env
+    c = db.get_connection(root)
+    with c:
+        c.execute("update candidate set confidence_band='MODERATE', confidence_numeric=0.55")
+    monkeypatch.setattr(ndvi, "get_access_token", lambda *a, **k: 1 / 0)
+    rid = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
+    assert _drive_creds(root, rid) == "DONE"
+    assert _step_detail(root, rid, "images")["status"] == "SKIPPED"
+    assert _trust(root, rid)["decision"] == "TRUSTED"
+
+
+def test_images_skipped_without_copernicus_credentials(env):
+    root, jid, mode = env
+    rid = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
+    assert _drive(root, rid) == "DONE"
+    assert "no Copernicus credentials" in _step_detail(root, rid, "images")["detail"]["skipped"]
+
+
+def test_run_finished_before_images_step_stays_done(env):
+    root, jid, mode = env
+    rid = json.loads(ap.start_auto_run_json(root, jid))["run_id"]
+    assert _drive(root, rid) == "DONE"
+    c = db.get_connection(root)
+    with c:
+        c.execute("delete from auto_run_event where run_id=? and step='images'", (rid,))
+    c.close()
+    assert json.loads(ap.run_slice_json(root, rid, "K"))["state"] == "DONE"

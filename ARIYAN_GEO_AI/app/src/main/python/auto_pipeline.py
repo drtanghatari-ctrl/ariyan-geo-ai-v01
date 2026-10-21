@@ -15,6 +15,13 @@ or a pause continues where the real data says it stopped):
                 library-first, so 0 live DEM calls per candidate when the
                 tiles are present. Rolling 24 h cap: 40 live calls.
   7 review2     auto-review again (Pass 2 results feed Supported etc.)
+ 7b images     fi-v2 (2026-10-21): saves the Final Image satellite layers
+                (NDVI, brightness temperature, radar VV/VH) for this job's
+                candidates, STRONGEST FIRST: HIGH/SUBSTANTIAL (not counted
+                in the cap), then Supported by calib-v1 strength, then
+                MODERATE; at most images_max per run, the rest stays queued.
+                Context only: never touches trust, review or confidence;
+                any failure or quota stop is recorded and the run goes on.
   8 provenance  provenance check of the whole job (read-only)
   9 trust       AUTOMATIC trust decision (rules below)
  10 report      HTML + CSV report, top 50, rounded coordinates
@@ -54,7 +61,7 @@ import grand_project_review as review
 VERSION = "ap-v1"
 AUTO_PREFIX = "[auto ap-v1]"
 STEPS = ["library", "sweep", "land_cover", "terrain", "review1",
-         "pass2", "review2", "provenance", "trust", "report"]
+         "pass2", "review2", "images", "provenance", "trust", "report"]
 DEFAULT_OPTIONS = {
     "sweep_demtype": "COP30",
     "pass2_demtype": "SRTMGL1",
@@ -63,6 +70,8 @@ DEFAULT_OPTIONS = {
     "pass2_min_budget": 10,    # live calls that must be left to start a batch
     "library_max_calls": 10,
     "report_top_n": 50,
+    "images": True,            # fi-v2 satellite layers step
+    "images_max": 10,          # candidates per run (HIGH/SUBSTANTIAL not counted)
 }
 MAX_STEP_FAILURES = 3          # consecutive FAILED on one step -> run FAILED
 FAIL_RETRY_S = 15 * 60
@@ -142,6 +151,9 @@ def _state(events):
         return "CANCELLED", None, 0, 0
     if any(e["step"] == "run" and e["status"] == "FAILED" for e in events):
         return "FAILED", None, 0, 0
+    if any(e["step"] == "run" and e["status"] == "FINISHED" for e in events):
+        # fi-v2: a run finished before a step was added stays finished.
+        return "DONE", None, 0, 0
     nxt = next((s for s in STEPS if s not in done), None)
     if nxt is None:
         return "DONE", None, 0, 0
@@ -331,6 +343,67 @@ def _step_pass2(root, run, creds, deadline):
                     "note": "batch attempted nothing; stopping Pass 2", **_p2_totals(prior)}
 
 
+def _images_queue(root, run):
+    """This job's candidates, strongest first (sat_image.queue_order)."""
+    import calib_profile
+    import sat_image
+    profile = calib_profile.active_profile(root)
+    thr = float(profile["threshold_abs_z"]) if profile else None
+    conn = _conn(root)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT c.id, c.status, c.score, c.confidence_band, c.confidence_numeric, c.lat, c.lon "
+            "FROM candidate c JOIN wide_area_search_tile t ON t.investigation_id = c.investigation_id "
+            "WHERE t.job_id = ?", (run["job_id"],)).fetchall()
+    finally:
+        conn.close()
+    return sat_image.queue_order([dict(r) for r in rows], thr)
+
+
+def _step_images(root, run, creds, deadline):
+    import sat_image
+    opts = run["options"]
+    if not opts.get("images", True):
+        return {"skipped": "satellite image layers turned off for this run"}
+    if not (creds["ndvi_id"] and creds["ndvi_secret"]):
+        return {"skipped": "no Copernicus credentials; images can be fetched later from the Final Image screen"}
+    prior = [e for e in run["_events"] if e["step"] == "images" and e["status"] == "PROGRESS"]
+    counted = sum(e["detail"].get("counted", 0) for e in prior)
+    fetched_before = sum(e["detail"].get("fetched", 0) for e in prior)
+    try:
+        queue = _images_queue(root, run)
+        if not queue:
+            return {"note": "no candidate qualifies for satellite images", "queued": 0}
+        import ndvi_source_mobile as ndvi
+        token = ndvi.get_access_token(creds["ndvi_id"], creds["ndvi_secret"])
+        cap = max(0, int(opts.get("images_max", sat_image.AUTO_CAP)) - counted)
+        r = sat_image.fetch_queue(root, queue, token, deadline=deadline, cap=cap)
+    except Exception as ex:      # never blocks trust or the report
+        return {"skipped": f"satellite images not fetched: {type(ex).__name__}: {ex}"[:400]}
+    rank_of = {str(c["id"]): c.get("rank") for c in queue}
+    tier_of = {str(c["id"]): c["tier"] for c in queue}
+    band_of = {str(c["id"]): (c.get("confidence_band") or "") for c in queue}
+    detail = {"order": [i[:8] for i in r["order"]],
+              "order_detail": [{"rank": rank_of.get(str(i), n), "candidate": str(i)[:8], "tier": tier_of.get(str(i)),
+                                "band": band_of.get(str(i), "")}
+                               for n, i in enumerate(r["order"], 1)][:20],
+              "fetched": len(r["fetched"]),
+              "already": r["already"], "counted": r["counted"], "remaining": r["remaining"],
+              "stopped": r["stopped"],
+              "failed": [{"candidate": f["id"][:8], "error": f["error"][:200]} for f in r["failed"]][:5],
+              "tiers": {str(t): sum(1 for c in queue if c["tier"] == t) for t in (0, 1, 2)}}
+    if r["stopped"] == "time":
+        _event(root, run["id"], "images", "PROGRESS", detail)
+        raise StepContinue(detail)
+    detail["counted_total"] = counted + r["counted"]
+    detail["fetched_total"] = fetched_before + len(r["fetched"])
+    if r["stopped"] == "throttled":
+        detail["note"] = "Copernicus quota/rate limit reached; the rest stays queued for the next run"
+    elif r["stopped"] == "cap":
+        detail["note"] = f"{r['remaining']} candidate(s) left queued for the next run (cap per run)"
+    return detail
+
+
 def _step_provenance(root, run, creds, deadline):
     import provenance_check as pc
     r = pc.check_job(root, run["job_id"])
@@ -428,7 +501,7 @@ def _step_report(root, run, creds, deadline):
 
 _IMPL = {"library": _step_library, "sweep": _step_sweep, "land_cover": _step_land_cover,
          "terrain": _step_terrain, "review1": _step_review, "pass2": _step_pass2,
-         "review2": _step_review, "provenance": _step_provenance, "trust": _step_trust,
+         "review2": _step_review, "images": _step_images, "provenance": _step_provenance, "trust": _step_trust,
          "report": _step_report}
 
 

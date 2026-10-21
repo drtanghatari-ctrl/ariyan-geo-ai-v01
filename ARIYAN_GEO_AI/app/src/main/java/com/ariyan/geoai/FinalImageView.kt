@@ -56,7 +56,30 @@ class FinalImageView(context: Context) : View(context) {
     var markers: List<Marker> = emptyList()
 
     var smooth = false
-        set(v) { field = v; bmpPaint.isFilterBitmap = v; invalidate() }
+        set(v) { field = v; bmpPaint.isFilterBitmap = v; overlayPaint.isFilterBitmap = v; invalidate() }
+
+    // fi-v2 (2026-10-21): one satellite layer drawn over the DEM image with
+    // its OWN cells. Placement is in DEM-cell units: image pixel (0,0) sits
+    // at (overlayX0, overlayY0) and each image pixel spans (overlaySx, overlaySy)
+    // DEM cells. Empty image cells are transparent, so the terrain shows.
+    private var overlay: Bitmap? = null
+    private var overlayX0 = 0f
+    private var overlayY0 = 0f
+    private var overlaySx = 1f
+    private var overlaySy = 1f
+    private val overlayPaint = Paint().apply { isFilterBitmap = false; isAntiAlias = false; isDither = false }
+    var overlayOpacity = 1f
+        set(v) { field = v.coerceIn(0f, 1f); overlayPaint.alpha = (field * 255).toInt(); invalidate() }
+
+    fun setOverlay(bmp: Bitmap?, x0: Float, y0: Float, sx: Float, sy: Float) {
+        val old = overlay
+        overlay = bmp
+        overlayX0 = x0; overlayY0 = y0; overlaySx = sx; overlaySy = sy
+        if (old != null && old !== bmp) old.recycle()
+        invalidate()
+    }
+
+    val hasOverlay: Boolean get() = overlay != null
     var showContours = true
         set(v) { field = v; invalidate() }
     var showUtm = true
@@ -107,7 +130,11 @@ class FinalImageView(context: Context) : View(context) {
         requestLayout(); invalidate()
     }
 
-    fun clearImage() { bitmap?.recycle(); bitmap = null; invalidate() }
+    fun clearImage() {
+        bitmap?.recycle(); bitmap = null
+        overlay?.recycle(); overlay = null
+        invalidate()
+    }
 
     fun fitToScreen() {
         val b = bitmap ?: return
@@ -202,6 +229,13 @@ class FinalImageView(context: Context) : View(context) {
         canvas.translate(tx, ty)
         canvas.scale(scale, scale)
         canvas.drawBitmap(b, 0f, 0f, bmpPaint)
+        overlay?.let { ov ->
+            canvas.save()
+            canvas.translate(overlayX0, overlayY0)
+            canvas.scale(overlaySx, overlaySy)
+            canvas.drawBitmap(ov, 0f, 0f, overlayPaint)
+            canvas.restore()
+        }
         canvas.restore()
         matrix.reset(); matrix.postScale(scale, scale); matrix.postTranslate(tx, ty)
 
