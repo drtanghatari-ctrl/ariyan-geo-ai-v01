@@ -529,7 +529,7 @@ class FinalImageActivity : AppCompatActivity() {
         }
         legendBar.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, colours)
         val unit = r.optString("unit")
-        legendText.text = String.format(Locale.US, "%s  %.2f \u2026 %.2f %s  (empty cells transparent)",
+        legendText.text = String.format(Locale.US, "%s  %.2f \u2026 %.2f %s  (hatched = no data)",
             r.optString("label"), lg.getDouble("vmin"), lg.getDouble("vmax"), unit)
     }
 
@@ -537,7 +537,9 @@ class FinalImageActivity : AppCompatActivity() {
         append("LAYER ").append(r.optString("label")).append(": ").append(r.optString("caption")).append('\n')
         append("Scene ").append(r.optString("scene_date"))
         if (!r.isNull("scene_cloud_cover")) append(String.format(Locale.US, ", scene cloud %.0f %%", r.optDouble("scene_cloud_cover")))
-        append(String.format(Locale.US, ", %.0f %% of this window has data.\n", 100 * r.optDouble("clear_fraction_window")))
+        append(String.format(Locale.US, ", %.0f %% of this window has data", 100 * r.optDouble("clear_fraction_window")))
+        append(if (r.optDouble("clear_fraction_window") < 0.999)
+            "; dark hatched cells have NO data (cloud, masked or below the sensor's noise floor) and are not zero.\n" else ".\n")
         append(String.format(Locale.US, "Pixel %.0f m (sensor detail ~%.0f m), each square is one image cell, not resampled.\n",
             r.optDouble("pixel_m"), r.optDouble("sensor_detail_m")))
         append(if (r.optBoolean("reused")) "From the saved library" else "Fetched now and saved")

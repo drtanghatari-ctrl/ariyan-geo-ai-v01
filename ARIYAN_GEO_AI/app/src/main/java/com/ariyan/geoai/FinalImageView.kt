@@ -2,12 +2,14 @@ package com.ariyan.geoai
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.graphics.Shader
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -61,22 +63,66 @@ class FinalImageView(context: Context) : View(context) {
     // fi-v2 (2026-10-21): one satellite layer drawn over the DEM image with
     // its OWN cells. Placement is in DEM-cell units: image pixel (0,0) sits
     // at (overlayX0, overlayY0) and each image pixel spans (overlaySx, overlaySy)
-    // DEM cells. Empty image cells are transparent, so the terrain shows.
+    // DEM cells. Empty image cells (cloud, NODATA, radar below noise) are
+    // drawn as a dark hatch so the coloured relief never shows through and
+    // gets mistaken for data (2026-10-21).
     private var overlay: Bitmap? = null
+    private var emptyMask: Bitmap? = null          // ALPHA_8: 255 where the cell is empty
+    private val hatchSize = 10
+    private val hatchShader: BitmapShader = run {
+        val n = hatchSize
+        val px = IntArray(n * n) { i ->
+            val x = i % n; val y = i / n
+            if ((x + y) % n < 2) Color.rgb(150, 150, 150) else Color.rgb(34, 34, 38)
+        }
+        BitmapShader(Bitmap.createBitmap(px, n, n, Bitmap.Config.ARGB_8888),
+            Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
+    }
+    private val hatchMatrix = Matrix()
+    private val emptyPaint = Paint().apply {
+        isFilterBitmap = false; isAntiAlias = false; isDither = false; shader = hatchShader
+    }
     private var overlayX0 = 0f
     private var overlayY0 = 0f
     private var overlaySx = 1f
     private var overlaySy = 1f
     private val overlayPaint = Paint().apply { isFilterBitmap = false; isAntiAlias = false; isDither = false }
     var overlayOpacity = 1f
-        set(v) { field = v.coerceIn(0f, 1f); overlayPaint.alpha = (field * 255).toInt(); invalidate() }
+        set(v) {
+            field = v.coerceIn(0f, 1f)
+            overlayPaint.alpha = (field * 255).toInt(); emptyPaint.alpha = overlayPaint.alpha
+            invalidate()
+        }
+
+    /** Fraction of overlay cells that are empty (0 when there is no overlay). */
+    var overlayEmptyFraction = 0f
+        private set
 
     fun setOverlay(bmp: Bitmap?, x0: Float, y0: Float, sx: Float, sy: Float) {
         val old = overlay
         overlay = bmp
         overlayX0 = x0; overlayY0 = y0; overlaySx = sx; overlaySy = sy
         if (old != null && old !== bmp) old.recycle()
+        emptyMask?.recycle(); emptyMask = null
+        overlayEmptyFraction = 0f
+        if (bmp != null) buildEmptyMask(bmp)
         invalidate()
+    }
+
+    private fun buildEmptyMask(bmp: Bitmap) {
+        val w = bmp.width; val h = bmp.height
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        var empty = 0
+        // reuse the array: opaque where the cell is empty, clear where it has data
+        for (i in px.indices) {
+            if ((px[i] ushr 24) == 0) { px[i] = -0x1000000; empty++ } else px[i] = 0
+        }
+        overlayEmptyFraction = if (px.isEmpty()) 0f else empty.toFloat() / px.size
+        if (empty == 0) return
+        val m = try { Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8) } catch (e: OutOfMemoryError) { return }
+        m.setPixels(px, 0, w, 0, 0, w, h)        // ALPHA_8 keeps only the alpha byte; handles row padding
+        emptyMask = m
     }
 
     val hasOverlay: Boolean get() = overlay != null
@@ -133,6 +179,8 @@ class FinalImageView(context: Context) : View(context) {
     fun clearImage() {
         bitmap?.recycle(); bitmap = null
         overlay?.recycle(); overlay = null
+        emptyMask?.recycle(); emptyMask = null
+        overlayEmptyFraction = 0f
         invalidate()
     }
 
@@ -233,6 +281,12 @@ class FinalImageView(context: Context) : View(context) {
             canvas.save()
             canvas.translate(overlayX0, overlayY0)
             canvas.scale(overlaySx, overlaySy)
+            emptyMask?.let { m ->
+                // keep the hatch a fixed size on screen whatever the zoom
+                hatchMatrix.setScale(1f / (scale * overlaySx), 1f / (scale * overlaySy))
+                hatchShader.setLocalMatrix(hatchMatrix)
+                canvas.drawBitmap(m, 0f, 0f, emptyPaint)
+            }
             canvas.drawBitmap(ov, 0f, 0f, overlayPaint)
             canvas.restore()
         }
