@@ -64,6 +64,7 @@ M_PER_DEG_LAT = 111_320.0
 NODATA = -9999.0
 SEARCH_DAYS = 365
 CATALOG_PAGES_MAX = 5
+CATALOG_ACCEPT = "application/geo+json"
 MAX_SCENE_TRIES = 3
 MIN_CLEAR_FRACTION = 0.5
 MAX_IMAGE_PX = 2500                 # Process API limit per side
@@ -645,8 +646,9 @@ def fetch_image(root: str, product: str, bounds: Dict[str, float], token: Option
     nxt = None
     for _ in range(CATALOG_PAGES_MAX):
         body = catalog_body(product, b, day, nxt)
+        # the STAC catalog only answers GeoJSON; "application/json" gets HTTP 406
         data, _, _ = _cached_post(root, "CATALOG", ".json", http, CATALOG_URL, body, token,
-                                  "application/json", timeout)
+                                  CATALOG_ACCEPT, timeout)
         ans = json.loads(data.decode("utf-8"))
         feats.extend(ans.get("features") or [])
         nxt = (ans.get("context") or {}).get("next")

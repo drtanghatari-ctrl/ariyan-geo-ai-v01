@@ -489,3 +489,18 @@ def test_fetch_queue_reorders_a_shuffled_ranked_queue(tmp_path):
         raise si.SatImageError("offline")
     r = si.fetch_queue(str(tmp_path), shuffled, "tok", http=http, cap=10)
     assert r["order"] == ["c4", "c3", "c2", "c1", "c0"]
+
+
+def test_catalog_search_asks_for_geojson(tmp_path):
+    """Copernicus STAC search answers HTTP 406 to Accept: application/json."""
+    fake = FakeCDSE(_scenes())
+    seen = []
+
+    def http(url, body, headers, timeout):
+        seen.append((url, headers.get("Accept")))
+        return fake(url, body, headers, timeout)
+
+    si.fetch_image(str(tmp_path), "SAR_VV", B, "tok", http)
+    acc = {u.rsplit("/", 1)[-1]: a for u, a in seen}
+    assert acc["search"] == "application/geo+json"
+    assert acc["process"] == "image/tiff"
