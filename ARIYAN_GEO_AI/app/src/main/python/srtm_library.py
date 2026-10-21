@@ -106,13 +106,19 @@ def _tags(d: bytes):
         raise LibraryError("not a classic TIFF")
     off = struct.unpack(bo + "I", d[4:8])[0]
     n = struct.unpack(bo + "H", d[off:off + 2])[0]
-    size = {1: 1, 2: 1, 3: 2, 4: 4, 11: 4, 12: 8, 16: 8}
-    fmt = {1: "B", 3: "H", 4: "I", 11: "f", 12: "d", 16: "Q"}
+    # All classic TIFF field types. RATIONAL (5) / SRATIONAL (10) are two
+    # 32-bit ints per value (e.g. XResolution in Copernicus exports).
+    size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8,
+            11: 4, 12: 8, 13: 4, 16: 8, 17: 8, 18: 8}
+    fmt = {1: "B", 3: "H", 4: "I", 5: "II", 6: "b", 7: "B", 8: "h", 9: "i",
+           10: "ii", 11: "f", 12: "d", 13: "I", 16: "Q", 17: "q", 18: "Q"}
     tags = {}
     for i in range(n):
         t, ty, c = struct.unpack(bo + "HHI", d[off + 2 + 12 * i:off + 10 + 12 * i])
         v = d[off + 10 + 12 * i:off + 14 + 12 * i]
-        nb = size.get(ty, 1) * c
+        if ty not in size:
+            continue                      # unknown type: skip, never crash
+        nb = size[ty] * c
         raw = v[:nb] if nb <= 4 else d[struct.unpack(bo + "I", v)[0]:struct.unpack(bo + "I", v)[0] + nb]
         tags[t] = raw.rstrip(b"\0").decode("ascii", "replace") if ty == 2 \
             else struct.unpack(bo + fmt[ty] * c, raw)

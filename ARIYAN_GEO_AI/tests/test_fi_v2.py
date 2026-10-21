@@ -63,7 +63,7 @@ def _pred3(block):
 
 
 def write_tiff(arr, west, north, dlon, dlat, *, comp=1, pred=1, tile=None, rps=None,
-               point=False):
+               point=False, extra_tags=()):
     arr = np.asarray(arr, dtype=np.float32)
     H, W = arr.shape
 
@@ -97,9 +97,11 @@ def write_tiff(arr, west, north, dlon, dlat, *, comp=1, pred=1, tile=None, rps=N
     tags += [(33550, 12, [dlon, dlat, 0.0]), (33922, 12, [0.0, 0.0, 0.0, tx, ty, 0.0]),
              (34735, 3, [1, 1, 0, 3, 1024, 0, 1, 2, 1025, 0, 1, 2 if point else 1,
                          2048, 0, 1, 4326])]
+    tags += list(extra_tags)
     tags.sort()
-    fmt = {3: "H", 4: "I", 12: "d"}
-    sz = {3: 2, 4: 4, 12: 8}
+    # type 5 RATIONAL: vals are flat (num, den) pairs; 99 = unknown type (raw bytes)
+    fmt = {3: "H", 4: "I", 5: "I", 12: "d", 99: "B"}
+    sz = {3: 2, 4: 4, 5: 4, 12: 8, 99: 1}
     ifd_off = 8
     ifd_len = 2 + 12 * len(tags) + 4
     extra_off = ifd_off + ifd_len
@@ -128,6 +130,8 @@ def write_tiff(arr, west, north, dlon, dlat, *, comp=1, pred=1, tile=None, rps=N
             vals = offs
         n = len(vals)
         packed = struct.pack("<" + fmt[ty_] * n, *vals)
+        if ty_ == 5:
+            n //= 2                                  # count = number of rationals
         if len(packed) <= 4:
             ifd += struct.pack("<HHI", t, ty_, n) + packed.ljust(4, b"\0")
         else:
@@ -504,3 +508,17 @@ def test_catalog_search_asks_for_geojson(tmp_path):
     acc = {u.rsplit("/", 1)[-1]: a for u, a in seen}
     assert acc["search"] == "application/geo+json"
     assert acc["process"] == "image/tiff"
+
+
+def test_tiff_with_rational_and_unknown_tags_reads():
+    """Copernicus Process API TIFFs carry XResolution/YResolution as TIFF
+    type 5 (RATIONAL). The parser used to raise KeyError: 5 on device."""
+    import sat_image as si
+    arr = np.arange(12, dtype=np.float32).reshape(3, 4)
+    data = write_tiff(arr, 47.0, 33.0, 0.001, 0.001, comp=8,
+                      extra_tags=[(282, 5, [72, 1]), (283, 5, [72, 1]),
+                                  (296, 3, [2]), (65000, 99, [1, 2, 3, 4, 5, 6])])
+    vals, geo = si.read_geotiff(data)
+    assert vals.shape == (3, 4)
+    np.testing.assert_allclose(vals, arr)
+    assert abs(geo["west"] - 47.0) < 1e-9 and abs(geo["north"] - 33.0) < 1e-9
