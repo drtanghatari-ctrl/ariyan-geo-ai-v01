@@ -216,9 +216,36 @@ class FinalImageView(context: Context) : View(context) {
         clampPan(); onViewChanged?.invoke(); invalidate()
     }
 
+    // fa-v1.1: while a profile is open the map is framed on its line. The map
+    // shrinks when the profile panel opens, so the framing is re-applied on
+    // every size change until the user pans or zooms by hand.
+    private var lineFit: FloatArray? = null
+
+    /** Frame the segment (grid pixels) with room for its end labels. */
+    fun fitLine(x0: Float, y0: Float, x1: Float, y1: Float) {
+        lineFit = floatArrayOf(x0, y0, x1, y1)
+        if (width > 0 && height > 0) applyLineFit()
+        post { if (lineFit != null) applyLineFit() }
+    }
+
+    fun clearLineFit() { lineFit = null }
+
+    private fun applyLineFit() {
+        val f = lineFit ?: return
+        if (width == 0 || height == 0) return
+        val pad = 34f * d
+        val w = max(abs(f[2] - f[0]), 1f); val h = max(abs(f[3] - f[1]), 1f)
+        scale = clampScale(min((width - 2 * pad) / w, (height - 2 * pad) / h))
+        tx = width / 2f - (f[0] + f[2]) / 2f * scale
+        ty = height / 2f - (f[1] + f[3]) / 2f * scale
+        fitted = true
+        clampPan(); onViewChanged?.invoke(); invalidate()
+    }
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        if (!fitted) fitToScreen() else { clampPan(); invalidate() }
+        if (lineFit != null) applyLineFit()
+        else if (!fitted) fitToScreen() else { clampPan(); invalidate() }
     }
 
     private fun minScale(): Float {
@@ -238,6 +265,7 @@ class FinalImageView(context: Context) : View(context) {
 
     private val scaler = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(det: ScaleGestureDetector): Boolean {
+            lineFit = null
             val ns = clampScale(scale * det.scaleFactor)
             val f = ns / scale
             tx = det.focusX - (det.focusX - tx) * f
@@ -251,10 +279,12 @@ class FinalImageView(context: Context) : View(context) {
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent) = true
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
+            lineFit = null
             tx -= dx; ty -= dy
             clampPan(); onViewChanged?.invoke(); invalidate(); return true
         }
         override fun onDoubleTap(e: MotionEvent): Boolean {
+            lineFit = null
             val ns = clampScale(scale * 2f)
             val f = ns / scale
             tx = e.x - (e.x - tx) * f; ty = e.y - (e.y - ty) * f; scale = ns
@@ -334,10 +364,15 @@ class FinalImageView(context: Context) : View(context) {
             canvas.drawLine(ax, ay, bx, by, profileLine)
             // fa-v1.1: an end outside the view gets an edge tag where the line
             // leaves the screen, with an arrow pointing to the real end.
+            // a line hugging the edge misses the inset box; then clip to the
+            // whole view and pull the tag in from the edge
             val t = clipSegment(ax, ay, bx, by, m, m, width - m, height - m)
+                ?: clipSegment(ax, ay, bx, by, 0f, 0f, width.toFloat(), height.toFloat())
             if (t != null) {
-                if (!inside(ax, ay)) edgeTag(canvas, "A", ax + (bx - ax) * t[0], ay + (by - ay) * t[0], ax, ay)
-                if (!inside(bx, by)) edgeTag(canvas, "A\u2032", ax + (bx - ax) * t[1], ay + (by - ay) * t[1], bx, by)
+                fun cx(u: Float) = (ax + (bx - ax) * u).coerceIn(m, width - m)
+                fun cy(u: Float) = (ay + (by - ay) * u).coerceIn(m, height - m)
+                if (!inside(ax, ay)) edgeTag(canvas, "A", cx(t[0]), cy(t[0]), ax, ay)
+                if (!inside(bx, by)) edgeTag(canvas, "A\u2032", cx(t[1]), cy(t[1]), bx, by)
             }
             if (inside(bx, by)) endLabel(canvas, "A\u2032", bx, by)
         }

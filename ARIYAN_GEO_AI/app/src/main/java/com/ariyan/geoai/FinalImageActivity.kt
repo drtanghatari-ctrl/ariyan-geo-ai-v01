@@ -701,6 +701,8 @@ class FinalImageActivity : AppCompatActivity() {
             if (p.getInt("cells_no_data") > 0) " (${p.getInt("cells_no_data")} no data)" else "")
         readout.text = profileSummary(p)
         profilePanel.visibility = View.VISIBLE
+        // frame the map on the whole line (re-applied once the map has shrunk for the panel)
+        view.fitLine(lineAsk!![0], lineAsk!![1], lineAsk!![2], lineAsk!![3])
         // vertical exaggeration is known only once the panels are laid out and drawn
         profileView.post { if (profile === p && profileView.cursorM == null) readout.text = profileSummary(p) }
         updateInfo()
@@ -762,7 +764,8 @@ class FinalImageActivity : AppCompatActivity() {
     private fun closeProfile() {
         profile = null; lineAsk = null; preset = null; pickA = null
         view.pickMode = false
-        view.profileA = null; view.profileB = null; view.profileCursor = null; view.invalidate()
+        view.profileA = null; view.profileB = null; view.profileCursor = null
+        view.clearLineFit(); view.invalidate()
         profileView.clear()
         profilePanel.visibility = View.GONE
         updateInfo()
