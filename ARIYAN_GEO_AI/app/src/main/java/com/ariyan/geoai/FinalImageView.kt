@@ -49,6 +49,7 @@ class FinalImageView(context: Context) : View(context) {
     var onMarkersTapped: ((List<Marker>) -> Unit)? = null
     /** Labels skipped on the last frame because they would have overlapped. */
     var hiddenLabelCount = 0
+        private set
 
     // fa-v1 (2026-10-21): Profile A-A'. In pick mode a single tap reports its
     // grid-pixel point instead of opening a marker.
@@ -60,7 +61,6 @@ class FinalImageView(context: Context) : View(context) {
     var profileCursor: FloatArray? = null
     private val profileLine = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 2.5f * resources.displayMetrics.density }
     private val profileShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; strokeWidth = 4.5f * resources.displayMetrics.density }
-        private set
 
     private var bitmap: Bitmap? = null
     private var cellDxM = 30.0
