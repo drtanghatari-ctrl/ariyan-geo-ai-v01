@@ -326,15 +326,22 @@ class FinalImageView(context: Context) : View(context) {
         val a = profileA ?: return
         val ax = tx + a[0] * scale; val ay = ty + a[1] * scale
         markerFill.color = Color.WHITE; markerStroke.color = Color.BLACK
+        val m = 18f * d
+        val inside = { x: Float, y: Float -> x in m..(width - m) && y in m..(height - m) }
         profileB?.let { b ->
             val bx = tx + b[0] * scale; val by = ty + b[1] * scale
             canvas.drawLine(ax, ay, bx, by, profileShadow)
             canvas.drawLine(ax, ay, bx, by, profileLine)
-            canvas.drawCircle(bx, by, 5f * d, markerFill); canvas.drawCircle(bx, by, 5f * d, markerStroke)
-            canvas.drawText("A\u2032", bx + 7f * d, by - 7f * d, labelText)
+            // fa-v1.1: an end outside the view gets an edge tag where the line
+            // leaves the screen, with an arrow pointing to the real end.
+            val t = clipSegment(ax, ay, bx, by, m, m, width - m, height - m)
+            if (t != null) {
+                if (!inside(ax, ay)) edgeTag(canvas, "A", ax + (bx - ax) * t[0], ay + (by - ay) * t[0], ax, ay)
+                if (!inside(bx, by)) edgeTag(canvas, "A\u2032", ax + (bx - ax) * t[1], ay + (by - ay) * t[1], bx, by)
+            }
+            if (inside(bx, by)) endLabel(canvas, "A\u2032", bx, by)
         }
-        canvas.drawCircle(ax, ay, 5f * d, markerFill); canvas.drawCircle(ax, ay, 5f * d, markerStroke)
-        canvas.drawText("A", ax + 7f * d, ay - 7f * d, labelText)
+        if (inside(ax, ay) || profileB == null) endLabel(canvas, "A", ax, ay)
         profileCursor?.let { c ->
             val cx = tx + c[0] * scale; val cy = ty + c[1] * scale
             markerStroke.color = Color.YELLOW
@@ -343,6 +350,55 @@ class FinalImageView(context: Context) : View(context) {
             canvas.drawLine(cx, cy - 12f * d, cx, cy + 12f * d, markerStroke)
             markerStroke.color = Color.BLACK
         }
+    }
+
+    /** End dot plus its letter, letter kept inside the view. */
+    private fun endLabel(canvas: Canvas, t: String, x: Float, y: Float) {
+        markerFill.color = Color.WHITE; markerStroke.color = Color.BLACK
+        canvas.drawCircle(x, y, 5f * d, markerFill); canvas.drawCircle(x, y, 5f * d, markerStroke)
+        val w = labelText.measureText(t)
+        var lx = x + 7f * d; var ly = y - 7f * d
+        if (lx + w > width - 2f * d) lx = x - 7f * d - w
+        if (ly - labelText.textSize < 2f * d) ly = y + 7f * d + labelText.textSize
+        canvas.drawText(t, lx, ly, labelText)
+    }
+
+    /** Arrow at (x, y) pointing toward the off-screen end (ex, ey), letter beside it. */
+    private fun edgeTag(canvas: Canvas, t: String, x: Float, y: Float, ex: Float, ey: Float) {
+        val dx = ex - x; val dy = ey - y
+        val len = kotlin.math.hypot(dx, dy).takeIf { it > 1e-3f } ?: return
+        val ux = dx / len; val uy = dy / len
+        val s = 9f * d
+        path.reset()
+        path.moveTo(x + ux * s, y + uy * s)
+        path.lineTo(x - uy * s * 0.6f, y + ux * s * 0.6f)
+        path.lineTo(x + uy * s * 0.6f, y - ux * s * 0.6f)
+        path.close()
+        markerFill.color = Color.WHITE; markerStroke.color = Color.BLACK
+        canvas.drawPath(path, markerFill); canvas.drawPath(path, markerStroke)
+        // letter on the side of the line, pulled back toward the view centre
+        val w = labelText.measureText(t)
+        val lx = (x - ux * 4f * d - uy * 10f * d - w / 2).coerceIn(2f * d, width - w - 2f * d)
+        val ly = (y - uy * 4f * d + ux * 10f * d + labelText.textSize / 3)
+            .coerceIn(labelText.textSize + 2f * d, height - 2f * d)
+        canvas.drawText(t, lx, ly, labelText)
+    }
+
+    /** Liang-Barsky: parameters [t0, t1] of segment (x0,y0)-(x1,y1) inside the
+     *  rectangle, or null when it misses it. */
+    internal fun clipSegment(x0: Float, y0: Float, x1: Float, y1: Float,
+                             l: Float, t: Float, r: Float, b: Float): FloatArray? {
+        val dx = x1 - x0; val dy = y1 - y0
+        var a = 0f; var z = 1f
+        val p = floatArrayOf(-dx, dx, -dy, dy)
+        val q = floatArrayOf(x0 - l, r - x0, y0 - t, b - y0)
+        for (k in 0 until 4) {
+            if (p[k] == 0f) { if (q[k] < 0f) return null; continue }
+            val u = q[k] / p[k]
+            if (p[k] < 0f) { if (u > z) return null; if (u > a) a = u }
+            else { if (u < a) return null; if (u < z) z = u }
+        }
+        return floatArrayOf(a, z)
     }
 
     private val placed = ArrayList<RectF>()

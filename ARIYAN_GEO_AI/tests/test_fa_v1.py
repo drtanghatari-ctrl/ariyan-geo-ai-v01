@@ -290,3 +290,58 @@ def test_bridge_export_and_errors(tmp_path):
     assert r["ok"] and r["paths"]["png"].endswith(".png") and "/exports/profile/" in r["paths"]["csv"]
     assert "expired" in json.loads(psm.profile_json("nope", 0, 0, 1, 1))["error"]
     assert "error" in json.loads(psm.profile_json(sid, -9, -9, -8, -8))
+
+
+# ---- fa-v1.1 (2026-10-22): candidate labels never stack ----------------------
+from profile_section import layout_labels, _fmt  # noqa: E402
+
+_W = lambda t: 6 * len(t)
+
+
+def _no_overlap(labels, gap=0):
+    by_row = {}
+    for o in labels:
+        by_row.setdefault(o["row"], []).append((o["x"], o["x"] + _W(o["text"])))
+    for spans in by_row.values():
+        spans.sort()
+        for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
+            assert a1 + gap <= b0, (spans,)
+
+
+def test_labels_close_together_use_separate_rows():
+    xs = [300.0, 310.0, 320.0]
+    out = layout_labels(xs, ["09a8862d", "1b2c3d4e", "77aa0011"], _W, 0, 600)
+    assert sorted(o["row"] for o in out) == [0, 1, 2]
+    assert sorted(m for o in out for m in o["members"]) == [0, 1, 2]
+    _no_overlap(out)
+
+
+def test_overflow_folds_into_plus_n_and_keeps_every_candidate():
+    xs = [300.0 + i for i in range(6)]
+    texts = [f"cand{i:04d}" for i in range(6)]
+    out = layout_labels(xs, texts, _W, 0, 600, max_rows=3)
+    assert len(out) == 3
+    assert sorted(m for o in out for m in o["members"]) == list(range(6))
+    assert any("+" in o["text"] for o in out)
+    _no_overlap(out)
+
+
+def test_label_near_right_edge_flips_left_and_stays_inside():
+    out = layout_labels([598.0], ["09a8862d"], _W, 0, 600)
+    assert out[0]["x"] + _W(out[0]["text"]) <= 600
+    assert out[0]["x"] < 598
+
+
+def test_focus_candidate_gets_first_row():
+    xs = [100.0, 105.0]
+    out = layout_labels(xs, ["aaaa", "bbbb"], _W, 0, 600, max_rows=1, focus=[False, True])
+    assert out[0]["members"][0] == 1 and out[0]["text"] == "bbbb +1"
+
+
+def test_far_apart_labels_share_row_zero():
+    out = layout_labels([50.0, 300.0, 550.0], ["aaaa", "bbbb", "cccc"], _W, 0, 600)
+    assert all(o["row"] == 0 for o in out)
+
+
+def test_fmt_has_no_negative_zero():
+    assert _fmt(-0.0) == "0" and _fmt(-1e-12) == "0"

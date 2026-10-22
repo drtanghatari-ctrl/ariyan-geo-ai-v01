@@ -33,7 +33,50 @@ class ProfileView(context: Context) : View(context) {
     class Trace(val d0: DoubleArray, val d1: DoubleArray, val v: Array<Double?>,
                 val lo: Double, val hi: Double, val title: String, val colour: Int, val metres: Boolean)
 
-    class Cand(val d: Double, val label: String, val colour: Int)
+    class Cand(val d: Double, val label: String, val colour: Int, val focus: Boolean = false)
+
+    /** One placed candidate label: [members] are indices into the candidate
+     *  list (more than one = folded "+N" because it fitted no row). */
+    class LabelSlot(var text: String, var x: Float, val row: Int, val members: MutableList<Int>,
+                    val anchorX: Float, val base: String, val span: FloatArray)
+
+    companion object {
+        /** Same rule as profile_section.layout_labels: each label goes just
+         *  right of its line (left near the right edge) in the first free row;
+         *  one that fits nowhere folds into the nearest placed label as "+N".
+         *  Focus first, then left to right. Never draws a label on another. */
+        fun layoutLabels(xs: List<Float>, texts: List<String>, widthOf: (String) -> Float,
+                         left: Float, right: Float, maxRows: Int, gap: Float,
+                         focus: List<Boolean> = emptyList()): List<LabelSlot> {
+            val order = xs.indices.sortedWith(compareBy({ !(focus.getOrNull(it) ?: false) }, { xs[it] }))
+            val rows = List(maxRows) { ArrayList<FloatArray>() }
+            val out = ArrayList<LabelSlot>()
+            fun span(x: Float, t: String): FloatArray {
+                val w = widthOf(t)
+                var x0 = x + gap
+                if (x0 + w > right) x0 = x - gap - w
+                x0 = maxOf(left, x0)
+                return floatArrayOf(x0, x0 + w)
+            }
+            for (i in order) {
+                val sp = span(xs[i], texts[i])
+                val r = (0 until maxRows).firstOrNull { r ->
+                    rows[r].all { o -> sp[1] + gap <= o[0] || sp[0] >= o[1] + gap }
+                }
+                if (r != null) {
+                    rows[r] += sp
+                    out += LabelSlot(texts[i], sp[0], r, mutableListOf(i), xs[i], texts[i], sp)
+                } else if (out.isNotEmpty()) {
+                    val host = out.minByOrNull { kotlin.math.abs(it.anchorX - xs[i]) }!!
+                    host.members += i
+                    host.text = "${host.base} +${host.members.size - 1}"
+                    val ns = span(host.anchorX, host.text)
+                    host.x = ns[0]; host.span[0] = ns[0]; host.span[1] = ns[1]
+                }
+            }
+            return out
+        }
+    }
 
     var onCursor: ((Double?) -> Unit)? = null
 
@@ -86,7 +129,7 @@ class ProfileView(context: Context) : View(context) {
         cands = (0 until c.length()).map { i ->
             val o = c.getJSONObject(i)
             Cand(o.getDouble("d_m"), o.getString("label") + (o.optString("confidence_label").takeIf { it.isNotBlank() && it != "null" }?.let { " $it" } ?: ""),
-                FinalImageView.styleColour(o.optString("style", "unrated")))
+                FinalImageView.styleColour(o.optString("style", "unrated")), o.optBoolean("focus", false))
         }
         cursorM = null
         invalidate()
@@ -135,7 +178,12 @@ class ProfileView(context: Context) : View(context) {
                 candPaint.color = c.colour
                 val x = xOf(c.d)
                 canvas.drawLine(x, py0, x, py0 + ph, candPaint)
-                if (i == 0) canvas.drawText(c.label, x + 2f * d, py0 + 9f * d, candText.apply { color = c.colour })
+            }
+            // labels only on the first panel, staggered so they never stack
+            if (i == 0) for (s in layoutLabels(cands.map { xOf(it.d) }, cands.map { it.label },
+                    { candText.measureText(it) }, leftPad, width - rightPad, 3, 2f * d, cands.map { it.focus })) {
+                candText.color = cands[s.members[0]].colour
+                canvas.drawText(s.text, s.x, py0 + 9f * d + s.row * 10f * d, candText)
             }
             // exact steps; a gap (no data) breaks the line
             path.reset()
@@ -158,13 +206,17 @@ class ProfileView(context: Context) : View(context) {
             }
         }
         val yb = height - 4f * d
+        val unit = "m from A"
+        val unitX = width - rightPad - text.measureText(unit)
+        canvas.drawText(unit, unitX, yb, text)
         for (tk in ticks(0.0, lengthM, 6)) {
             val x = xOf(tk)
             canvas.drawLine(x, yb - 12f * d, x, yb - 9f * d, axisPaint)
-            canvas.drawText(fmt(tk), x - text.measureText(fmt(tk)) / 2, yb, text)
+            val lab = fmt(tk)
+            val lx = x - text.measureText(lab) / 2
+            // a tick number that would run into the unit label is left out (its tick mark stays)
+            if (lx + text.measureText(lab) + 4f * d <= unitX) canvas.drawText(lab, lx, yb, text)
         }
-        val unit = "m from A"
-        canvas.drawText(unit, width - rightPad - text.measureText(unit), yb, text)
         cursorM?.let { canvas.drawLine(xOf(it), 0f, xOf(it), height - bottomAxis, cursorPaint) }
     }
 
@@ -180,7 +232,9 @@ class ProfileView(context: Context) : View(context) {
         return out
     }
 
-    private fun fmt(v: Double): String =
-        if (kotlin.math.abs(v) >= 100 || v == floor(v)) String.format(Locale.US, "%.0f", v)
+    private fun fmt(v0: Double): String {
+        val v = if (kotlin.math.abs(v0) < 1e-9) 0.0 else v0
+        return if (kotlin.math.abs(v) >= 100 || v == floor(v)) String.format(Locale.US, "%.0f", v)
         else String.format(Locale.US, "%.2f", v).trimEnd('0').trimEnd('.')
+    }
 }

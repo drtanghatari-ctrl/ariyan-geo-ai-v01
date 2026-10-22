@@ -461,7 +461,55 @@ def _nice_ticks(lo: float, hi: float, n: int = 5) -> List[float]:
 
 
 def _fmt(v: float) -> str:
+    if abs(v) < 1e-9:
+        v = 0.0
     return f"{v:.0f}" if abs(v) >= 100 or float(v).is_integer() else f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+def layout_labels(xs: Sequence[float], texts: Sequence[str], width_of, left: float, right: float,
+                  max_rows: int = 3, gap: float = 4.0, focus: Sequence[bool] = ()) -> List[Dict]:
+    """Place candidate labels along a profile without overlap.
+
+    Each label sits just right of its line (or just left near the right edge)
+    in the first of `max_rows` rows where it fits. A label that fits nowhere
+    is folded into the nearest placed label as "+N" -- it is never drawn on
+    top of another. Focus candidates are placed first. The dashed lines are
+    not affected; every candidate keeps its own line.
+    Returns [{"text", "x", "row", "members": [indices]}] in placement order."""
+    n = len(xs)
+    order = sorted(range(n), key=lambda i: (not (focus[i] if i < len(focus) else False), xs[i]))
+    rows: List[List[List[float]]] = [[] for _ in range(max_rows)]
+    out: List[Dict] = []
+
+    def span(x, t):
+        w = width_of(t)
+        x0 = x + gap
+        if x0 + w > right:
+            x0 = x - gap - w
+        x0 = max(left, x0)
+        return x0, x0 + w
+
+    for i in order:
+        x0, x1 = span(xs[i], texts[i])
+        for r in range(max_rows):
+            if all(x1 + gap <= a or x0 >= b + gap for a, b in rows[r]):
+                rows[r].append([x0, x1])
+                out.append({"text": texts[i], "x": x0, "row": r, "members": [i],
+                            "_x": xs[i], "_span": rows[r][-1], "_base": texts[i]})
+                break
+        else:
+            if not out:
+                continue
+            host = min(out, key=lambda o: abs(o["_x"] - xs[i]))
+            host["members"].append(i)
+            host["text"] = f"{host['_base']} +{len(host['members']) - 1}"
+            nx0, nx1 = span(host["_x"], host["text"])
+            host["x"] = nx0
+            host["_span"][0], host["_span"][1] = nx0, nx1
+    for o in out:
+        for k in ("_x", "_span", "_base"):
+            del o[k]
+    return out
 
 
 def _panel(cv: _Canvas, top: int, height: int, left: int, right: int, title: str,
@@ -486,7 +534,10 @@ def _panel(cv: _Canvas, top: int, height: int, left: int, right: int, title: str
     for c in cands:
         x = X(c["d_m"])
         cv.line(x, py0, x, py0 + ph, (200, 0, 160), dash=4)
-        cv.text(x + 3, py0 + 2, c["label"], (200, 0, 160), scale=1)
+    for lab in layout_labels([X(c["d_m"]) for c in cands], [c["label"] for c in cands],
+                             lambda t: _Canvas.text_w(t, 1), left, right, gap=3,
+                             focus=[bool(c.get("focus")) for c in cands]):
+        cv.text(lab["x"], py0 + 2 + 10 * lab["row"], lab["text"], (200, 0, 160), scale=1)
     prev = None
     for a, b, v in zip(d0, d1, vals):
         if v is None:
