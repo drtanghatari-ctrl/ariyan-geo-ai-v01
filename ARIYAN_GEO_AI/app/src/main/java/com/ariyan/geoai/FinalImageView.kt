@@ -233,9 +233,12 @@ class FinalImageView(context: Context) : View(context) {
     private fun applyLineFit() {
         val f = lineFit ?: return
         if (width == 0 || height == 0) return
-        val pad = 34f * d
+        val pad = 20f * d
         val w = max(abs(f[2] - f[0]), 1f); val h = max(abs(f[3] - f[1]), 1f)
-        scale = clampScale(min((width - 2 * pad) / w, (height - 2 * pad) / h))
+        // never zoom out below MIN_LINE_FIT dp per cell: when the short map
+        // can't hold the whole line at that size, the ends go off-screen and
+        // get edge tags instead of the map shrinking to a thumbnail
+        scale = clampScale(max(min((width - 2 * pad) / w, (height - 2 * pad) / h), MIN_LINE_FIT * d))
         tx = width / 2f - (f[0] + f[2]) / 2f * scale
         ty = height / 2f - (f[1] + f[3]) / 2f * scale
         fitted = true
@@ -391,11 +394,11 @@ class FinalImageView(context: Context) : View(context) {
     private fun endLabel(canvas: Canvas, t: String, x: Float, y: Float) {
         markerFill.color = Color.WHITE; markerStroke.color = Color.BLACK
         canvas.drawCircle(x, y, 5f * d, markerFill); canvas.drawCircle(x, y, 5f * d, markerStroke)
-        val w = labelText.measureText(t)
-        var lx = x + 7f * d; var ly = y - 7f * d
-        if (lx + w > width - 2f * d) lx = x - 7f * d - w
-        if (ly - labelText.textSize < 2f * d) ly = y + 7f * d + labelText.textSize
-        canvas.drawText(t, lx, ly, labelText)
+        val w = labelText.measureText(t); val ts = labelText.textSize
+        val spots = listOf(x + 7f * d to y - 7f * d, x - 7f * d - w to y - 7f * d,
+                           x + 7f * d to y + 7f * d + ts, x - 7f * d - w to y + 7f * d + ts)
+            .map { (lx, ly) -> lx.coerceIn(2f * d, width - w - 2f * d) to ly.coerceIn(ts + 2f * d, height - 2f * d) }
+        place(canvas, t, labelText, spots, force = true)
     }
 
     /** Arrow at (x, y) pointing toward the off-screen end (ex, ey), letter beside it. */
@@ -412,11 +415,12 @@ class FinalImageView(context: Context) : View(context) {
         markerFill.color = Color.WHITE; markerStroke.color = Color.BLACK
         canvas.drawPath(path, markerFill); canvas.drawPath(path, markerStroke)
         // letter on the side of the line, pulled back toward the view centre
-        val w = labelText.measureText(t)
-        val lx = (x - ux * 4f * d - uy * 10f * d - w / 2).coerceIn(2f * d, width - w - 2f * d)
-        val ly = (y - uy * 4f * d + ux * 10f * d + labelText.textSize / 3)
-            .coerceIn(labelText.textSize + 2f * d, height - 2f * d)
-        canvas.drawText(t, lx, ly, labelText)
+        val w = labelText.measureText(t); val ts = labelText.textSize
+        val spots = listOf(-1f, 1f).map { side ->
+            (x - ux * 4f * d - side * uy * 12f * d - w / 2).coerceIn(2f * d, width - w - 2f * d) to
+                (y - uy * 4f * d + side * ux * 12f * d + ts / 3).coerceIn(ts + 2f * d, height - 2f * d)
+        }
+        place(canvas, t, labelText, spots, force = true)
     }
 
     /** Liang-Barsky: parameters [t0, t1] of segment (x0,y0)-(x1,y1) inside the
@@ -594,6 +598,8 @@ class FinalImageView(context: Context) : View(context) {
     companion object {
         /** Zoom limit: 64 dp per DEM cell, already far past native. */
         const val MAX_PX_PER_CELL = 64f
+        /** fa-v1.3: smallest zoom used when framing a profile line, dp per cell */
+        const val MIN_LINE_FIT = 3f
 
         fun styleColour(style: String): Int = when (style) {
             "high" -> Color.rgb(229, 72, 77)
