@@ -49,6 +49,17 @@ class FinalImageView(context: Context) : View(context) {
     var onMarkersTapped: ((List<Marker>) -> Unit)? = null
     /** Labels skipped on the last frame because they would have overlapped. */
     var hiddenLabelCount = 0
+
+    // fa-v1 (2026-10-21): Profile A-A'. In pick mode a single tap reports its
+    // grid-pixel point instead of opening a marker.
+    var pickMode = false
+    var onGridTapped: ((Float, Float) -> Unit)? = null
+    /** line ends and the trace cursor, grid-pixel coordinates */
+    var profileA: FloatArray? = null
+    var profileB: FloatArray? = null
+    var profileCursor: FloatArray? = null
+    private val profileLine = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 2.5f * resources.displayMetrics.density }
+    private val profileShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; strokeWidth = 4.5f * resources.displayMetrics.density }
         private set
 
     private var bitmap: Bitmap? = null
@@ -250,6 +261,7 @@ class FinalImageView(context: Context) : View(context) {
             clampPan(); onViewChanged?.invoke(); invalidate(); return true
         }
         override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+            if (pickMode) { onGridTapped?.invoke((e.x - tx) / scale, (e.y - ty) / scale); return true }
             if (!showCandidates) return false
             val hitR = 22f * d
             val hits = markers.filter { dist2(e.x, e.y, it) <= hitR * hitR }.sortedBy { dist2(e.x, e.y, it) }
@@ -307,6 +319,30 @@ class FinalImageView(context: Context) : View(context) {
         drawScaleBar(canvas)
         drawNorth(canvas)
         if (showLabels) drawLabels(canvas)
+        drawProfile(canvas)
+    }
+
+    private fun drawProfile(canvas: Canvas) {
+        val a = profileA ?: return
+        val ax = tx + a[0] * scale; val ay = ty + a[1] * scale
+        markerFill.color = Color.WHITE; markerStroke.color = Color.BLACK
+        profileB?.let { b ->
+            val bx = tx + b[0] * scale; val by = ty + b[1] * scale
+            canvas.drawLine(ax, ay, bx, by, profileShadow)
+            canvas.drawLine(ax, ay, bx, by, profileLine)
+            canvas.drawCircle(bx, by, 5f * d, markerFill); canvas.drawCircle(bx, by, 5f * d, markerStroke)
+            canvas.drawText("A\u2032", bx + 7f * d, by - 7f * d, labelText)
+        }
+        canvas.drawCircle(ax, ay, 5f * d, markerFill); canvas.drawCircle(ax, ay, 5f * d, markerStroke)
+        canvas.drawText("A", ax + 7f * d, ay - 7f * d, labelText)
+        profileCursor?.let { c ->
+            val cx = tx + c[0] * scale; val cy = ty + c[1] * scale
+            markerStroke.color = Color.YELLOW
+            canvas.drawCircle(cx, cy, 8f * d, markerStroke)
+            canvas.drawLine(cx - 12f * d, cy, cx + 12f * d, cy, markerStroke)
+            canvas.drawLine(cx, cy - 12f * d, cx, cy + 12f * d, markerStroke)
+            markerStroke.color = Color.BLACK
+        }
     }
 
     private val placed = ArrayList<RectF>()

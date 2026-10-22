@@ -79,6 +79,18 @@ class FinalImageActivity : AppCompatActivity() {
     private var satProduct: String? = null
     private var satMeta: JSONObject? = null
 
+    // fa-v1 (2026-10-21): Profile & Section A-A'
+    private lateinit var profileBtn: MaterialButton
+    private lateinit var profilePanel: LinearLayout
+    private lateinit var profileTitle: TextView
+    private lateinit var profileView: ProfileView
+    private lateinit var readout: TextView
+    private var profile: JSONObject? = null
+    /** the line as asked for (grid pixels); the profile itself may be trimmed to the window */
+    private var lineAsk: FloatArray? = null
+    private var preset: String? = null
+    private var pickA: FloatArray? = null
+
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -131,6 +143,8 @@ class FinalImageActivity : AppCompatActivity() {
         buttons.addView(windowBtn)
         satBtn = button("Satellite: off") { chooseSatellite() }
         buttons.addView(satBtn)
+        profileBtn = button("Profile") { chooseProfile() }
+        buttons.addView(profileBtn)
         buttons.addView(button("Layers") { chooseLayers() })
         buttons.addView(button("Fit") { view.fitToScreen() })
         buttons.addView(button("Centre") { centreOnCandidate() })
@@ -141,11 +155,14 @@ class FinalImageActivity : AppCompatActivity() {
         view = FinalImageView(this).apply {
             onViewChanged = { updateInfo() }
             onMarkersTapped = { if (it.size == 1) showMarker(it[0]) else showCluster(it) }
+            onGridTapped = { x, y -> onPick(x, y) }
         }
         frame.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         progress = ProgressBar(this).apply { visibility = View.GONE }
         frame.addView(progress, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
         root.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        root.addView(buildProfilePanel(pad, d))
 
         info = smallText(R.color.ariyan_accent).apply { setPadding(pad, pad / 3, pad, 0) }
         root.addView(info)
@@ -165,6 +182,30 @@ class FinalImageActivity : AppCompatActivity() {
         root.addView(ScrollView(this).apply { addView(notes) },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (88 * d).toInt()))
         setContentView(root)
+    }
+
+    private fun buildProfilePanel(pad: Int, d: Float): View {
+        profilePanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(pad / 2, pad / 3, pad / 2, 0)
+        }
+        val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        profileTitle = smallText(R.color.ariyan_text_primary).apply { typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD) }
+        head.addView(profileTitle, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        fun small(t: String, onClick: () -> Unit) = MaterialButton(this).apply {
+            text = t; isAllCaps = false; textSize = 11f; minWidth = 0; minimumWidth = 0
+            insetTop = 0; insetBottom = 0
+            setOnClickListener { onClick() }
+        }
+        head.addView(small("Export") { exportProfile() })
+        head.addView(small("Close") { closeProfile() })
+        profilePanel.addView(head)
+        profileView = ProfileView(this).apply { onCursor = { dm -> showCursor(dm) } }
+        profilePanel.addView(profileView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (210 * d).toInt()))
+        readout = smallText(R.color.ariyan_text_secondary).apply { setPadding(pad / 2, pad / 4, pad / 2, 0) }
+        profilePanel.addView(readout)
+        return profilePanel
     }
 
     private fun smallText(colour: Int) = TextView(this).apply {
@@ -222,7 +263,11 @@ class FinalImageActivity : AppCompatActivity() {
         updateInfo()
         // a new window / colour is a new session: re-open the chosen layer on it
         // (saved images only; never fetches without asking)
-        satProduct?.let { openSatellite(it, fetch = false, quiet = true) }
+        // a hand-drawn A-A' only fits the window it was drawn on; presets are re-run
+        if (!keepView && preset == null && lineAsk != null) closeProfile()
+        val sp = satProduct
+        if (sp != null) openSatellite(sp, fetch = false, quiet = true)   // refreshes the profile itself
+        else refreshProfile(true)
     }
 
     private fun parseLevels(c: JSONObject): List<FinalImageView.Level> {
@@ -306,6 +351,7 @@ class FinalImageActivity : AppCompatActivity() {
             mode,
             if (beyond && !view.smooth) "\nZoomed past native: each square is one real DEM cell, no new detail added."
             else if (beyond) "\nZoomed past native: colours between cell centres are interpolated, not measured." else "")
+        if (view.pickMode) info.append(if (pickA == null) "\nProfile: tap point A on the map." else "\nProfile: now tap point A\u2032.")
     }
 
     // ---------------------------------------------------------------- actions
@@ -459,6 +505,7 @@ class FinalImageActivity : AppCompatActivity() {
         view.setOverlay(null, 0f, 0f, 1f, 1f)
         satBtn.text = "Satellite: off"
         meta?.let { updateLegend(it); updateNotes(it) }
+        refreshProfile(true)
     }
 
     private fun openSatellite(product: String, fetch: Boolean, quiet: Boolean) {
@@ -508,6 +555,7 @@ class FinalImageActivity : AppCompatActivity() {
                         satBtn.text = "Satellite: " + (satLabels[product]?.substringBefore(" (") ?: product)
                         updateSatLegend(r)
                         meta?.let { updateNotes(it) }
+                        refreshProfile(true)
                     }
                 }
             } catch (e: PyException) {
@@ -549,6 +597,206 @@ class FinalImageActivity : AppCompatActivity() {
             .append(pv.optString("sha256").take(12)).append("\u2026 \u00B7 ").append(pv.optString("version"))
     }
 
+    // ---------------------------------------------------------------- profile & section (fa-v1)
+
+    private fun chooseProfile() {
+        if (sessionId == null) return
+        val items = arrayOf("Draw A\u2013A\u2032 (tap two points on the map)",
+            "North\u2013South through this candidate", "East\u2013West through this candidate")
+        val b = AlertDialog.Builder(this).setTitle("Profile & section")
+            .setItems(items) { _, i ->
+                when (i) {
+                    0 -> startPick()
+                    1 -> runPreset("NS")
+                    else -> runPreset("EW")
+                }
+            }
+        if (profile != null) b.setNeutralButton("Close profile") { _, _ -> closeProfile() }
+        b.setNegativeButton("Cancel", null).show()
+    }
+
+    private fun startPick() {
+        pickA = null
+        view.pickMode = true
+        view.profileA = null; view.profileB = null; view.profileCursor = null; view.invalidate()
+        info.text = "Profile: tap point A on the map (pan/zoom still work)."
+    }
+
+    private fun onPick(x: Float, y: Float) {
+        val a = pickA
+        if (a == null) {
+            pickA = floatArrayOf(x, y)
+            view.profileA = pickA; view.invalidate()
+            info.text = "Profile: now tap point A\u2032."
+            return
+        }
+        if (Math.hypot((x - a[0]).toDouble(), (y - a[1]).toDouble()) < 1.0) {
+            info.text = "A\u2032 is in the same cell as A; tap a point further away."
+            return
+        }
+        view.pickMode = false
+        pickA = null
+        preset = null
+        lineAsk = floatArrayOf(a[0], a[1], x, y)
+        runProfile()
+    }
+
+    private fun runPreset(which: String) {
+        view.pickMode = false; pickA = null
+        preset = which; lineAsk = null
+        runProfile()
+    }
+
+    /** product shown on the map, if any; the profile only reads layers already open */
+    private fun profileProduct(): String = if (satMeta != null) satProduct ?: "" else ""
+
+    /** re-run the open profile on the current session; a new window drops it (its line no longer fits) */
+    private fun refreshProfile(sameWindow: Boolean) {
+        if (lineAsk == null && preset == null) return
+        if (!sameWindow && preset == null) { closeProfile(); return }
+        runProfile()
+    }
+
+    private fun runProfile() {
+        val sid = sessionId ?: return
+        val line = lineAsk; val pre = preset
+        if (line == null && pre == null) return
+        val product = profileProduct()
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val r = withContext(Dispatchers.Default) {
+                    val mod = python.getModule("profile_section_mobile")
+                    JSONObject((if (pre != null) mod.callAttr("preset_profile_json", sid, pre, product)
+                        else mod.callAttr("profile_json", sid, line!![0].toDouble(), line[1].toDouble(),
+                            line[2].toDouble(), line[3].toDouble(), product)).toString())
+                }
+                if (r.has("error")) { showError(r.getString("error")); updateInfo(); return@launch }
+                showProfile(r)
+            } catch (e: PyException) {
+                showError(e.message ?: "profile failed")
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    private fun showProfile(p: JSONObject) {
+        profile = p
+        val a = p.getJSONObject("a"); val b = p.getJSONObject("b")
+        // the line as actually profiled (trimmed to the window); presets get their ends from here too
+        lineAsk = floatArrayOf(a.getDouble("x").toFloat(), a.getDouble("y").toFloat(),
+            b.getDouble("x").toFloat(), b.getDouble("y").toFloat())
+        view.profileA = floatArrayOf(lineAsk!![0], lineAsk!![1])
+        view.profileB = floatArrayOf(lineAsk!![2], lineAsk!![3])
+        view.profileCursor = null
+        view.invalidate()
+        val satLabel = p.optJSONObject("sat")?.let { satLabels[it.optString("product")]?.substringBefore(" (") }
+        profileView.setProfile(p, satLabel)
+        val len = p.getDouble("length_m")
+        profileTitle.text = String.format(Locale.US, "%s  %s \u00B7 bearing %.0f\u00B0 \u00B7 %d cells%s",
+            p.optString("preset").takeIf { it.isNotBlank() }?.let { if (it == "NS") "N\u2013S" else "E\u2013W" } ?: "A\u2013A\u2032",
+            if (len >= 1000) String.format(Locale.US, "%.2f km", len / 1000) else "${len.toInt()} m",
+            p.getDouble("bearing_deg"), p.getInt("cells"),
+            if (p.getInt("cells_no_data") > 0) " (${p.getInt("cells_no_data")} no data)" else "")
+        readout.text = profileSummary(p)
+        profilePanel.visibility = View.VISIBLE
+        // vertical exaggeration is known only once the panels are laid out and drawn
+        profileView.post { if (profile === p && profileView.cursorM == null) readout.text = profileSummary(p) }
+        updateInfo()
+    }
+
+    private fun profileSummary(p: JSONObject): String = buildString {
+        val a = p.getJSONObject("a"); val b = p.getJSONObject("b")
+        append(String.format(Locale.US, "A  E %.0f N %.0f  \u2192  A\u2032  E %.0f N %.0f  (UTM %s%s, WGS84)\n",
+            a.getDouble("easting"), a.getDouble("northing"), b.getDouble("easting"), b.getDouble("northing"),
+            p.opt("utm_zone"), p.optString("hemisphere")))
+        if (profileView.lastVe.isNotEmpty())
+            append("Vertical exaggeration: ").append(profileView.lastVe.entries.joinToString(" \u00B7 ") {
+                String.format(Locale.US, "%s %.1f\u00D7", it.key.substringBefore(" ("), it.value) }).append('\n')
+        val c = p.getJSONArray("candidates")
+        append(if (c.length() == 0) "No candidate within ${p.optDouble("near_line_m", 50.0).toInt()} m of the line.\n"
+            else "${c.length()} candidate(s) within ${p.optDouble("near_line_m", 50.0).toInt()} m (dashed lines).\n")
+        append("Touch the trace to read the cell under your finger. ").append(p.optString("statement"))
+    }
+
+    private fun stepIndex(d0: JSONArray, d1: JSONArray, dm: Double): Int {
+        val n = d0.length()
+        if (n == 0) return -1
+        for (i in 0 until n) if (dm >= d0.getDouble(i) && dm < d1.getDouble(i)) return i
+        return if (dm >= d1.getDouble(n - 1)) n - 1 else -1
+    }
+
+    private fun showCursor(dm: Double?) {
+        val p = profile ?: return
+        if (dm == null) { view.profileCursor = null; view.invalidate(); readout.text = profileSummary(p); return }
+        val len = p.getDouble("length_m").coerceAtLeast(1e-6)
+        val f = (dm / len).coerceIn(0.0, 1.0)
+        val a = p.getJSONObject("a"); val b = p.getJSONObject("b")
+        val x = a.getDouble("x") + f * (b.getDouble("x") - a.getDouble("x"))
+        val y = a.getDouble("y") + f * (b.getDouble("y") - a.getDouble("y"))
+        view.profileCursor = floatArrayOf(x.toFloat(), y.toFloat()); view.invalidate()
+        val e = a.getDouble("easting") + f * (b.getDouble("easting") - a.getDouble("easting"))
+        val n = a.getDouble("northing") + f * (b.getDouble("northing") - a.getDouble("northing"))
+        fun num(arr: JSONArray, i: Int, fmt: String) = if (i < 0 || arr.isNull(i)) "no data" else String.format(Locale.US, fmt, arr.getDouble(i))
+        val dem = p.getJSONObject("dem")
+        val i = stepIndex(dem.getJSONArray("d0"), dem.getJSONArray("d1"), dm)
+        readout.text = buildString {
+            append(String.format(Locale.US, "d %.0f m \u00B7 E %.0f N %.0f", dm, e, n))
+            if (i >= 0) append(" \u00B7 cell c").append(dem.getJSONArray("col").getInt(i)).append(" r").append(dem.getJSONArray("row").getInt(i))
+            append('\n')
+            append("Elevation ").append(num(dem.getJSONArray("elevation"), i, "%.1f m"))
+            append(" \u00B7 Relief ").append(num(dem.getJSONArray("relief"), i, "%+.2f m"))
+            p.optJSONObject("sat")?.let { s ->
+                val st = s.getJSONObject("steps")
+                val k = stepIndex(st.getJSONArray("d0"), st.getJSONArray("d1"), dm)
+                val unit = s.optString("units").takeIf { it.isNotBlank() && it != "null" }?.let { " $it" } ?: ""
+                append('\n').append(satLabels[s.optString("product")]?.substringBefore(" (") ?: s.optString("product"))
+                    .append(' ').append(num(st.getJSONArray("value"), k, "%.3f") + if (k >= 0 && !st.getJSONArray("value").isNull(k)) unit else "")
+                    .append(" (its own cell)")
+            }
+            append("\nStored cell values, not interpolated.")
+        }
+    }
+
+    private fun closeProfile() {
+        profile = null; lineAsk = null; preset = null; pickA = null
+        view.pickMode = false
+        view.profileA = null; view.profileB = null; view.profileCursor = null; view.invalidate()
+        profileView.clear()
+        profilePanel.visibility = View.GONE
+        updateInfo()
+    }
+
+    private fun exportProfile() {
+        val sid = sessionId ?: return
+        val line = lineAsk ?: return
+        val product = profileProduct()
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val r = withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("profile_section_mobile").callAttr("export_profile_json", offlineDataRoot, sid,
+                        line[0].toDouble(), line[1].toDouble(), line[2].toDouble(), line[3].toDouble(), product).toString())
+                }
+                if (r.has("error")) showError(r.getString("error")) else {
+                    val ps = r.getJSONObject("paths")
+                    val text = ps.keys().asSequence().joinToString("\n\n") { k -> "$k:\n" + ps.getString(k) }
+                    AlertDialog.Builder(this@FinalImageActivity)
+                        .setTitle("Profile exported")
+                        .setMessage("$text\n\nCSV = one row per DEM cell crossed (exact values, gaps left empty). " +
+                            "The PNG prints the vertical exaggeration on each metre panel; the provenance file " +
+                            "records the source tile and the SHA-256 of every output.")
+                        .setPositiveButton("OK", null).show()
+                }
+            } catch (e: PyException) {
+                showError(e.message ?: "profile export failed")
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
     private fun showError(msg: String) {
         AlertDialog.Builder(this).setTitle("Final Image")
             .setMessage(msg.removePrefix("Exception: ") +
@@ -558,7 +806,7 @@ class FinalImageActivity : AppCompatActivity() {
 
     private fun setLoading(on: Boolean) {
         progress.visibility = if (on) View.VISIBLE else View.GONE
-        listOf(modeBtn, colourBtn, windowBtn, satBtn).forEach { it.isEnabled = !on }
+        listOf(modeBtn, colourBtn, windowBtn, satBtn, profileBtn).forEach { it.isEnabled = !on }
     }
 
     private fun trimNum(v: Double) = if (v == Math.floor(v)) v.toLong().toString() else String.format(Locale.US, "%.1f", v)

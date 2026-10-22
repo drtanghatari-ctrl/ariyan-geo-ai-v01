@@ -109,7 +109,8 @@ def open_final_image_json(db_root: str, candidate_id: str, half_size_m: float = 
         dx, dy = grid.cell_size_m()
         sid = uuid.uuid4().hex[:12]
         with _LOCK:
-            _SESSIONS[sid] = {"result": res, "candidate_id": candidate_id, "t": time.time()}
+            _SESSIONS[sid] = {"result": res, "candidate_id": candidate_id, "t": time.time(),
+                             "markers": markers, "focus": (fx, fy)}   # fa-v1 profile
             while len(_SESSIONS) > _MAX_SESSIONS:
                 oldest = min(_SESSIONS, key=lambda k: _SESSIONS[k]["t"])
                 _SESSIONS.pop(oldest)
