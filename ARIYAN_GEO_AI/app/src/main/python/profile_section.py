@@ -240,10 +240,13 @@ def candidates_near(markers: Sequence[Dict], utm: _Utm, a: Tuple[float, float],
 
 
 def build_profile(result: Dict, ax: float, ay: float, bx: float, by: float, *,
-                  markers: Sequence[Dict] = (), sat: Optional[Dict] = None) -> Dict:
+                  markers: Sequence[Dict] = (), sat: Optional[Dict] = None,
+                  derived: Optional[Dict] = None) -> Dict:
     """result: an fi-v1 build_final_image result. (ax, ay)->(bx, by) in DEM
     grid-pixel coordinates. sat (optional): {"product", "label", "units",
     "values" (H,W), "placement" {x0,y0,sx,sy}, "scene_date", "provenance"}.
+    derived (optional, fa-v2): {"label", "units", "values" (H,W) on the DEM's
+    own lattice, "filter", "params"} -- a DERIVED filter trace.
     Returns the profile (plain JSON-able dict)."""
     grid: fi.Grid = result["grid"]
     h, w = grid.shape
@@ -303,7 +306,41 @@ def build_profile(result: Dict, ax: float, ay: float, bx: float, by: float, *,
                       "cells_no_data": sum(1 for v in st["value"] if v is None),
                       "axis": list(axis_range(st["value"], min_span=sat.get("min_span", 1e-6))),
                       "provenance": sat.get("provenance")}
+    if derived is not None:
+        dv = derived["values"]
+        if dv.shape != grid.shape:
+            raise ValueError("derived layer is not on this DEM window")
+        steps = {k: dem[k] for k in ("d0", "d1", "col", "row")}
+        steps["value"] = [_r(dv[r, c], 4) for c, r in zip(dem["col"], dem["row"])]
+        out["derived"] = {"label": derived["label"], "units": derived.get("units"),
+                          "filter": derived.get("filter"), "params": derived.get("params"),
+                          "steps": steps, "cells": len(steps["col"]),
+                          "cells_no_data": sum(1 for v in steps["value"] if v is None),
+                          "axis": list(axis_range(steps["value"], min_span=1e-3))}
     return out
+
+
+_ASCII = {"\u03c3": "SIGMA", "\u00d7": "X", "\u2212": "-", "\u00b0": " DEG", "\u00b7": "*"}
+
+
+def ascii_text(s: str) -> str:
+    """Bitmap-font-safe version of a label (PNG exports)."""
+    for k, v in _ASCII.items():
+        s = s.replace(k, v)
+    return "".join(ch if ch.upper() in _FONT_ROWS else "?" for ch in s).upper()
+
+
+def derived_csv(profile: Dict) -> bytes:
+    d = profile["derived"]
+    st = d["steps"]
+    buf = io.StringIO()
+    wr = csv.writer(buf, lineterminator="\n")
+    wr.writerow(["# " + d["label"] + (f" [{d['units']}]" if d.get("units") else "")])
+    wr.writerow(["step", "distance_from_m", "distance_to_m", "col", "row", "derived_value"])
+    for i, (c, r) in enumerate(zip(st["col"], st["row"])):
+        wr.writerow([i + 1, st["d0"][i], st["d1"][i], c, r,
+                     "" if st["value"][i] is None else st["value"][i]])
+    return buf.getvalue().encode("utf-8")
 
 
 def value_at(profile: Dict, d_m: float) -> Dict:
@@ -562,12 +599,13 @@ def render_png(profile: Dict, created_utc: str = "", width: int = 1400) -> Tuple
     """The profile drawn as an RGBA image with its provenance block. Returns
     (rgba, {"vertical_exaggeration": {...}})."""
     has_sat = "sat" in profile
+    has_der = "derived" in profile
     panel_h = 300
     left, right = 110, width - 30
     head = 70
     prov_lines = _prov_lines(profile, created_utc)
     foot = 40 + 20 * len(prov_lines)
-    height = head + panel_h * (3 if has_sat else 2) + 50 + foot
+    height = head + panel_h * (2 + int(has_sat) + int(has_der)) + 50 + foot
     cv = _Canvas(width, height)
     a, b = profile["a"], profile["b"]
     cv.text(left, 14, f"PROFILE A-A'  {profile['length_m']:.0f} M  BEARING "
@@ -597,6 +635,13 @@ def render_png(profile: Dict, created_utc: str = "", width: int = 1400) -> Tuple
                st["d0"], st["d1"], st["value"], s["axis"], L, (0, 130, 60),
                profile["candidates"], metres=False)
         y += panel_h
+    if has_der:
+        d = profile["derived"]
+        st = d["steps"]
+        _panel(cv, y, panel_h, left, right, ascii_text(d["label"]) + "  (DEM CELLS)",
+               st["d0"], st["d1"], st["value"], d["axis"], L, (130, 40, 150),
+               profile["candidates"], metres=False)
+        y += panel_h
     for t in _nice_ticks(0, L, 8):
         x = left + t / L * (right - left)
         cv.line(x, y - 12, x, y - 6, (0, 0, 0))
@@ -622,6 +667,10 @@ def _prov_lines(profile: Dict, created_utc: str) -> List[str]:
         s = profile["sat"]
         lines.insert(3, f"SAT {s['product']} SCENE {s.get('scene_date') or '-'} ON ITS OWN CELLS "
                         f"({s['cells_no_data']} OF {s['cells']} EMPTY)")
+    if "derived" in profile:
+        d = profile["derived"]
+        lines.insert(3, f"{ascii_text(d['label'])} - DISPLAY ONLY ({d['cells_no_data']} OF "
+                        f"{d['cells']} NO DATA)")
     return lines
 
 
@@ -633,11 +682,15 @@ def export_profile(profile: Dict, grid: fi.Grid, out_dir: str, stem: str,
     files: Dict[str, bytes] = {"csv": profile_csv(profile, grid)}
     if "sat" in profile:
         files["sat_csv"] = sat_csv(profile)
+    if "derived" in profile:
+        files["derived_csv"] = derived_csv(profile)
     rgba, meta = render_png(profile, created_utc)
     files["png"] = fi.encode_png(rgba)
     names = {"csv": stem + ".csv", "png": stem + ".png"}
     if "sat" in profile:
         names["sat_csv"] = f"{stem}_{profile['sat']['product'].lower()}.csv"
+    if "derived" in profile:
+        names["derived_csv"] = f"{stem}_derived_{profile['derived']['filter']}.csv"
     paths = {}
     for k, data in files.items():
         p = os.path.join(out_dir, names[k])
@@ -669,6 +722,13 @@ def export_profile(profile: Dict, grid: fi.Grid, out_dir: str, stem: str,
                              "layer_provenance": s.get("provenance"),
                              "note": "read from the image already saved on the phone; "
                                      "nothing downloaded for this profile"}
+    if "derived" in profile:
+        d = profile["derived"]
+        prov["derived"] = {"label": d["label"], "filter": d["filter"], "params": d["params"],
+                           "units": d.get("units"), "cells": d["cells"],
+                           "cells_no_data": d["cells_no_data"],
+                           "note": "DERIVED filter of the same DEM, display only; raw DEM, "
+                                   "candidates and scores unchanged"}
     paths["provenance"] = os.path.join(out_dir, stem + ".provenance.json")
     with open(paths["provenance"], "w", encoding="utf-8") as f:
         json.dump(prov, f, indent=2, sort_keys=True)

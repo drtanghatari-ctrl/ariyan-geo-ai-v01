@@ -33,8 +33,18 @@ def _session(sid: str) -> Dict:
     return s
 
 
+DERIVED = "DERIVED"          # fa-v2: the active filter, not a satellite layer
+
+
+def _derived(sid: str, product: str) -> Optional[Dict]:
+    if product != DERIVED:
+        return None
+    import dem_filters_mobile as dfm
+    return dfm.active(sid)
+
+
 def _sat(sid: str, product: str) -> Optional[Dict]:
-    if not product:
+    if not product or product == DERIVED:
         return None
     import sat_image as si
     import sat_image_mobile as sim
@@ -58,7 +68,8 @@ def _build(sid: str, ax: float, ay: float, bx: float, by: float, product: str) -
     s = _session(sid)
     res = s["result"]
     return ps.build_profile(res, float(ax), float(ay), float(bx), float(by),
-                            markers=s.get("markers", ()), sat=_sat(sid, product))
+                            markers=s.get("markers", ()), sat=_sat(sid, product),
+                            derived=_derived(sid, product))
 
 
 def profile_json(sid: str, ax: float, ay: float, bx: float, by: float, product: str = "") -> str:

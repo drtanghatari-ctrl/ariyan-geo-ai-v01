@@ -91,6 +91,13 @@ class FinalImageActivity : AppCompatActivity() {
     private var preset: String? = null
     private var pickA: FloatArray? = null
 
+    // fa-v2 (2026-10-22): DERIVED filters of the same DEM (display only).
+    // One overlay at a time: a filter and a satellite layer share the map's overlay slot.
+    private lateinit var filterBtn: MaterialButton
+    private var filterName: String? = null
+    private var filterParams: JSONObject? = null
+    private var filterMeta: JSONObject? = null
+
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -104,6 +111,7 @@ class FinalImageActivity : AppCompatActivity() {
     override fun onDestroy() {
         sessionId?.let { sid ->
             runCatching { python.getModule("sat_image_mobile").callAttr("close_layers", sid) }
+            runCatching { python.getModule("dem_filters_mobile").callAttr("close_filter", sid) }
             runCatching { python.getModule("final_image_mobile").callAttr("close_session", sid) }
         }
         if (::view.isInitialized) view.clearImage()
@@ -143,6 +151,8 @@ class FinalImageActivity : AppCompatActivity() {
         buttons.addView(windowBtn)
         satBtn = button("Satellite: off") { chooseSatellite() }
         buttons.addView(satBtn)
+        filterBtn = button("Filters: off") { chooseFilter() }
+        buttons.addView(filterBtn)
         profileBtn = button("Profile") { chooseProfile() }
         buttons.addView(profileBtn)
         buttons.addView(button("Layers") { chooseLayers() })
@@ -266,7 +276,9 @@ class FinalImageActivity : AppCompatActivity() {
         // a hand-drawn A-A' only fits the window it was drawn on; presets are re-run
         if (!keepView && preset == null && lineAsk != null) closeProfile()
         val sp = satProduct
+        val fn = filterName
         if (sp != null) openSatellite(sp, fetch = false, quiet = true)   // refreshes the profile itself
+        else if (fn != null) openFilter(fn, filterParams ?: JSONObject(), quiet = true)
         else refreshProfile(true)
     }
 
@@ -304,6 +316,7 @@ class FinalImageActivity : AppCompatActivity() {
     private fun updateLegend(m: JSONObject) {
         colourBtn.text = "Colour: " + if (colourBy == "relief") "relief" else "elevation"
         satMeta?.let { updateSatLegend(it); return }
+        filterMeta?.let { updateFilterLegend(it); return }
         val ramp = m.getJSONArray("ramp")
         val colours = IntArray(ramp.length()) { i ->
             val s = ramp.getJSONArray(i)
@@ -336,6 +349,7 @@ class FinalImageActivity : AppCompatActivity() {
         }
         sb.append(m.optString("statement"))
         satMeta?.let { sb.insert(0, satNotes(it) + "\n\n") }
+        filterMeta?.let { sb.insert(0, filterNotes(it) + "\n\n") }
         notes.text = sb.toString()
     }
 
@@ -549,6 +563,7 @@ class FinalImageActivity : AppCompatActivity() {
                     }
                     else -> {
                         val pl = r.getJSONObject("placement")
+                        if (filterName != null) dropFilter()
                         satProduct = product; satMeta = r
                         view.setOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
                             pl.getDouble("sx").toFloat(), pl.getDouble("sy").toFloat())
@@ -595,6 +610,158 @@ class FinalImageActivity : AppCompatActivity() {
         val pv = r.optJSONObject("provenance")
         if (pv != null) append("File ").append(pv.optString("file")).append(" sha256 ")
             .append(pv.optString("sha256").take(12)).append("\u2026 \u00B7 ").append(pv.optString("version"))
+    }
+
+    // ---------------------------------------------------------------- DEM filters (fa-v2)
+
+    private val filterTitles = linkedMapOf(
+        "smooth" to "Smooth (Gaussian / median)",
+        "residual" to "Residual relief (local high-pass)",
+        "curvature" to "Curvature (convex / concave)",
+        "slope" to "Slope (degrees)",
+        "direction" to "Direction (aspect / directional derivative)")
+
+    private fun chooseFilter() {
+        if (sessionId == null) return
+        val keys = listOf<String?>(null) + filterTitles.keys
+        val items = listOf("Off (plain terrain)") + filterTitles.values
+        val b = AlertDialog.Builder(this)
+            .setTitle("Filters \u00B7 DERIVED, display only")
+            .setSingleChoiceItems(items.toTypedArray(), keys.indexOf(filterName).coerceAtLeast(0)) { d, i ->
+                d.dismiss()
+                val k = keys[i]
+                if (k == null) clearFilter() else chooseFilterSettings(k)
+            }
+        if (filterMeta != null) {
+            b.setNeutralButton("Opacity") { _, _ -> chooseOpacity() }
+            b.setPositiveButton("Export") { _, _ -> exportFilter() }
+        }
+        b.setNegativeButton("Cancel", null).show()
+    }
+
+    /** every option is one of the fixed, tested settings; nothing is free-typed */
+    private fun chooseFilterSettings(name: String) {
+        val opts: List<Pair<String, JSONObject>> = when (name) {
+            "smooth" -> listOf(1, 2, 3).map { "Gaussian \u03C3 = $it cell" + (if (it > 1) "s" else "") to
+                    JSONObject().put("method", "gaussian").put("sigma", it) } +
+                listOf(3, 5).map { "Median $it\u00D7$it" to JSONObject().put("method", "median").put("size", it) }
+            "residual" -> listOf(60, 150, 300).map { "Radius $it m (DEM minus local mean)" to JSONObject().put("radius_m", it) }
+            "curvature" -> listOf(0 to "none", 1 to "Gaussian \u03C3 1", 2 to "Gaussian \u03C3 2").map { (v, t) ->
+                "Pre-smooth: $t" to JSONObject().put("smooth_sigma", v) }
+            "direction" -> listOf("Aspect (downslope bearing, grey = flat)" to JSONObject().put("mode", "aspect")) +
+                listOf(0, 45, 90, 135).map { "Directional derivative toward $it\u00B0" to
+                    JSONObject().put("mode", "derivative").put("bearing", it) }
+            else -> emptyList()
+        }
+        if (opts.isEmpty()) { openFilter(name, JSONObject(), quiet = false); return }
+        AlertDialog.Builder(this).setTitle(filterTitles[name] ?: name)
+            .setItems(opts.map { it.first }.toTypedArray()) { _, i -> openFilter(name, opts[i].second, quiet = false) }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    /** forget the filter without touching the overlay (the caller replaces or clears it) */
+    private fun dropFilter() {
+        sessionId?.let { sid -> runCatching { python.getModule("dem_filters_mobile").callAttr("close_filter", sid) } }
+        filterName = null; filterParams = null; filterMeta = null
+        filterBtn.text = "Filters: off"
+    }
+
+    private fun clearFilter() {
+        val had = filterMeta != null
+        dropFilter()
+        if (had) view.setOverlay(null, 0f, 0f, 1f, 1f)
+        meta?.let { updateLegend(it); updateNotes(it) }
+        refreshProfile(true)
+    }
+
+    private fun openFilter(name: String, params: JSONObject, quiet: Boolean) {
+        val sid = sessionId ?: return
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val (r, bmp) = withContext(Dispatchers.Default) {
+                    val mod = python.getModule("dem_filters_mobile")
+                    val j = JSONObject(mod.callAttr("open_filter_json", sid, name, params.toString()).toString())
+                    if (j.has("error")) Pair(j, null) else {
+                        val bytes = mod.callAttr("filter_rgba", sid).toJava(ByteArray::class.java)
+                        val bm = Bitmap.createBitmap(j.getInt("width"), j.getInt("height"), Bitmap.Config.ARGB_8888)
+                        bm.copyPixelsFromBuffer(ByteBuffer.wrap(bytes))
+                        Pair(j, bm)
+                    }
+                }
+                if (r.has("error") || bmp == null) {
+                    if (quiet) clearFilter()
+                    showError(r.optString("error", "filter failed"))
+                    return@launch
+                }
+                // one overlay at a time: the filter replaces a satellite layer (it is not deleted, just hidden)
+                if (satMeta != null) { satProduct = null; satMeta = null; satBtn.text = "Satellite: off" }
+                filterName = name; filterParams = r.optJSONObject("params") ?: params; filterMeta = r
+                val pl = r.getJSONObject("placement")
+                view.setOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
+                    pl.getDouble("sx").toFloat(), pl.getDouble("sy").toFloat())
+                filterBtn.text = "Filters: " + r.optString("label").removePrefix("DERIVED: ").substringBefore(" (")
+                updateFilterLegend(r)
+                meta?.let { updateNotes(it) }
+                refreshProfile(true)
+            } catch (e: PyException) {
+                showError(e.message ?: "filter failed")
+            } catch (e: OutOfMemoryError) {
+                showError("Not enough memory for this filter; choose a smaller window.")
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    private fun updateFilterLegend(r: JSONObject) {
+        val lg = r.getJSONObject("legend")
+        val ramp = lg.getJSONArray("ramp")
+        val colours = IntArray(ramp.length()) { i ->
+            val s = ramp.getJSONArray(i)
+            android.graphics.Color.rgb(s.getInt(1), s.getInt(2), s.getInt(3))
+        }
+        legendBar.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, colours)
+        val circular = lg.optString("kind") == "circular"
+        legendText.text = if (circular)
+            String.format(Locale.US, "%s  0\u00B0 \u2026 360\u00B0 (N\u2192E\u2192S\u2192W\u2192N), grey = flat, hatched = no data", r.optString("label"))
+        else String.format(Locale.US, "%s  %.3g \u2026 %.3g %s  (hatched = no data)",
+            r.optString("label"), lg.getDouble("vmin"), lg.getDouble("vmax"), lg.optString("units"))
+    }
+
+    private fun filterNotes(r: JSONObject): String = buildString {
+        append("FILTER ").append(r.optString("label")).append(" (").append(r.optString("version")).append(")\n")
+        append(String.format(Locale.US, "%d of %d cells have a value; %d-cell border and cells beside gaps are no data.",
+            r.optInt("cells") - r.optInt("cells_no_data"), r.optInt("cells"), r.optInt("border_cells")))
+        if (r.optInt("flat_cells") > 0) append(" ${r.optInt("flat_cells")} cells are flat (grey, measured).")
+        append('\n')
+        r.optJSONArray("notes")?.let { a -> for (i in 0 until a.length()) append("\u2022 ").append(a.optString(i)).append('\n') }
+        append(r.optString("statement"))
+    }
+
+    private fun exportFilter() {
+        val sid = sessionId ?: return
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val r = withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("dem_filters_mobile").callAttr("export_filter_json", offlineDataRoot, sid).toString())
+                }
+                if (r.has("error")) showError(r.getString("error")) else {
+                    val ps = r.getJSONObject("paths")
+                    val text = ps.keys().asSequence().joinToString("\n\n") { k -> "$k:\n" + ps.getString(k) }
+                    AlertDialog.Builder(this@FinalImageActivity)
+                        .setTitle("Filter exported \u00B7 DERIVED")
+                        .setMessage("$text\n\nPNG and GeoTIFF are a DERIVED view of the DEM, labelled so in the provenance file " +
+                            "with the filter, its settings, the method rules and the SHA-256 of both images. The raw DEM is unchanged.")
+                        .setPositiveButton("OK", null).show()
+                }
+            } catch (e: PyException) {
+                showError(e.message ?: "filter export failed")
+            } finally {
+                setLoading(false)
+            }
+        }
     }
 
     // ---------------------------------------------------------------- profile & section (fa-v1)
@@ -648,7 +815,11 @@ class FinalImageActivity : AppCompatActivity() {
     }
 
     /** product shown on the map, if any; the profile only reads layers already open */
-    private fun profileProduct(): String = if (satMeta != null) satProduct ?: "" else ""
+    private fun profileProduct(): String = when {
+        satMeta != null -> satProduct ?: ""
+        filterMeta != null -> "DERIVED"
+        else -> ""
+    }
 
     /** re-run the open profile on the current session; a new window drops it (its line no longer fits) */
     private fun refreshProfile(sameWindow: Boolean) {
@@ -757,6 +928,13 @@ class FinalImageActivity : AppCompatActivity() {
                     .append(' ').append(num(st.getJSONArray("value"), k, "%.3f") + if (k >= 0 && !st.getJSONArray("value").isNull(k)) unit else "")
                     .append(" (its own cell)")
             }
+            p.optJSONObject("derived")?.let { dv ->
+                val st = dv.getJSONObject("steps")
+                val k = stepIndex(st.getJSONArray("d0"), st.getJSONArray("d1"), dm)
+                append("\nDERIVED ").append(dv.optString("label")).append(": ")
+                    .append(num(st.getJSONArray("value"), k, "%.3f"))
+                if (k >= 0 && !st.getJSONArray("value").isNull(k)) append(' ').append(dv.optString("units"))
+            }
             append("\nStored cell values, not interpolated.")
         }
     }
@@ -809,7 +987,7 @@ class FinalImageActivity : AppCompatActivity() {
 
     private fun setLoading(on: Boolean) {
         progress.visibility = if (on) View.VISIBLE else View.GONE
-        listOf(modeBtn, colourBtn, windowBtn, satBtn, profileBtn).forEach { it.isEnabled = !on }
+        listOf(modeBtn, colourBtn, windowBtn, satBtn, filterBtn, profileBtn).forEach { it.isEnabled = !on }
     }
 
     private fun trimNum(v: Double) = if (v == Math.floor(v)) v.toLong().toString() else String.format(Locale.US, "%.1f", v)

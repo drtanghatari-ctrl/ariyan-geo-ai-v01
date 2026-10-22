@@ -124,6 +124,13 @@ class ProfileView(context: Context) : View(context) {
                 "${satLabel ?: s.optString("product")}$unit \u00B7 scene ${s.optString("scene_date", "-")} \u00B7 own cells",
                 Color.rgb(90, 210, 120), false)
         }
+        // fa-v2: the active DERIVED filter, read at the same DEM cells as the elevation trace
+        p.optJSONObject("derived")?.let { dv ->
+            val st = dv.getJSONObject("steps"); val ax = dv.getJSONArray("axis")
+            val unit = dv.optString("units").takeIf { it.isNotBlank() && it != "null" }?.let { " ($it)" } ?: ""
+            list += Trace(arr(st.getJSONArray("d0")), arr(st.getJSONArray("d1")), nul(st.getJSONArray("value")),
+                ax.getDouble(0), ax.getDouble(1), "${dv.optString("label")}$unit", Color.rgb(190, 110, 230), false)
+        }
         traces = list
         val c = p.getJSONArray("candidates")
         cands = (0 until c.length()).map { i ->
