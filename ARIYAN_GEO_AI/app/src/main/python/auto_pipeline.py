@@ -80,6 +80,9 @@ COPERNICUS_PAUSE_S = 30 * 60
 NO_LIVE_DEM_PAUSE_S = 60 * 60
 
 
+JOB_BUSY_PAUSE_S = 10 * 60   # job-lease-v1
+
+
 class PauseStep(Exception):
     def __init__(self, reason, retry_after_s, detail=None):
         super().__init__(reason)
@@ -210,10 +213,16 @@ def _step_sweep(root, run, creds, deadline):
         prog = db.get_wide_area_search_job_progress(root, run["job_id"])
         if prog.get("pending", 0) == 0:
             return {"note": "sweep already complete", "progress": prog}
-    payload = json.loads(was.run_wide_area_search_job(
-        root, run["job_id"], api_key=creds["api_key"], demtype=run["options"]["sweep_demtype"],
-        dem_only=True, dem_offline_first=True,
-        read_land_cover=False))   # lc-auto-v1: the land_cover step does it, with retries
+    try:
+        payload = json.loads(was.run_wide_area_search_job(
+            root, run["job_id"], api_key=creds["api_key"], demtype=run["options"]["sweep_demtype"],
+            dem_only=True, dem_offline_first=True,
+            read_land_cover=False))   # lc-auto-v1: the land_cover step does it, with retries
+    except db.JobBusyError as busy:
+        # job-lease-v1: another runner (an earlier worker execution whose
+        # Python call is still going, or a manual Start) is sweeping this
+        # job. Wait for it instead of sweeping every tile a second time.
+        raise PauseStep("sweep: " + str(busy), JOB_BUSY_PAUSE_S, {"job_busy": True})
     if payload.get("paused"):
         raise PauseStep("sweep: offline guard paused -- " + str(payload.get("pause_reason")),
                         NO_LIVE_DEM_PAUSE_S, {"sweep": payload, "offline_guard_paused": True})
