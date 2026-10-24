@@ -1556,7 +1556,28 @@ def run_wide_area_search_job(
     checks were missing (also shown live on the job screen via the status
     file's "health" text -- see _render_run_health()).
     """
+    # job-lease-v1 (2026-10-24): one live runner per job, across the
+    # service AND the automatic run. Taken BEFORE anything is armed or the
+    # status file is touched, so a refused second start changes nothing.
+    # Raises db.JobBusyError (see grand_project_db.acquire_job_run_lease).
+    lease_owner = db.acquire_job_run_lease(data_root, job_id)
+    try:
+        return _run_wide_area_search_job_leased(
+            data_root, job_id, radius_m, grid_size, api_key, demtype,
+            ndvi_client_id, ndvi_client_secret, dem_only, dem_offline_first,
+            read_land_cover, lease_owner,
+        )
+    finally:
+        db.release_job_run_lease(data_root, job_id, lease_owner)
+
+
+def _run_wide_area_search_job_leased(
+    data_root, job_id, radius_m, grid_size, api_key, demtype,
+    ndvi_client_id, ndvi_client_secret, dem_only, dem_offline_first,
+    read_land_cover, lease_owner,
+) -> str:
     _run_state.summary = None
+    _run_state.lease = (data_root, job_id, lease_owner)
     sh_backoff.arm()
     dem_source_mobile.arm_live_dem_quota_breaker()
     # pass1-save-once (2026-10-06): the same save-once DEM library Pass 2
@@ -1578,6 +1599,7 @@ def run_wide_area_search_job(
                            f"{type(exc).__name__}: {exc}"[:300])
         raise
     finally:
+        _run_state.lease = None
         copernicus = sh_backoff.disarm()
         live_dem = dem_source_mobile.disarm_live_dem_quota_breaker()
         dem_library = dem_source_mobile.disarm_dem_library()
@@ -1862,6 +1884,15 @@ def _run_wide_area_search_job_impl(
             f"tile {tile_index + 1}/{total}: running",
             health=_render_run_health(tally),
         )
+
+        # job-lease-v1: heartbeat, and a fresh status re-read so a tile that
+        # is no longer PENDING (retry screen, another tool) is never
+        # investigated a second time.
+        _lease = getattr(_run_state, "lease", None)
+        if _lease:
+            db.heartbeat_job_run_lease(*_lease)
+        if not db.tile_is_pending(data_root, tile_id):
+            continue
 
         db.mark_tile_started(data_root, tile_id)
 
