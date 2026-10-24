@@ -582,6 +582,19 @@ _SCHEMA_STATEMENTS = [
     )
     """,
     # ================== END ADDED 2026-09-17, WIDE-AREA SEARCH ==================
+    # job-lease-v1 (2026-10-24): one live runner per wide-area search job.
+    # See acquire_job_run_lease() below for why.
+    """
+    CREATE TABLE IF NOT EXISTS wide_area_search_job_lease (
+        job_id        TEXT PRIMARY KEY,
+        owner         TEXT NOT NULL,
+        owner_pid     INTEGER NOT NULL,
+        owner_thread  INTEGER NOT NULL,
+        acquired_at   TEXT NOT NULL,
+        heartbeat_at  TEXT NOT NULL,
+        heartbeat_ts  REAL NOT NULL
+    )
+    """,
 ]
 
 
@@ -1636,6 +1649,156 @@ def mark_tile_failed(db_root: str, tile_id: str, error_message: str) -> None:
             )
     finally:
         conn.close()
+
+
+# ===================== job-lease-v1 (2026-10-24) =====================
+# WHY: the Golestan job (bb3530, Oct 23) recorded 778 investigations for
+# 432 tiles. Two sweeps ran the SAME job at the same time: the per-tile
+# status only changes to DONE when a tile finishes, so two runners both
+# read the same PENDING list and each investigated every tile; the second
+# mark_tile_done() overwrote the first investigation_id, leaving the other
+# investigation (and its candidates) untracked. The in-process guard in
+# WideAreaSearchService.kt only stops a second SERVICE start; it does not
+# see the automatic run (AutoPipelineWorker), and WorkManager can start a
+# new worker execution while the previous one's Python call is still
+# running (a stopped worker cannot interrupt a Chaquopy call; REPLACE on
+# re-enqueue does the same). This lease lives in the database, so every
+# path (service, auto run, tests) sees it.
+#
+# A lease is held by (process id, thread id, random token). It can be
+# taken over only when its holder is provably gone: its heartbeat is older
+# than JOB_LEASE_STALE_S, or its process is dead, or (same process) its
+# thread is no longer alive. The runner heartbeats at every tile.
+
+JOB_LEASE_STALE_S = 30 * 60
+
+
+class JobBusyError(RuntimeError):
+    """Raised when another live runner already holds this job's lease."""
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True       # exists, owned by someone else
+    except Exception:
+        return True       # unknown -> assume alive (never steal on doubt)
+    return True
+
+
+def _thread_alive(ident: int) -> bool:
+    import threading
+    return any(t.ident == ident for t in threading.enumerate())
+
+
+def _lease_holder_gone(row: Dict[str, Any], now_ts: float) -> bool:
+    if now_ts - float(row["heartbeat_ts"] or 0) > JOB_LEASE_STALE_S:
+        return True
+    pid = int(row["owner_pid"] or 0)
+    if pid != os.getpid():
+        return not _pid_alive(pid)
+    return not _thread_alive(int(row["owner_thread"] or 0))
+
+
+def acquire_job_run_lease(db_root: str, job_id: str) -> str:
+    """Takes the run lease for one wide-area search job and returns the
+    owner token. Raises JobBusyError (nothing changed) if a live runner
+    already holds it. Atomic: BEGIN IMMEDIATE serialises two acquirers."""
+    import threading
+    import time
+    owner = f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex[:8]}"
+    conn = get_connection(db_root)
+    try:
+        initialize_schema(conn)
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            now_ts = time.time()
+            row = conn.execute(
+                "SELECT * FROM wide_area_search_job_lease WHERE job_id = ?", (job_id,)
+            ).fetchone()
+            if row is not None and not _lease_holder_gone(dict(row), now_ts):
+                conn.execute("ROLLBACK")
+                age = int(now_ts - float(row["heartbeat_ts"] or 0))
+                raise JobBusyError(
+                    f"job {job_id[:6]} is already being processed by another run "
+                    f"(started {row['acquired_at'][:16]}Z, last activity {age // 60} min ago). "
+                    f"Not starting a second copy -- it would investigate every tile twice."
+                )
+            now = _now_iso()
+            conn.execute(
+                "INSERT OR REPLACE INTO wide_area_search_job_lease "
+                "(job_id, owner, owner_pid, owner_thread, acquired_at, heartbeat_at, heartbeat_ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (job_id, owner, os.getpid(), threading.get_ident(), now, now, now_ts),
+            )
+            conn.execute("COMMIT")
+        except JobBusyError:
+            raise
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        return owner
+    finally:
+        conn.close()
+
+
+def heartbeat_job_run_lease(db_root: str, job_id: str, owner: str) -> None:
+    """Refreshes the lease. Never raises (a missed heartbeat only shortens
+    the time before a stale takeover)."""
+    import time
+    try:
+        conn = get_connection(db_root)
+        try:
+            with conn:
+                conn.execute(
+                    "UPDATE wide_area_search_job_lease SET heartbeat_at = ?, heartbeat_ts = ? "
+                    "WHERE job_id = ? AND owner = ?",
+                    (_now_iso(), time.time(), job_id, owner),
+                )
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def release_job_run_lease(db_root: str, job_id: str, owner: str) -> None:
+    """Releases the lease if (and only if) this owner still holds it.
+    Never raises."""
+    try:
+        conn = get_connection(db_root)
+        try:
+            with conn:
+                conn.execute(
+                    "DELETE FROM wide_area_search_job_lease WHERE job_id = ? AND owner = ?",
+                    (job_id, owner),
+                )
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+
+def tile_is_pending(db_root: str, tile_id: str) -> bool:
+    """Fresh re-read of one tile's status just before it is processed."""
+    conn = get_connection(db_root)
+    try:
+        row = conn.execute(
+            "SELECT status FROM wide_area_search_tile WHERE id = ?", (tile_id,)
+        ).fetchone()
+        return row is not None and row["status"] == "PENDING"
+    finally:
+        conn.close()
+
+# =================== END job-lease-v1 ===================
 
 
 def get_wide_area_search_job_progress(db_root: str, job_id: str) -> Dict[str, int]:
