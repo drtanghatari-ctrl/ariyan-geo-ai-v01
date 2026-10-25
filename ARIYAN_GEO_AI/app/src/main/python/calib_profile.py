@@ -1,3 +1,4 @@
+
 """
 calib_profile.py
 
@@ -5,6 +6,14 @@ Part of ARIYAN GEO AI -- Phase 5b (calib-v1 adoption) and 5c (human-outcome
 counter). Added 2026-10-02 after the frozen bench (calib_bench.py, md5
 851df73216d2b1bebd34f93a2b9419ca) recorded PASS (INDICATIVE) and the user
 approved adoption.
+
+cb-v1.1 (2026-10-25): the 16 Oct 2026 database loss removed the bench jobs,
+the bench event and the adoption row. The bench was re-run on new jobs with
+the same boxes and settings (32c858->e8bc0a, 32d423->a3a512,
+f43d36->03166c). calib_bench.py changed only in its ids, notes and version
+string (calib-bench-v1.1); its md5 is now
+21ba90a307f4d9bc6424d26170b6fbdb, and that is the md5 the adoption gate
+requires. The re-run must reproduce the 2026-10-02 numbers exactly.
 
 WHAT A PROFILE DOES -- AND DOES NOT DO
 An active profile adds ONE label to candidates whose stored DEM z-score
@@ -20,10 +29,10 @@ one row, revoking writes another. The newest row decides what is active.
 Each change is also written to the timeline.
 
 ADOPTION GATE: calib-v1 can only be adopted if the timeline holds a
-CALIBRATION_BENCH event written by the frozen bench script (md5 above)
-that reads PASS and chose |z| >= 6. The event's id and full text are
-stored inside the profile, so the profile always points back at the bench
-run it came from.
+CALIBRATION_BENCH event written by the frozen bench script (md5
+FROZEN_BENCH_MD5 below) that reads PASS and chose |z| >= 6. The event's id
+and full text are stored inside the profile, so the profile always points
+back at the bench run it came from.
 
 SCOPE (shown on the profile screen): the threshold was chosen and tested on
 DEM-only, offline-first Copernicus GLO-30 runs in Khuzestan and Kangavar.
@@ -46,9 +55,9 @@ import grand_project_db as db
 import grand_project_review as review
 
 PROFILE_NAME = "calib-v1"
-FROZEN_BENCH_MD5 = "851df73216d2b1bebd34f93a2b9419ca"
+FROZEN_BENCH_MD5 = "21ba90a307f4d9bc6424d26170b6fbdb"
 FROZEN_THRESHOLD = 6.0
-BENCH_JOBS = {"derivation": ["32c858", "32d423"], "holdout": "f43d36"}
+BENCH_JOBS = {"derivation": ["e8bc0a", "a3a512"], "holdout": "03166c"}
 OUTCOME_MIN_EACH = 20
 LABEL_TEXT = "calib-v1: strong (|z| >= 6)"
 SCOPE_NOTE = ("Benched on DEM-only, offline-first Copernicus GLO-30 runs in Khuzestan (Susiana) "
