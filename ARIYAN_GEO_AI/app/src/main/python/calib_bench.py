@@ -13,11 +13,14 @@ derivation jobs and judged ONCE on a hold-out job never used for any choice.
 FROZEN RULES (do not edit after the first run; any change is calib-v2)
 1. Bench jobs, fixed by id (Option B: DEM-only, offline-first COP30 re-runs,
    every evidence row provenance-VERIFIED):
-     derivation  32c858  calib Susiana v1   (32.12-32.28 N, 48.38-48.60 E)
-     derivation  32d423  calib Kangavar v3  (34.430-34.555 N, 47.990-48.090 E)
-     hold-out    f43d36  Susiana West box   (32.03-32.30 N, 48.205-48.38 E)
-   f43d36's title reads "calib Kangavar v2" by a data-entry slip; its box is
-   the Susiana West hold-out (confirmed on device). Recorded, not hidden.
+     derivation  e8bc0a  calib Susiana v1     (32.12-32.28 N, 48.38-48.60 E)
+     derivation  a3a512  calib Kangavar v3    (34.430-34.555 N, 47.990-48.090 E)
+     hold-out    03166c  calib Susiana West   (32.03-32.30 N, 48.205-48.38 E)
+   cb-v1.1 (2026-10-25): re-run after the 16 Oct 2026 database loss, same
+   boxes and settings, ids only: 32c858->e8bc0a, 32d423->a3a512,
+   f43d36->03166c. Not a rule change; must reproduce the 2026-10-02 numbers.
+   History: the lost hold-out f43d36 was titled "calib Kangavar v2" by a
+   data-entry slip; 03166c is titled correctly.
    Not used: d96948 (seam-bug run), 22550e (duplicate hold-out, never run).
 2. Score: |candidate.score| (the stored DEM peak_zscore). One feature only.
    Residual, area and polarity are REPORTED for context, never used to choose.
@@ -63,9 +66,9 @@ import grand_project_review as review
 import known_sites
 import provenance_check
 
-BENCH_VERSION = "calib-bench-v1"
-DERIVATION_JOBS = ("32c858", "32d423")
-HOLDOUT_JOB = "f43d36"
+BENCH_VERSION = "calib-bench-v1.1"
+DERIVATION_JOBS = ("e8bc0a", "a3a512")
+HOLDOUT_JOB = "03166c"
 THRESHOLDS = (3.0, 4.0, 5.0, 6.0, 8.0)
 ALPHA = 0.05
 SEARCH_LIMIT_M = f2.DIST_SEARCH_STEPS_M[-1]   # 5000 m, as F2
@@ -406,7 +409,7 @@ def _report(r: Dict[str, Any]) -> str:
         L.append("  %s %-10s %s" % (p, j["role"], j["title"]))
         L.append("     %d tiles, %d candidates, %d sites, provenance %d verified"
                  % (j["tiles"], j["candidates"], j["sites"], j["provenance"]["candidates_verified"]))
-    L.append("  (f43d36's title is a data-entry slip; its box is Susiana West.)")
+    L.append("  (cb-v1.1: re-run of the 2026-10-02 bench after the 16 Oct DB loss.)")
     L.append("")
     L.append("Derivation (pooled %s): threshold -> candidates kept, combined p" % "+".join(DERIVATION_JOBS))
     for row in r["derivation"]:
