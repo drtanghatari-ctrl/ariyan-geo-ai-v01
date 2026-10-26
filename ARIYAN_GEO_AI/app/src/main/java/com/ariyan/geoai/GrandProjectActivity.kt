@@ -1369,7 +1369,7 @@ appendReviewSection(sb, detail)
      * coordinates. Then the export runs. */
     private fun showExportReportStart() {
         promptText(
-            "Export report", "job id, first 6+ characters, e.g. f43d36", "Next",
+            "Export report", "job id, first 6+ characters, e.g. 03166c", "Next",
             "Writes an HTML report (English and Persian) and a CSV of the job's candidates to " +
                 "ARIYAN_GEO_AI/reports on this phone. Runs the full provenance check first " +
                 "(a large job can take a minute). Jobs marked Corrupted are refused."
@@ -1552,7 +1552,7 @@ appendReviewSection(sb, detail)
         AlertDialog.Builder(this)
             .setTitle("Calibration bench (calib-v1)")
             .setMessage(
-                "Runs the frozen bench once on jobs 32c858 + 32d423 (derivation) and f43d36 (hold-out). " +
+                "Runs the frozen bench (cb-v1.1) once on jobs e8bc0a + a3a512 (derivation) and 03166c (hold-out). " +
                     "It chooses a z-score threshold on the derivation jobs and judges it on the hold-out. " +
                     "Changes nothing; the verdict is written to the timeline. Run now?"
             )
