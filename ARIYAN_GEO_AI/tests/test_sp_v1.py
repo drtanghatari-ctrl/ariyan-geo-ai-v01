@@ -20,6 +20,12 @@ LAT, LON, R = 32.67958, 47.30584, 500.0
 
 
 def _aoi(lat=LAT, lon=LON, r=R):
+    """The shape the app REALLY stores (evidence_record.py record_kwargs["aoi"])."""
+    return {"center_lat": lat, "center_lon": lon, "radius_m": r,
+            "grid_size": 96, "cell_size_m": 2 * r / 96}
+
+
+def _full_aoi(lat=LAT, lon=LON, r=R):
     dlat, dlon = r / 110900.0, r / 93500.0
     return {"center": {"lat": lat, "lon": lon}, "radius_m": r,
             "min_lat": lat - dlat, "max_lat": lat + dlat,
@@ -98,7 +104,7 @@ class SpV1(unittest.TestCase):
         self.assertEqual(self._q("SELECT id FROM wide_area_search_job"), [])
 
     def test_bad_aoi_refused_with_reason(self):
-        inv, _ = self._single(aoi={"center": {"lat": LAT}})
+        inv, _ = self._single(aoi={"center_lat": LAT})
         with self.assertRaises(spj.SinglePointJobError) as cm:
             spj.make_single_point_job(self.root, inv)
         self.assertIn("analysis window", str(cm.exception))
@@ -145,6 +151,36 @@ class SpV1(unittest.TestCase):
         self.assertNotIn("single_point_job_id", res)
         self.assertEqual(self._q("SELECT id FROM wide_area_search_job"), [])
         self.assertEqual(len(spj.list_single_points(self.root)), 1)
+
+    def test_real_stored_shape_gives_right_box(self):
+        inv, _ = self._single()
+        job = db.get_wide_area_search_job(self.root, spj.make_single_point_job(self.root, inv))
+        from coordinate import meters_per_degree
+        m_lat, m_lon = meters_per_degree(LAT)
+        self.assertAlmostEqual((job["max_lat"] - job["min_lat"]) * m_lat, 2 * R, delta=0.5)
+        self.assertAlmostEqual((job["max_lon"] - job["min_lon"]) * m_lon, 2 * R, delta=0.5)
+        self.assertAlmostEqual((job["min_lat"] + job["max_lat"]) / 2, LAT, places=9)
+
+    def test_full_aoi_shape_also_accepted(self):
+        inv, _ = self._single(aoi=_full_aoi())
+        self.assertTrue(spj.make_single_point_job(self.root, inv))
+
+    def test_real_evidence_record_aoi_round_trip(self):
+        """Guards the sp-v1 mistake: the AOI comes from evidence_record.py itself."""
+        import inspect
+        import evidence_record
+        src = inspect.getsource(evidence_record)
+        for key in ("center_lat", "center_lon", "radius_m"):
+            self.assertIn('"%s"' % key, src)
+
+    def test_left_out_runs_are_reported_with_reason(self):
+        self._single(aoi={"center_lat": LAT})
+        self._single(objective="Wide-area search 'x' -- tile 1/4")
+        out = json.loads(spj.list_single_points_json(self.root))
+        self.assertEqual(out["items"], [])
+        self.assertEqual(len(out["not_eligible"]), 2)
+        self.assertIn("analysis window", out["not_eligible_summary"])
+        self.assertIn("wide-area job", out["not_eligible_summary"])
 
 
 if __name__ == "__main__":
