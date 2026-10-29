@@ -46,6 +46,8 @@ def _derived(sid: str, product: str) -> Optional[Dict]:
 def _sat(sid: str, product: str) -> Optional[Dict]:
     if not product or product == DERIVED:
         return None
+    if product == "TRUE_COLOR":
+        return None        # fi-v3: a photo, not a measured value; DEM traces only
     import sat_image as si
     import sat_image_mobile as sim
     with sim._LOCK:
