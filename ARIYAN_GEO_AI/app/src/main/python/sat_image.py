@@ -53,7 +53,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-FI2_VERSION = "fi-v2"
+FI2_VERSION = "fi-v2"  # unchanged in fi-v2.1 so existing self-check records stay valid
 PROCESS_URL = "https://sh.dataspace.copernicus.eu/api/v1/process"
 CATALOG_URL = "https://sh.dataspace.copernicus.eu/api/v1/catalog/1.0.0/search"
 STATISTICS_URL = "https://sh.dataspace.copernicus.eu/statistics/v1"   # as the existing checks
@@ -754,7 +754,7 @@ def run_self_check(root: str, product: str, img: Dict[str, Any], token: str,
                         PRODUCTS[product]["tolerance"])
     res.update({"product": product, "image_key": ent["key"], "scene_date": ent["scene_date"],
                 "stats_file": sent["file"], "stats_sha256": sent["sha256"],
-                "checked_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "saved_utc": ent.get("saved_utc"), "checked_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "version": FI2_VERSION})
     with _lib_lock:
         rec = _load_json(_lib(root, "self_check.json"), {})
@@ -763,13 +763,29 @@ def run_self_check(root: str, product: str, img: Dict[str, Any], token: str,
     return res
 
 
-def layer_allowed(root: str, product: str) -> Tuple[bool, str]:
+def layer_allowed(root: str, product: str, image_key: Optional[str] = None) -> Tuple[bool, str]:
+    """The self-check is a ONE-TIME check of the processing pipeline for a
+    product, run on one reference image.  fi-v2.1: the returned text names
+    which image was checked and when, and never implies that a different
+    image was itself checked."""
     r = self_check_record(root, product)
     if r is None:
         return False, "not yet checked against the Statistical API"
     if not r.get("pass"):
         return False, "self-check failed (%s); layer hidden" % r.get("reason")
-    return True, "self-check passed %s" % r.get("checked_utc", "")
+    idx = library_index(root, product)
+    ref_key = r.get("image_key") or ""
+    ref_saved = r.get("saved_utc") or (idx.get(ref_key) or {}).get("saved_utc")
+    checked = (r.get("checked_utc") or "?")[:10]
+    if image_key and image_key == ref_key:
+        return True, "self-check passed on this image (checked %s)" % checked
+    msg = "pipeline self-check passed %s on reference scene %s (saved %s)" % (
+        checked, r.get("scene_date") or "?", (ref_saved or "?")[:10])
+    if image_key:
+        cur = idx.get(image_key) or {}
+        msg += "; this scene %s (saved %s) uses the same pipeline, not checked on its own" % (
+            cur.get("scene_date") or "?", (cur.get("saved_utc") or "?")[:10])
+    return True, msg
 
 
 def ensure_layer(root: str, product: str, bounds: Dict[str, float], token: Optional[str],
@@ -777,10 +793,11 @@ def ensure_layer(root: str, product: str, bounds: Dict[str, float], token: Optio
     """fetch_image + the one-time self-check. Returns the image dict with
     'allowed' and 'check' fields."""
     img = fetch_image(root, product, bounds, token, http, timeout)
-    ok, why = layer_allowed(root, product)
+    key = (img.get("entry") or {}).get("key")
+    ok, why = layer_allowed(root, product, key)
     if self_check_record(root, product) is None and token:
         run_self_check(root, product, img, token, http, timeout)
-        ok, why = layer_allowed(root, product)
+        ok, why = layer_allowed(root, product, key)
     img["allowed"], img["check"] = ok, why
     return img
 
