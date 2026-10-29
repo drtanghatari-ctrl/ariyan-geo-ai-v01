@@ -1360,13 +1360,21 @@ appendReviewSection(sb, detail)
                 return@launch
             }
             val items = res.getJSONArray("items")
+            // sp-v1.1: runs that cannot become jobs are listed with the reason, never hidden
+            val leftOut = res.optString("not_eligible_summary", "")
             if (items.length() == 0) {
                 AlertDialog.Builder(this@GrandProjectActivity)
                     .setTitle("Single points \u2192 jobs")
-                    .setMessage("Every single-point investigation with candidates already has a job. " +
-                        "New runs from the main screen become jobs by themselves.")
+                    .setMessage(
+                        (if (leftOut.isNotBlank()) "No single-point investigation can be made a job:\n\n$leftOut"
+                        else "Every single-point investigation with candidates already has a job.") +
+                            "\n\nNew runs from the main screen become jobs by themselves."
+                    )
                     .setPositiveButton("Close", null).show()
                 return@launch
+            }
+            if (leftOut.isNotBlank()) {
+                Toast.makeText(this@GrandProjectActivity, "Left out:\n$leftOut", Toast.LENGTH_LONG).show()
             }
             val ids = (0 until items.length()).map { items.getJSONObject(it).getString("investigation_id") }
             val labels: Array<CharSequence> = Array(items.length()) { i ->
