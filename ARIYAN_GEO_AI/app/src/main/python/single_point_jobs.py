@@ -1,5 +1,10 @@
 """
-single_point_jobs.py -- sp-v1 (2026-10-29)
+single_point_jobs.py -- sp-v1 (2026-10-29), sp-v1.1 (2026-10-29)
+
+sp-v1.1: reads the AOI shape the app really stores (evidence_record.py:
+center_lat / center_lon / radius_m, no corners); sp-v1 expected a
+different shape and silently listed nothing. Left-out runs are now
+reported with their reason ("not_eligible"), never hidden.
 
 A single-point investigation (Main screen "Run") becomes a ONE-TILE
 wide-area search job, so every job feature works on it without special
@@ -37,8 +42,9 @@ import json
 from typing import Any, Dict, List, Optional
 
 import grand_project_db as db
+from coordinate import meters_per_degree
 
-VERSION = "sp-v1"
+VERSION = "sp-v1.1"
 INPUT_KIND = "SINGLE_POINT"
 WORKFLOW = "investigation_multi_mobile.run_investigation_multi_json"
 TILE_OBJECTIVE_PREFIX = "Wide-area search "
@@ -49,6 +55,12 @@ class SinglePointJobError(Exception):
 
 
 def _aoi(params_json: Optional[str]) -> Dict[str, Any]:
+    """The investigation's stored analysis window. sp-v1.1: the real shape
+    is evidence_record.py's {"center_lat", "center_lon", "radius_m",
+    "grid_size", "cell_size_m"} (no box corners), so the box is rebuilt
+    with coordinate.meters_per_degree(), the same WGS84 formula
+    build_aoi() used for the run. A full AreaOfInterest dict ("center" +
+    corners) is also accepted."""
     try:
         p = json.loads(params_json or "")
     except (TypeError, ValueError):
@@ -56,18 +68,24 @@ def _aoi(params_json: Optional[str]) -> Dict[str, Any]:
     if not isinstance(p, dict):
         raise SinglePointJobError("its analysis window (AOI) is not stored")
     try:
-        c = p["center"]
-        out = {
-            "lat": float(c["lat"]), "lon": float(c["lon"]),
-            "radius_m": float(p["radius_m"]),
-            "min_lat": float(p["min_lat"]), "max_lat": float(p["max_lat"]),
-            "min_lon": float(p["min_lon"]), "max_lon": float(p["max_lon"]),
-        }
+        if "center_lat" in p:
+            lat, lon = float(p["center_lat"]), float(p["center_lon"])
+        else:
+            lat, lon = float(p["center"]["lat"]), float(p["center"]["lon"])
+        r = float(p["radius_m"])
     except (KeyError, TypeError, ValueError):
         raise SinglePointJobError("its stored analysis window (AOI) is incomplete")
-    if out["radius_m"] <= 0 or out["min_lat"] >= out["max_lat"] or out["min_lon"] >= out["max_lon"]:
+    if r <= 0 or not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
         raise SinglePointJobError("its stored analysis window (AOI) is not a valid box")
-    return out
+    if all(k in p for k in ("min_lat", "max_lat", "min_lon", "max_lon")):
+        box = {k: float(p[k]) for k in ("min_lat", "max_lat", "min_lon", "max_lon")}
+    else:
+        m_lat, m_lon = meters_per_degree(lat)
+        box = {"min_lat": lat - r / m_lat, "max_lat": lat + r / m_lat,
+               "min_lon": lon - r / m_lon, "max_lon": lon + r / m_lon}
+    if box["min_lat"] >= box["max_lat"] or box["min_lon"] >= box["max_lon"]:
+        raise SinglePointJobError("its stored analysis window (AOI) is not a valid box")
+    return dict(lat=lat, lon=lon, radius_m=r, **box)
 
 
 _UNLINKED_SQL = """
@@ -93,28 +111,46 @@ def _qualifies(row: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def list_single_points(db_root: str) -> List[Dict[str, Any]]:
-    """Every single-point investigation that has candidates and no job yet,
-    newest first. Read-only."""
+def _scan(db_root: str):
     conn = db.get_connection(db_root)
     try:
         db.initialize_schema(conn)
         rows = [dict(r) for r in conn.execute(_UNLINKED_SQL + " ORDER BY i.created_at DESC").fetchall()]
     finally:
         conn.close()
-    out = []
+    ok, not_ok = [], []
     for r in rows:
-        if _qualifies(r) is not None:
+        why = _qualifies(r)
+        if why is not None:
+            not_ok.append({"investigation_id": r["id"], "created_at": r["created_at"],
+                           "n_candidates": int(r["n_candidates"]), "reason": why})
             continue
         a = _aoi(r["parameters_json"])
-        out.append({
+        ok.append({
             "investigation_id": r["id"],
             "created_at": r["created_at"],
             "lat": a["lat"], "lon": a["lon"],
             "radius_m": a["radius_m"],
             "n_candidates": int(r["n_candidates"]),
         })
-    return out
+    return ok, not_ok
+
+
+def list_single_points(db_root: str) -> List[Dict[str, Any]]:
+    """Every single-point investigation that has candidates and no job yet,
+    newest first. Read-only."""
+    return _scan(db_root)[0]
+
+
+def _summary(not_ok: List[Dict[str, Any]]) -> str:
+    """sp-v1.1: never hide a left-out run silently; group by reason."""
+    groups: Dict[str, List[int]] = {}
+    for n in not_ok:
+        g = groups.setdefault(n["reason"], [0, 0])
+        g[0] += 1
+        g[1] += n["n_candidates"]
+    return "\n".join("%d investigation(s), %d candidate(s): %s" % (g[0], g[1], why)
+                     for why, g in sorted(groups.items(), key=lambda kv: -kv[1][0]))
 
 
 def _title(a: Dict[str, Any], created_at: str) -> str:
@@ -197,7 +233,9 @@ def register_after_run(db_root: str, investigation_id: str) -> Optional[str]:
 
 def list_single_points_json(db_root: str) -> str:
     try:
-        return json.dumps({"version": VERSION, "items": list_single_points(db_root)})
+        ok, not_ok = _scan(db_root)
+        return json.dumps({"version": VERSION, "items": ok,
+                           "not_eligible": not_ok, "not_eligible_summary": _summary(not_ok)})
     except Exception as e:  # surfaced to the user, never hidden
         return json.dumps({"error": str(e)})
 
