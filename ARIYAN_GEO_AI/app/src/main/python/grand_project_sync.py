@@ -264,18 +264,35 @@ def record_investigation_results(
     debate_json: Optional[str] = None,
     hypothesis_id: Optional[str] = None,
     objective: str = "",
+    register_single_point_job: bool = False,
 ) -> Dict[str, Any]:
     """PHASE 4a wrapper: binds this exact investigation output's provenance
     capture (see provenance_ledger.bind()) for every evidence row written
     below, then unbinds. Behaviour and return value are otherwise exactly
-    _record_investigation_results_impl()'s (documented there)."""
+    _record_investigation_results_impl()'s (documented there).
+
+    sp-v1 (2026-10-29): register_single_point_job=True (passed only by
+    MainActivity's single-point Run) also registers the run as a one-tile
+    job (single_point_jobs.py) when it has candidates, so refinement and
+    Auto run work on it. Best-effort: a failure here never undoes or hides
+    the persisted run; the result then carries "single_point_job_error".
+    Wide-area tiles never pass it (their own job links them)."""
     provenance_ledger.bind(investigation_json)
     try:
-        return _record_investigation_results_impl(
+        result = _record_investigation_results_impl(
             db_root, grand_project_id, investigation_json,
             debate_json=debate_json, hypothesis_id=hypothesis_id, objective=objective)
     finally:
         provenance_ledger.unbind()
+    if register_single_point_job and result.get("candidate_ids"):
+        try:
+            import single_point_jobs
+            job_id = single_point_jobs.register_after_run(db_root, result["investigation_id"])
+            if job_id:
+                result["single_point_job_id"] = job_id
+        except Exception as exc:
+            result["single_point_job_error"] = str(exc)
+    return result
 
 
 def _record_investigation_results_impl(
