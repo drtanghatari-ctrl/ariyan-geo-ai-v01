@@ -80,5 +80,5 @@ def test_status_lists_all_products(tmp_path, fake):
     sid, _ = _fake_session()
     sim.open_layer_json(str(tmp_path), sid, "SAR_VH", "id", "sec", True)
     st = {p["product"]: p for p in json.loads(sim.layers_status_json(str(tmp_path), sid))["products"]}
-    assert list(st) == list(si.PRODUCT_ORDER)
+    assert list(st) == list(si.LAYER_ORDER)   # fi-v3: True colour first, then the fi-v2 layers
     assert st["SAR_VH"]["saved"] and st["SAR_VH"]["allowed"] and not st["NDVI"]["saved"]
