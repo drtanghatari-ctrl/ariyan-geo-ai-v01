@@ -1319,6 +1319,126 @@ appendReviewSection(sb, detail)
         bar5.addView(dashboardButton)
         bar5.addView(reportButton)
         binding.containerCandidateRows.addView(bar5)
+
+        // sp-v1 (added 2026-10-29): turn older single-point investigations
+        // into one-tile jobs (new runs do this by themselves).
+        val bar6 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding((8 * density).toInt(), 0, (8 * density).toInt(), (4 * density).toInt())
+        }
+        val singlePointButton = MaterialButton(this).apply {
+            text = "Single points \u2192 jobs..."
+            setBackgroundColor(ContextCompat.getColor(this@GrandProjectActivity, R.color.ariyan_accent))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { showSinglePointJobs() }
+        }
+        bar6.addView(singlePointButton)
+        binding.containerCandidateRows.addView(bar6)
+    }
+
+    /** sp-v1 (added 2026-10-29): lists single-point investigations that have
+     * candidates and no job, lets the user tick which to register as
+     * one-tile jobs (single_point_jobs.py). Nothing is copied or changed:
+     * the new job only points at the existing investigation, so Refine,
+     * Auto run, Job target and the report work on its candidates. */
+    private fun showSinglePointJobs() {
+        setLoading(true)
+        lifecycleScope.launch {
+            val listText = try {
+                withContext(Dispatchers.Default) {
+                    python.getModule("single_point_jobs")
+                        .callAttr("list_single_points_json", offlineDataRoot).toString()
+                }
+            } catch (e: PyException) {
+                JSONObject().put("error", cleanErrorMessage(e.message)).toString()
+            } finally {
+                setLoading(false)
+            }
+            val res = JSONObject(listText)
+            if (res.has("error")) {
+                Toast.makeText(this@GrandProjectActivity, res.optString("error"), Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val items = res.getJSONArray("items")
+            if (items.length() == 0) {
+                AlertDialog.Builder(this@GrandProjectActivity)
+                    .setTitle("Single points \u2192 jobs")
+                    .setMessage("Every single-point investigation with candidates already has a job. " +
+                        "New runs from the main screen become jobs by themselves.")
+                    .setPositiveButton("Close", null).show()
+                return@launch
+            }
+            val ids = (0 until items.length()).map { items.getJSONObject(it).getString("investigation_id") }
+            val labels: Array<CharSequence> = Array(items.length()) { i ->
+                val o = items.getJSONObject(i)
+                String.format(
+                    java.util.Locale.US, "%s \u00B7 %.5f, %.5f \u00B7 %d candidate(s) \u00B7 %s",
+                    o.getString("investigation_id").take(6), o.getDouble("lat"), o.getDouble("lon"),
+                    o.getInt("n_candidates"), o.optString("created_at").take(10)
+                )
+            }
+            val checked = BooleanArray(items.length())
+            AlertDialog.Builder(this@GrandProjectActivity)
+                .setTitle("Make these single points jobs")
+                .setMultiChoiceItems(labels, checked) { _, i, on -> checked[i] = on }
+                .setPositiveButton("Make jobs") { _, _ ->
+                    val chosen = ids.filterIndexed { i, _ -> checked[i] }
+                    if (chosen.isEmpty()) {
+                        Toast.makeText(this@GrandProjectActivity, "Nothing ticked.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        makeSinglePointJobs(chosen)
+                    }
+                }
+                .setNeutralButton("All") { _, _ -> makeSinglePointJobs(ids) }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun makeSinglePointJobs(ids: List<String>) {
+        setLoading(true)
+        lifecycleScope.launch {
+            val outText = try {
+                withContext(Dispatchers.Default) {
+                    python.getModule("single_point_jobs")
+                        .callAttr("make_single_point_jobs_json", offlineDataRoot, JSONArray(ids).toString())
+                        .toString()
+                }
+            } catch (e: PyException) {
+                JSONObject().put("error", cleanErrorMessage(e.message)).toString()
+            } finally {
+                setLoading(false)
+            }
+            val out = JSONObject(outText)
+            if (out.has("error")) {
+                Toast.makeText(this@GrandProjectActivity, out.optString("error"), Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val created = out.getJSONArray("created")
+            val skipped = out.getJSONArray("skipped")
+            val sb = StringBuilder()
+            sb.append(created.length()).append(" job(s) created.\n")
+            for (i in 0 until created.length()) {
+                val c = created.getJSONObject(i)
+                sb.append("\u2022 investigation ").append(c.getString("investigation_id").take(6))
+                    .append(" \u2192 job ").append(c.getString("job_id").take(6)).append('\n')
+            }
+            if (skipped.length() > 0) {
+                sb.append("\nNot converted:\n")
+                for (i in 0 until skipped.length()) {
+                    val k = skipped.getJSONObject(i)
+                    sb.append("\u2022 ").append(k.optString("investigation_id").take(6)).append(": ")
+                        .append(k.optString("reason")).append('\n')
+                }
+            }
+            sb.append("\nEach job has one tile, already DONE. Its candidates now show under the job's " +
+                "name. Refine top N / Refine selected and Auto run are on the Wide-Area Search Jobs tab.")
+            AlertDialog.Builder(this@GrandProjectActivity)
+                .setTitle("Single points \u2192 jobs")
+                .setMessage(sb.toString())
+                .setPositiveButton("Close", null).show()
+            loadAndShow(ListKind.CANDIDATES)
+        }
     }
 
     /** Phase 5b (added 2026-10-02): when true, candidates carrying the
