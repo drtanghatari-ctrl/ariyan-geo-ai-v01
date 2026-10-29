@@ -185,11 +185,19 @@ class FinalImageActivity : AppCompatActivity() {
         legendBar = View(this)
         legendRow.addView(legendBar, LinearLayout.LayoutParams((120 * d).toInt(), (10 * d).toInt()))
         legendText = smallText(R.color.ariyan_text_secondary).apply { setPadding(pad / 2, 0, 0, 0) }
-        legendRow.addView(legendText)
-        root.addView(legendRow)
+        // fi-v2.1: give the legend text the remaining width so long satellite legends wrap
+        // inside the row instead of spilling into the notes area below.
+        legendRow.addView(legendText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(legendRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(View(this).apply { setBackgroundColor(col(R.color.ariyan_text_secondary)); alpha = 0.35f },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, d.toInt())).apply { topMargin = pad / 3 })
 
         notes = smallText(R.color.ariyan_text_secondary).apply { setPadding(pad, pad / 3, pad, pad) }
-        root.addView(ScrollView(this).apply { addView(notes) },
+        root.addView(ScrollView(this).apply {
+            clipChildren = true; clipToPadding = true
+            setBackgroundColor(col(R.color.ariyan_bg))
+            addView(notes)
+        },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (88 * d).toInt()))
         setContentView(root)
     }
@@ -347,7 +355,9 @@ class FinalImageActivity : AppCompatActivity() {
             val a = m.optJSONArray(key) ?: continue
             for (i in 0 until a.length()) sb.append(if (key == "problems") "! " else "\u2022 ").append(a.optString(i)).append('\n')
         }
-        sb.append(m.optString("statement"))
+        // fi-v2.1: the DEM statement is wrong under a satellite layer (it IS new, measured data).
+        sb.append(if (satMeta != null) "Satellite layer: a sensor measurement, not archaeological proof. The DEM terrain underneath is unchanged."
+            else m.optString("statement"))
         satMeta?.let { sb.insert(0, satNotes(it) + "\n\n") }
         filterMeta?.let { sb.insert(0, filterNotes(it) + "\n\n") }
         notes.text = sb.toString()
@@ -360,8 +370,13 @@ class FinalImageActivity : AppCompatActivity() {
         val acrossM = (w[2] - w[0]) * m.optDouble("cell_dx_m", nativeRes)
         val mode = if (view.smooth) "Smooth (interpolated, visual only)" else "Exact cells"
         val beyond = view.scale > 1f
-        info.text = String.format(Locale.US, "Native %.1f m/cell \u00B7 %.1f dp per cell \u00B7 view %s across \u00B7 %s%s",
-            nativeRes, pxPerCell, if (acrossM >= 1000) String.format(Locale.US, "%.2f km", acrossM / 1000) else "${acrossM.toInt()} m",
+        // fi-v2.1: under a satellite layer the visible cells are satellite pixels, not DEM cells.
+        val sm = satMeta
+        val resLabel = if (sm != null && !sm.optDouble("pixel_m").isNaN())
+            String.format(Locale.US, "%s %.0f m/pixel (DEM %.1f m/cell)", sm.optString("label", "Satellite"), sm.optDouble("pixel_m"), nativeRes)
+        else String.format(Locale.US, "Native %.1f m/cell", nativeRes)
+        info.text = String.format(Locale.US, "%s \u00B7 %.1f dp per DEM cell \u00B7 view %s across \u00B7 %s%s",
+            resLabel, pxPerCell, if (acrossM >= 1000) String.format(Locale.US, "%.2f km", acrossM / 1000) else "${acrossM.toInt()} m",
             mode,
             if (beyond && !view.smooth) "\nZoomed past native: each square is one real DEM cell, no new detail added."
             else if (beyond) "\nZoomed past native: colours between cell centres are interpolated, not measured." else "")
@@ -519,6 +534,7 @@ class FinalImageActivity : AppCompatActivity() {
         view.setOverlay(null, 0f, 0f, 1f, 1f)
         satBtn.text = "Satellite: off"
         meta?.let { updateLegend(it); updateNotes(it) }
+        updateInfo()
         refreshProfile(true)
     }
 
@@ -570,6 +586,7 @@ class FinalImageActivity : AppCompatActivity() {
                         satBtn.text = "Satellite: " + (satLabels[product]?.substringBefore(" (") ?: product)
                         updateSatLegend(r)
                         meta?.let { updateNotes(it) }
+                        updateInfo()
                         refreshProfile(true)
                     }
                 }
@@ -602,7 +619,10 @@ class FinalImageActivity : AppCompatActivity() {
         if (!r.isNull("scene_cloud_cover")) append(String.format(Locale.US, ", scene cloud %.0f %%", r.optDouble("scene_cloud_cover")))
         append(String.format(Locale.US, ", %.0f %% of this window has data", 100 * r.optDouble("clear_fraction_window")))
         append(if (r.optDouble("clear_fraction_window") < 0.999)
-            "; dark hatched cells have NO data (cloud, masked or below the sensor's noise floor) and are not zero.\n" else ".\n")
+            // fi-v2.1: radar sees through cloud, so "cloud" is only named for optical/thermal layers
+            (if (r.optString("product").startsWith("SAR"))
+                "; dark hatched cells have NO data (masked or below the sensor's noise floor) and are not zero.\n"
+            else "; dark hatched cells have NO data (cloud or masked) and are not zero.\n") else ".\n")
         append(String.format(Locale.US, "Pixel %.0f m (sensor detail ~%.0f m), each square is one image cell, not resampled.\n",
             r.optDouble("pixel_m"), r.optDouble("sensor_detail_m")))
         append(if (r.optBoolean("reused")) "From the saved library" else "Fetched now and saved")
@@ -695,7 +715,7 @@ class FinalImageActivity : AppCompatActivity() {
                     return@launch
                 }
                 // one overlay at a time: the filter replaces a satellite layer (it is not deleted, just hidden)
-                if (satMeta != null) { satProduct = null; satMeta = null; satBtn.text = "Satellite: off" }
+                if (satMeta != null) { satProduct = null; satMeta = null; satBtn.text = "Satellite: off"; updateInfo() }
                 filterName = name; filterParams = r.optJSONObject("params") ?: params; filterMeta = r
                 val pl = r.getJSONObject("placement")
                 view.setOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
