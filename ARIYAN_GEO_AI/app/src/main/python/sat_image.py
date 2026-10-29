@@ -2,7 +2,17 @@
 sat_image.py -- fi-v2 (2026-10-21): satellite image layers for the Final
 Image screen, scientific core.
 
-Three real satellite layers can be laid over the fi-v1 terrain image:
+Real satellite layers can be laid over the fi-v1 terrain image
+(fi-v3, 2026-10-29, added TRUE_COLOR):
+
+  TRUE_COLOR  Sentinel-2 L2A red/green/blue (B04/B03/B02) surface
+           reflectance, 10 m: a real colour photo of ONE scene, chosen and
+           cloud-masked exactly like NDVI. Each band is stored at 8 bits
+           (0 .. 0.5 reflectance in 255 steps, 0.002 per step), packed into
+           one exact float32 value R*65536 + G*256 + B, so the same
+           save-once / crop / Statistical-API self-check path carries it.
+           Display only: the picture is contrast-stretched (shown in the
+           legend); it is never profiled or used as evidence.
 
   NDVI     Sentinel-2 L2A, (B08-B04)/(B08+B04), 10 m. ONE clearest scene,
            exact date. Cloud, cloud-shadow, cirrus, snow, saturated and
@@ -115,6 +125,20 @@ function value(s) {
 }"""
 
 
+# fi-v3: one exact integer per cell (< 2**24, so float32 holds it exactly)
+TC_FULL_SCALE = 0.5          # reflectance mapped to 255
+_JS_TRUE_COLOR = """
+function q(v) {
+  var x = Math.min(Math.max(v, 0), %r) / %r;
+  return Math.round(x * 255);
+}
+function value(s) {
+  if (s.dataMask == 0) return NaN;
+  if ([0, 1, 3, 8, 9, 10, 11].indexOf(s.SCL) >= 0) return NaN;
+  return q(s.B04) * 65536 + q(s.B03) * 256 + q(s.B02);
+}""" % (TC_FULL_SCALE, TC_FULL_SCALE)
+
+
 def _js_sar(band: str) -> str:
     return """
 function value(s) {
@@ -125,6 +149,20 @@ function value(s) {
 
 
 PRODUCTS: Dict[str, Dict[str, Any]] = {
+    "TRUE_COLOR": {
+        "label": "True colour (Sentinel-2)",
+        "collection": "sentinel-2-l2a", "catalog": "sentinel-2-l2a",
+        "bands": ["B02", "B03", "B04", "SCL", "dataMask"], "units": None,
+        "js": _JS_TRUE_COLOR, "pixel_m": 10.0, "sensor_detail_m": 10.0,
+        "unit": "reflectance", "display": None, "ramp": "gray",
+        "uses_cloud": True, "kind": "rgb",
+        "caption": ("Real colour photo (red, green, blue surface reflectance) from "
+                    "ONE Sentinel-2 L2A scene. Contrast stretched for viewing; "
+                    "cloud, shadow, cirrus and snow cells are left empty, never "
+                    "filled. Visual context only, not evidence."),
+        # self-check compares the mean of the packed cell values (~1e6..1e7)
+        "tolerance": 1e-5,
+    },
     "NDVI": {
         "label": "NDVI (Sentinel-2)",
         "collection": "sentinel-2-l2a", "catalog": "sentinel-2-l2a",
@@ -172,7 +210,23 @@ PRODUCTS: Dict[str, Dict[str, Any]] = {
         "tolerance": 1e-3,
     },
 }
-PRODUCT_ORDER = ("NDVI", "THERMAL", "SAR_VV", "SAR_VH")
+PRODUCT_ORDER = ("NDVI", "THERMAL", "SAR_VV", "SAR_VH")   # Auto run images step (unchanged)
+LAYER_ORDER = ("TRUE_COLOR",) + PRODUCT_ORDER             # fi-v3: the Satellite menu
+
+
+def is_rgb(product: str) -> bool:
+    return PRODUCTS[product].get("kind") == "rgb"
+
+
+def decode_true_color(values: np.ndarray) -> np.ndarray:
+    """(H, W) packed cells -> (H, W, 3) reflectance R, G, B; NaN where empty."""
+    v = np.asarray(values, dtype=np.float64)
+    ok = np.isfinite(v)
+    n = np.where(ok, v, 0.0).astype(np.int64)
+    rgb = np.stack([(n >> 16) & 255, (n >> 8) & 255, n & 255], axis=-1).astype(np.float64)
+    rgb *= TC_FULL_SCALE / 255.0
+    rgb[~ok] = np.nan
+    return rgb
 SAR_PROCESSING = {"orthorectify": True, "backCoeff": "GAMMA0_TERRAIN",
                   "demInstance": "COPERNICUS_30", "upsampling": "NEAREST",
                   "downsampling": "NEAREST"}
@@ -816,6 +870,9 @@ RAMPS = {
 
 
 def display_range(product: str, values: np.ndarray) -> Tuple[float, float]:
+    if is_rgb(product):
+        # fi-v3: ONE stretch for all three bands, so colour balance is kept
+        values = decode_true_color(values)
     fixed = PRODUCTS[product]["display"]
     if fixed is not None:
         return fixed
@@ -827,6 +884,15 @@ def display_range(product: str, values: np.ndarray) -> Tuple[float, float]:
 
 
 def colorize(product: str, values: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
+    if is_rgb(product):
+        rgb = decode_true_color(values)
+        ok = np.isfinite(rgb[..., 0])
+        t = np.clip((np.where(np.isfinite(rgb), rgb, 0.0) - vmin) / (vmax - vmin), 0.0, 1.0)
+        out = np.zeros(values.shape + (4,), dtype=np.uint8)
+        out[..., :3] = np.round(t * 255.0)
+        out[..., 3] = np.where(ok, 255, 0)
+        out[~ok] = 0
+        return out
     ramp = RAMPS[PRODUCTS[product]["ramp"]]
     t = np.clip((values - vmin) / (vmax - vmin), 0.0, 1.0)
     rgba = np.zeros(values.shape + (4,), dtype=np.uint8)
@@ -845,10 +911,12 @@ def layer_payload(product: str, img: Dict[str, Any]) -> Dict[str, Any]:
     ent = img["entry"]
     p = PRODUCTS[product]
     vmin, vmax = display_range(product, v)
-    f = v[np.isfinite(v)]
+    f = decode_true_color(v) if is_rgb(product) else v   # fi-v3: real reflectance, not packed
+    f = f[np.isfinite(f)]
     lat_c = g["north"] - g["height"] * g["dlat"] / 2.0
     return {
         "product": product, "label": p["label"], "unit": p["unit"], "caption": p["caption"],
+        "kind": p.get("kind", "value"),
         "scene_date": ent.get("scene_date"), "scene_cloud_cover": ent.get("scene_cloud_cover"),
         "clear_fraction_window": round(clear_fraction(v), 4),
         "pixel_m": p["pixel_m"], "sensor_detail_m": p["sensor_detail_m"],
