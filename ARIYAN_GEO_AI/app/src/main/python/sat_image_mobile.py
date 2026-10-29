@@ -73,7 +73,7 @@ def layers_status_json(db_root: str, sid: str) -> str:
     try:
         b = _dem_bounds(_session(sid))
         out = []
-        for p in si.PRODUCT_ORDER:
+        for p in si.LAYER_ORDER:           # fi-v3: True colour first
             ok, why = si.layer_allowed(db_root, p)
             out.append({"product": p, "label": si.PRODUCTS[p]["label"],
                         "saved": si.find_saved(db_root, p, b) is not None,
