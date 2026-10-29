@@ -526,7 +526,10 @@ class MainActivity : AppCompatActivity() {
                         grandProjectModule.callAttr(
                             "record_investigation_results",
                             offlineDataRoot, grandProjectId, json,
-                            Kwarg("debate_json", debateJson)
+                            Kwarg("debate_json", debateJson),
+                            // sp-v1 (2026-10-29): a run with candidates also becomes a
+                            // one-tile job, so Refine / Auto run work on it.
+                            Kwarg("register_single_point_job", true)
                         )
                     } catch (e: PyException) {
                         // Persistence failure must never hide results
