@@ -47,6 +47,10 @@ import java.util.Locale
  * Visual enhancement only: nothing here writes a candidate, a review, a
  * status or a confidence. Marker colours are READ from the stored values.
  *
+ * fi-v3 (2026-10-29): "True colour photo (Sentinel-2, 10 m)" is the first
+ * entry of the Satellite menu (sat_image.LAYER_ORDER). It is drawn like any
+ * layer; the profile shows no trace for it (a photo is not a measured value).
+ *
  * fi-v2.2 (2026-10-29): rotation. Portrait stacks map over the side column,
  * landscape puts them side by side (map ~60 %). The view keeps the same ground
  * on any size change; state is saved as ground, never pixels. "View across"
@@ -593,6 +597,7 @@ class FinalImageActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ satellite layers (fi-v2)
 
     private val satLabels = linkedMapOf(
+        "TRUE_COLOR" to "True colour photo (Sentinel-2, 10 m)",   // fi-v3
         "NDVI" to "NDVI (Sentinel-2, 10 m)",
         "THERMAL" to "Thermal brightness temp. (Landsat, 30 m)",
         "SAR_VV" to "Radar VV (Sentinel-1, 10 m)",
@@ -721,7 +726,11 @@ class FinalImageActivity : AppCompatActivity() {
         }
         legendBar.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, colours)
         val unit = r.optString("unit")
-        legendText.text = String.format(Locale.US, "%s  %.2f \u2026 %.2f %s  (hatched = no data)",
+        legendText.text = if (r.optString("kind") == "rgb")
+            // fi-v3: a photo; the bar is the one brightness stretch shared by red, green and blue
+            String.format(Locale.US, "%s  photo, stretched %.2f \u2026 %.2f reflectance (same for R, G, B; hatched = no data)",
+                r.optString("label"), lg.getDouble("vmin"), lg.getDouble("vmax"))
+        else String.format(Locale.US, "%s  %.2f \u2026 %.2f %s  (hatched = no data)",
             r.optString("label"), lg.getDouble("vmin"), lg.getDouble("vmax"), unit)
     }
 
