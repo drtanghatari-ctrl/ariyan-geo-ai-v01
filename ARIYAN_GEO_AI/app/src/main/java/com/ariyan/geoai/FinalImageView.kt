@@ -34,6 +34,10 @@ import kotlin.math.pow
  *
  * Coordinates: grid-pixel space, cell (r, c) covers [c, c+1) x [r, r+1),
  * the same convention final_image.py uses for every vector layer.
+ *
+ * fi-v2.2 (2026-10-29): rotation. A size change keeps the same ground in view
+ * (centre cell + cells across the shorter side) instead of the old pixel zoom;
+ * setImage() fits at once; groundState()/restoreGround() for save/restore.
  */
 class FinalImageView(context: Context) : View(context) {
 
@@ -184,6 +188,8 @@ class FinalImageView(context: Context) : View(context) {
         cellDxM = cellDx
         if (!keepView || old == null || old.width != bmp.width || old.height != bmp.height) fitted = false
         if (old != null && old !== bmp) old.recycle()
+        // fi-v2.2: fit now if the size is known; do not wait for an accidental size change
+        if (!fitted && width > 0 && height > 0) fitToScreen()
         requestLayout(); invalidate()
     }
 
@@ -230,6 +236,29 @@ class FinalImageView(context: Context) : View(context) {
 
     fun clearLineFit() { lineFit = null }
 
+    // fi-v2.2: view state as ground, never screen pixels.
+    // [centre x, centre y, cells across the shorter side]
+    private var pendingGround: FloatArray? = null
+
+    fun groundState(): FloatArray? {
+        if (width == 0 || height == 0 || bitmap == null) return null
+        return floatArrayOf((width / 2f - tx) / scale, (height / 2f - ty) / scale, min(width, height) / scale)
+    }
+
+    /** applied now if the view is laid out and has an image, otherwise on the next size change */
+    fun restoreGround(g: FloatArray) {
+        if (g.size < 3 || g[2] <= 0f) return
+        if (width > 0 && height > 0 && bitmap != null) applyGround(g) else pendingGround = g
+    }
+
+    private fun applyGround(g: FloatArray) {
+        scale = clampScale(min(width, height) / g[2])
+        tx = width / 2f - g[0] * scale
+        ty = height / 2f - g[1] * scale
+        fitted = true
+        clampPan(); onViewChanged?.invoke(); invalidate()
+    }
+
     private fun applyLineFit() {
         val f = lineFit ?: return
         if (width == 0 || height == 0) return
@@ -247,8 +276,25 @@ class FinalImageView(context: Context) : View(context) {
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        if (lineFit != null) applyLineFit()
-        else if (!fitted) fitToScreen() else { clampPan(); invalidate() }
+        if (w == 0 || h == 0) return
+        val pend = pendingGround
+        when {
+            lineFit != null -> applyLineFit()
+            pend != null && bitmap != null -> { pendingGround = null; applyGround(pend) }
+            !fitted -> fitToScreen()
+            oldw > 0 && oldh > 0 -> {
+                // fi-v2.2: keep the same GROUND in view across a resize or rotation:
+                // same centre cell, same number of cells across the SHORTER side
+                val gx = (oldw / 2f - tx) / scale
+                val gy = (oldh / 2f - ty) / scale
+                val cells = min(oldw, oldh) / scale
+                scale = clampScale(min(w, h) / cells)
+                tx = w / 2f - gx * scale
+                ty = h / 2f - gy * scale
+                clampPan(); onViewChanged?.invoke(); invalidate()
+            }
+            else -> { clampPan(); invalidate() }
+        }
     }
 
     private fun minScale(): Float {
