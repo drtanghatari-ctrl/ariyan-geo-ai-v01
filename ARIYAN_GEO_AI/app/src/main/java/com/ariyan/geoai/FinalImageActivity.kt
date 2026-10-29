@@ -2,11 +2,13 @@ package com.ariyan.geoai
 
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -44,6 +46,11 @@ import java.util.Locale
  *
  * Visual enhancement only: nothing here writes a candidate, a review, a
  * status or a confidence. Marker colours are READ from the stored values.
+ *
+ * fi-v2.2 (2026-10-29): rotation. Portrait stacks map over the side column,
+ * landscape puts them side by side (map ~60 %). The view keeps the same ground
+ * on any size change; state is saved as ground, never pixels. "View across"
+ * reports the shorter side; the past-native banner uses the active layer's cell.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -98,14 +105,62 @@ class FinalImageActivity : AppCompatActivity() {
     private var filterParams: JSONObject? = null
     private var filterMeta: JSONObject? = null
 
+    // fi-v2.2 (2026-10-29): rotation
+    private lateinit var body: LinearLayout
+    private lateinit var mapFrame: FrameLayout
+    private lateinit var side: ScrollView
+    private lateinit var sideCol: LinearLayout
+    private lateinit var notesScroll: ScrollView
+    private var pendingGround: FloatArray? = null   // from savedInstanceState, applied once
+    private var restoring = false
+
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         candidateId = intent.getStringExtra(EXTRA_CANDIDATE_ID) ?: run { finish(); return }
         python = Python.getInstance()
+        val s = savedInstanceState
+        if (s != null) {
+            restoring = true
+            halfSizeM = s.getDouble("halfSizeM", halfSizeM)
+            colourBy = s.getString("colourBy") ?: colourBy
+            satProduct = s.getString("satProduct")
+            filterName = s.getString("filterName")
+            filterParams = s.getString("filterParams")?.let { JSONObject(it) }
+            preset = s.getString("preset")
+            lineAsk = s.getFloatArray("lineAsk")
+            pendingGround = s.getFloatArray("ground")
+        }
         buildUi()
+        if (s != null) {
+            view.smooth = s.getBoolean("smooth", false)
+            modeBtn.text = if (view.smooth) "Smooth" else "Exact cells"
+            windowBtn.text = "Window: " + if (halfSizeM >= 1000) "\u00B1${trimNum(halfSizeM / 1000)} km"
+                else "\u00B1${halfSizeM.toInt()} m"
+        }
         load(keepView = false)
+    }
+
+    override fun onSaveInstanceState(out: Bundle) {
+        super.onSaveInstanceState(out)
+        out.putDouble("halfSizeM", halfSizeM)
+        out.putString("colourBy", colourBy)
+        out.putString("satProduct", satProduct)
+        out.putString("filterName", filterName)
+        out.putString("filterParams", filterParams?.toString())
+        out.putString("preset", preset)
+        out.putFloatArray("lineAsk", if (profile != null) lineAsk else null)
+        if (::view.isInitialized) {
+            out.putBoolean("smooth", view.smooth)
+            view.groundState()?.let { out.putFloatArray("ground", it) }
+        }
+    }
+
+    /** called when the manifest has configChanges for this activity */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (::body.isInitialized) applyOrientation()   // the view's onSizeChanged keeps the ground
     }
 
     override fun onDestroy() {
@@ -118,7 +173,7 @@ class FinalImageActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    // ---------------------------------------------------------------- UI
+    // ------------------------------------------------------------------ UI
 
     private fun buildUi() {
         val d = resources.displayMetrics.density
@@ -161,21 +216,25 @@ class FinalImageActivity : AppCompatActivity() {
         buttons.addView(button("Export") { export() })
         root.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(buttons) })
 
-        val frame = FrameLayout(this)
+        // fi-v2.2: map and side column share `body`; applyOrientation() decides the layout.
+        // The map never gets a pixel height; it takes whatever the layout gives it.
+        body = LinearLayout(this)
+        mapFrame = FrameLayout(this)
         view = FinalImageView(this).apply {
             onViewChanged = { updateInfo() }
             onMarkersTapped = { if (it.size == 1) showMarker(it[0]) else showCluster(it) }
             onGridTapped = { x, y -> onPick(x, y) }
         }
-        frame.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        mapFrame.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         progress = ProgressBar(this).apply { visibility = View.GONE }
-        frame.addView(progress, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
-        root.addView(frame, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        mapFrame.addView(progress, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
+        body.addView(mapFrame)
 
-        root.addView(buildProfilePanel(pad, d))
+        sideCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        sideCol.addView(buildProfilePanel(pad, d))
 
         info = smallText(R.color.ariyan_accent).apply { setPadding(pad, pad / 3, pad, 0) }
-        root.addView(info)
+        sideCol.addView(info)
 
         val legendRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -188,17 +247,22 @@ class FinalImageActivity : AppCompatActivity() {
         // fi-v2.1: give the legend text the remaining width so long satellite legends wrap
         // inside the row instead of spilling into the notes area below.
         legendRow.addView(legendText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(legendRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        root.addView(View(this).apply { setBackgroundColor(col(R.color.ariyan_text_secondary)); alpha = 0.35f },
+        sideCol.addView(legendRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        sideCol.addView(View(this).apply { setBackgroundColor(col(R.color.ariyan_text_secondary)); alpha = 0.35f },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, d.toInt())).apply { topMargin = pad / 3 })
 
         notes = smallText(R.color.ariyan_text_secondary).apply { setPadding(pad, pad / 3, pad, pad) }
-        root.addView(ScrollView(this).apply {
+        notesScroll = ScrollView(this).apply {
             clipChildren = true; clipToPadding = true
             setBackgroundColor(col(R.color.ariyan_bg))
             addView(notes)
-        },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (88 * d).toInt()))
+        }
+        sideCol.addView(notesScroll)
+        side = ScrollView(this).apply { isFillViewport = true; addView(sideCol) }
+        body.addView(side)
+
+        root.addView(body, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        applyOrientation()
         setContentView(root)
     }
 
@@ -219,7 +283,14 @@ class FinalImageActivity : AppCompatActivity() {
         head.addView(small("Export") { exportProfile() })
         head.addView(small("Close") { closeProfile() })
         profilePanel.addView(head)
-        profileView = ProfileView(this).apply { onCursor = { dm -> showCursor(dm) } }
+        profileView = ProfileView(this).apply {
+            onCursor = { dm -> showCursor(dm) }
+            // fi-v2.2: keep drags on the trace away from the side column's ScrollView
+            setOnTouchListener { v, e ->
+                if (e.actionMasked == MotionEvent.ACTION_DOWN) v.parent.requestDisallowInterceptTouchEvent(true)
+                false
+            }
+        }
         profilePanel.addView(profileView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (210 * d).toInt()))
         readout = smallText(R.color.ariyan_text_secondary).apply { setPadding(pad / 2, pad / 4, pad / 2, 0) }
         profilePanel.addView(readout)
@@ -232,7 +303,24 @@ class FinalImageActivity : AppCompatActivity() {
         setTextColor(col(colour))
     }
 
-    // ---------------------------------------------------------------- data
+    /** fi-v2.2: portrait: map over the side column; landscape: side by side, map ~60 % */
+    private fun applyOrientation() {
+        val d = resources.displayMetrics.density
+        val land = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val mp = ViewGroup.LayoutParams.MATCH_PARENT
+        val wc = ViewGroup.LayoutParams.WRAP_CONTENT
+        body.orientation = if (land) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        mapFrame.layoutParams = if (land) LinearLayout.LayoutParams(0, mp, 0.6f) else LinearLayout.LayoutParams(mp, 0, 1f)
+        side.layoutParams = if (land) LinearLayout.LayoutParams(0, mp, 0.4f) else LinearLayout.LayoutParams(mp, wc)
+        // portrait keeps the 88 dp notes box; landscape lets the whole column scroll
+        notesScroll.layoutParams = LinearLayout.LayoutParams(mp, if (land) wc else (88 * d).toInt())
+        body.requestLayout()
+    }
+
+    private fun spanText(m: Double) =
+        if (m >= 1000) String.format(Locale.US, "%.2f km", m / 1000) else "${m.toInt()} m"
+
+    // ------------------------------------------------------------------ data
 
     private fun load(keepView: Boolean) {
         setLoading(true)
@@ -274,6 +362,7 @@ class FinalImageActivity : AppCompatActivity() {
         view.utmLines = parseUtm(m.optJSONObject("utm_grid"))
         view.markers = parseMarkers(m.getJSONArray("candidates"))
         view.setImage(bmp, m.optDouble("cell_dx_m", nativeRes), keepView)
+        pendingGround?.let { view.restoreGround(it); pendingGround = null }   // fi-v2.2: after a rebuild
         title.text = String.format(Locale.US, "Final Image \u00B7 %s  (%.5f, %.5f)",
             candidateId.take(8), m.getDouble("lat"), m.getDouble("lon"))
         updateLegend(m)
@@ -282,7 +371,10 @@ class FinalImageActivity : AppCompatActivity() {
         // a new window / colour is a new session: re-open the chosen layer on it
         // (saved images only; never fetches without asking)
         // a hand-drawn A-A' only fits the window it was drawn on; presets are re-run
-        if (!keepView && preset == null && lineAsk != null) closeProfile()
+        // fi-v2.2: after a rebuild the window is the same, so a restored line is kept
+        val wasRestoring = restoring
+        restoring = false
+        if (!keepView && !wasRestoring && preset == null && lineAsk != null) closeProfile()
         val sp = satProduct
         val fn = filterName
         if (sp != null) openSatellite(sp, fetch = false, quiet = true)   // refreshes the profile itself
@@ -365,25 +457,45 @@ class FinalImageActivity : AppCompatActivity() {
 
     private fun updateInfo() {
         val m = meta ?: return
-        val pxPerCell = view.scale / resources.displayMetrics.density
+        val d = resources.displayMetrics.density
+        val demCellM = m.optDouble("cell_dx_m", nativeRes)
         val w = view.visibleWindow()
-        val acrossM = (w[2] - w[0]) * m.optDouble("cell_dx_m", nativeRes)
-        val mode = if (view.smooth) "Smooth (interpolated, visual only)" else "Exact cells"
-        val beyond = view.scale > 1f
-        // fi-v2.1: under a satellite layer the visible cells are satellite pixels, not DEM cells.
+        val wM = (w[2] - w[0]).toDouble() * demCellM
+        val hM = (w[3] - w[1]).toDouble() * demCellM
+        // fi-v2.2: "across" = the SHORTER side, so the same window reads the same in portrait and landscape
+        val across = minOf(wM, hM)
+
+        // fi-v2.2: the cell being looked at: satellite pixel under a satellite layer, otherwise
+        // the DEM cell (filters are derived from the DEM, same cells)
         val sm = satMeta
-        val resLabel = if (sm != null && !sm.optDouble("pixel_m").isNaN())
-            String.format(Locale.US, "%s %.0f m/pixel (DEM %.1f m/cell)", sm.optString("label", "Satellite"), sm.optDouble("pixel_m"), nativeRes)
+        val satPx = sm?.optDouble("pixel_m") ?: Double.NaN
+        val onSat = sm != null && !satPx.isNaN() && satPx > 0
+        val cellM = if (onSat) satPx else demCellM
+        val cellKind = when {
+            onSat -> (satLabels[satProduct]?.substringBefore(" (") ?: sm!!.optString("label", "satellite")) + " image cell"
+            filterMeta != null -> "DEM cell (derived filter)"
+            else -> "DEM cell"
+        }
+        val pxPerCell = view.scale * (cellM / demCellM).toFloat()   // view.scale = screen px per DEM cell
+        val beyond = pxPerCell > 1f
+
+        val resLabel = if (onSat)
+            String.format(Locale.US, "%s %.0f m/pixel (DEM %.1f m/cell)", sm!!.optString("label", "Satellite"), satPx, nativeRes)
         else String.format(Locale.US, "Native %.1f m/cell", nativeRes)
-        info.text = String.format(Locale.US, "%s \u00B7 %.1f dp per DEM cell \u00B7 view %s across \u00B7 %s%s",
-            resLabel, pxPerCell, if (acrossM >= 1000) String.format(Locale.US, "%.2f km", acrossM / 1000) else "${acrossM.toInt()} m",
-            mode,
-            if (beyond && !view.smooth) "\nZoomed past native: each square is one real DEM cell, no new detail added."
-            else if (beyond) "\nZoomed past native: colours between cell centres are interpolated, not measured." else "")
+        val mode = if (view.smooth) "Smooth (interpolated, visual only)" else "Exact cells"
+
+        info.text = String.format(Locale.US, "%s \u00B7 %.1f dp per %s \u00B7 view %s across (%s \u00D7 %s) \u00B7 %s%s",
+            resLabel, pxPerCell / d, if (onSat) "image cell" else "DEM cell",
+            spanText(across), spanText(wM), spanText(hM), mode,
+            when {
+                beyond && !view.smooth -> "\nZoomed past native: each square is one $cellKind (${trimNum(cellM)} m), no new detail added."
+                beyond -> "\nZoomed past native ($cellKind, ${trimNum(cellM)} m): colours between cell centres are interpolated, not measured."
+                else -> ""
+            })
         if (view.pickMode) info.append(if (pickA == null) "\nProfile: tap point A on the map." else "\nProfile: now tap point A\u2032.")
     }
 
-    // ---------------------------------------------------------------- actions
+    // ------------------------------------------------------------------ actions
 
     private fun toggleMode() {
         view.smooth = !view.smooth
@@ -478,7 +590,7 @@ class FinalImageActivity : AppCompatActivity() {
         }
     }
 
-    // ---------------------------------------------------------------- satellite layers (fi-v2)
+    // ------------------------------------------------------------------ satellite layers (fi-v2)
 
     private val satLabels = linkedMapOf(
         "NDVI" to "NDVI (Sentinel-2, 10 m)",
@@ -632,7 +744,7 @@ class FinalImageActivity : AppCompatActivity() {
             .append(pv.optString("sha256").take(12)).append("\u2026 \u00B7 ").append(pv.optString("version"))
     }
 
-    // ---------------------------------------------------------------- DEM filters (fa-v2)
+    // ------------------------------------------------------------------ DEM filters (fa-v2)
 
     private val filterTitles = linkedMapOf(
         "smooth" to "Smooth (Gaussian / median)",
@@ -784,7 +896,7 @@ class FinalImageActivity : AppCompatActivity() {
         }
     }
 
-    // ---------------------------------------------------------------- profile & section (fa-v1)
+    // ------------------------------------------------------------------ profile & section (fa-v1)
 
     private fun chooseProfile() {
         if (sessionId == null) return
