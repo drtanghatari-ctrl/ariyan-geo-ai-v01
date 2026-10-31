@@ -376,3 +376,4 @@ def withdraw_footprint_json(db_root: str, hypothesis_id: str, reason: str) -> st
         return json.dumps({"ok": True})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
