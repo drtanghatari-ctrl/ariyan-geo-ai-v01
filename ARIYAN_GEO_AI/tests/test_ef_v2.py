@@ -102,3 +102,4 @@ def test_area_is_metres():
     dlon = 100.0 / (111320.0 * np.cos(np.radians(lat0)))
     sq = [[lat0, lon0], [lat0, lon0 + dlon], [lat0 + dlat, lon0 + dlon], [lat0 + dlat, lon0]]
     assert abs(fph.polygon_area_m2(sq) - 10000.0) < 50.0
+
