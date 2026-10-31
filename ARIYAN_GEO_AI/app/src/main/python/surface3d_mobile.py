@@ -21,6 +21,11 @@ derived, make-up unknown); ground BELOW its base gets a translucent blue band
 up to the base (missing material, a hollow). Everything below the lower of
 the two stays grey hatched: UNKNOWN, no measurement.
 
+cut-v2 part 2 (2026-10-31): the user's own HYPOTHESIZED shapes on the face
+(section_hypothesis.py). hypotheses_json() lists them for the candidate and
+says which lie on the open line; add/withdraw go through the append-only
+store. They are drawn purple, labelled HYPOTHESIZED, and are never evidence.
+
 The 3D view is a different way of LOOKING at stored cells. It adds no
 measurement and no evidence, and it never writes a candidate, review, status
 or confidence.
@@ -52,7 +57,7 @@ CUT_FACE_RULE = ("cut-v2 face: orange = DERIVED raised material between the grou
                  "UNKNOWN, no subsurface measurement (no GPR, no ERT). The drawn depth of the grey part "
                  "is a drawing aid, not a depth.")
 _STATE_KEYS = ("ve", "ve_mode", "azimuth_deg", "tilt_deg", "distance_m",
-               "drape", "drape_detail", "pins", "profile_line", "cut", "width_px", "height_px")
+               "drape", "drape_detail", "pins", "profile_line", "cut", "hypotheses", "width_px", "height_px")
 
 
 def _session(session_id: str) -> Dict:
@@ -208,5 +213,72 @@ def export_snapshot_json(db_root: str, session_id: str, png_bytes, state_json: s
         with open(prov_path, "w", encoding="utf-8") as f:
             json.dump(prov, f, indent=2, sort_keys=True)
         return json.dumps({"ok": True, "paths": {"png": png_path, "provenance": prov_path}})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+# --------------------------------------------------------------------------
+# cut-v2 part 2: user-drawn HYPOTHESIZED shapes on the cut face
+# --------------------------------------------------------------------------
+
+LINE_MATCH_CELLS = 1.5      # a stored line is "this line" if both ends are within this many cells
+
+
+def _line_geo(s: Dict, ax: float, ay: float, bx: float, by: float) -> Dict:
+    grid = s["result"]["grid"]
+    cdx, cdy = grid.cell_size_m()
+    a_lon, a_lat = grid.pixel_to_lonlat(ax, ay)
+    b_lon, b_lat = grid.pixel_to_lonlat(bx, by)
+    length = float(np.hypot((bx - ax) * cdx, (by - ay) * cdy))
+    return {"a_lat": a_lat, "a_lon": a_lon, "b_lat": b_lat, "b_lon": b_lon, "length_m": length}
+
+
+def hypotheses_json(db_root: str, session_id: str, ax: float, ay: float, bx: float, by: float,
+                    include_withdrawn: bool = True) -> str:
+    try:
+        import section_hypothesis as sh
+        s = _session(session_id)
+        grid = s["result"]["grid"]
+        h, w = grid.shape
+        out = []
+        for r in sh.list_for_candidate(db_root, s["candidate_id"], include_withdrawn=include_withdrawn):
+            pax, pay = grid.lonlat_to_pixel(r["a_lon"], r["a_lat"])
+            pbx, pby = grid.lonlat_to_pixel(r["b_lon"], r["b_lat"])
+            same = (np.hypot(pax - ax, pay - ay) <= LINE_MATCH_CELLS and
+                    np.hypot(pbx - bx, pby - by) <= LINE_MATCH_CELLS)
+            inside = all(0 <= v <= lim for v, lim in ((pax, w), (pbx, w), (pay, h), (pby, h)))
+            out.append({"id": r["id"], "label": r["label"], "note": r["note"], "status": r["status"],
+                        "status_reason": r["status_reason"], "created_at": r["created_at"],
+                        "along_from_m": r["along_from_m"], "along_to_m": r["along_to_m"],
+                        "depth_top_m": r["depth_top_m"], "depth_bottom_m": r["depth_bottom_m"],
+                        "line_length_m": r["line_length_m"], "kind": r["kind"],
+                        "on_this_line": bool(same), "line_in_window": bool(inside),
+                        "line_grid": [round(pax, 3), round(pay, 3), round(pbx, 3), round(pby, 3)]})
+        return json.dumps({"ok": True, "line": _line_geo(s, ax, ay, bx, by), "hypotheses": out,
+                           "statement": "HYPOTHESIZED = the user's own idea of what might lie below; "
+                                        "not measured, not evidence, never changes status or confidence."})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def add_hypothesis_json(db_root: str, session_id: str, ax: float, ay: float, bx: float, by: float,
+                        label: str, along_from_m: float, along_to_m: float,
+                        depth_top_m: float, depth_bottom_m: float, note: str = "") -> str:
+    try:
+        import section_hypothesis as sh
+        s = _session(session_id)
+        g = _line_geo(s, ax, ay, bx, by)
+        hid = sh.add(db_root, s["candidate_id"], g["a_lat"], g["a_lon"], g["b_lat"], g["b_lon"], g["length_m"],
+                     label, float(along_from_m), float(along_to_m), float(depth_top_m), float(depth_bottom_m), note)
+        return json.dumps({"ok": True, "id": hid})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def withdraw_hypothesis_json(db_root: str, hypothesis_id: str, reason: str) -> str:
+    try:
+        import section_hypothesis as sh
+        sh.withdraw(db_root, hypothesis_id, reason)
+        return json.dumps({"ok": True})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
