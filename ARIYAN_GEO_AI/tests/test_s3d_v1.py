@@ -112,3 +112,45 @@ def test_cut_state_is_recorded_in_snapshot_provenance(tmp_path):
     assert "no subsurface measurement" in prov["view"]["cut"]
     assert prov["view"]["profile_line"] == [1.0, 2.0, 30.0, 40.0]
     ods.clear_tile_cache()
+
+
+def test_cut_v2_base_plus_relief_is_the_ground(tmp_path):
+    """cut-v2: ground - base = the same local relief the map colours use."""
+    root, d = _open(tmp_path)
+    sid = d["session_id"]
+    m = json.loads(s3d.open_surface_json(sid))
+    hgt = np.frombuffer(s3d.surface_heights(sid), "<f4").reshape(m["height"], m["width"])
+    base = np.frombuffer(s3d.surface_base(sid), "<f4").reshape(m["height"], m["width"])
+    g = fim._SESSIONS[sid]["result"]["grid"]
+    dx, dy = g.cell_size_m()
+    relief = fi.local_relief(np.asarray(g.values, float), dx, dy, 300.0)
+    fin = np.isfinite(relief)
+    assert np.allclose((hgt - base)[fin], relief[fin], atol=1e-2)
+    # the test tile holds a mound: somewhere the ground stands above its base (orange band exists)
+    assert np.nanmax(hgt - base) > 0.5
+    ods.clear_tile_cache()
+
+
+def test_cut_v2_base_keeps_holes():
+    z = np.arange(64, dtype=float).reshape(8, 8)
+    z[3, 4] = np.nan
+    g = fi.Grid(values=z, west=50.0, north=33.0, dlon=0.0003, dlat=0.0003, source="t")
+    fim._SESSIONS["h2"] = {"result": {"grid": g, "provenance": {"bounds": {}, "parameters": {"relief_radius_m": 60.0}}},
+                           "candidate_id": "c", "t": 0}
+    base = np.frombuffer(s3d.surface_base("h2"), "<f4").reshape(8, 8)
+    assert np.isnan(base[3, 4]) and np.isfinite(base).sum() == 63
+    assert "60 m" in s3d.cut_face_rule("h2") and "UNKNOWN" in s3d.cut_face_rule("h2")
+    fim._SESSIONS.pop("h2")
+
+
+def test_cut_v2_rule_written_only_when_cut_is_on(tmp_path):
+    root, d = _open(tmp_path)
+    png = fi.encode_png(np.full((4, 4, 4), 90, np.uint8))
+    on = json.loads(s3d.export_snapshot_json(root, d["session_id"], png, json.dumps({"cut": "keep left of A->A'"})))
+    p_on = json.load(open(on["paths"]["provenance"], encoding="utf-8"))
+    assert "DERIVED raised material" in p_on["cut_face"] and "UNKNOWN" in p_on["cut_face"]
+    import time; time.sleep(1.1)
+    off = json.loads(s3d.export_snapshot_json(root, d["session_id"], png, json.dumps({"cut": "off"})))
+    p_off = json.load(open(off["paths"]["provenance"], encoding="utf-8"))
+    assert p_off["cut_face"] is None
+    ods.clear_tile_cache()
