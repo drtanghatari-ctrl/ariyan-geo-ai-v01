@@ -13,6 +13,14 @@ hands Android:
 cut-v1 (2026-10-31): the snapshot provenance also records the cutaway state
 ("cut"); the cut face shows NO subsurface measurement.
 
+cut-v2 (2026-10-31): the cut face gets a DERIVED band. surface_base() gives
+the local base level of every cell: the mean ground level in the same window
+as the relief colours (default 300 m), so  ground - base = local relief.
+On the face, ground ABOVE its base is drawn orange (raised material, DEM-
+derived, make-up unknown); ground BELOW its base gets a translucent blue band
+up to the base (missing material, a hollow). Everything below the lower of
+the two stays grey hatched: UNKNOWN, no measurement.
+
 The 3D view is a different way of LOOKING at stored cells. It adds no
 measurement and no evidence, and it never writes a candidate, review, status
 or confidence.
@@ -27,6 +35,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 
+import final_image as fi
 import final_image_mobile as fim
 
 S3D_VERSION = "s3d-v1"
@@ -37,6 +46,11 @@ NICE_VE = (1.0, 1.5, 2.0, 3.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 50.0)
 TARGET_FRACTION = 0.10
 STATEMENT = ("3D view of the stored DEM cells, display only. Height is exaggerated as "
              "stated; it adds no new measurement and is not archaeological proof.")
+CUT_FACE_RULE = ("cut-v2 face: orange = DERIVED raised material between the ground line and the local "
+                 "base level (mean ground level within %g m, from the DEM; make-up unknown); translucent "
+                 "blue = DERIVED hollow between the ground line and the local base; grey hatched below = "
+                 "UNKNOWN, no subsurface measurement (no GPR, no ERT). The drawn depth of the grey part "
+                 "is a drawing aid, not a depth.")
 _STATE_KEYS = ("ve", "ve_mode", "azimuth_deg", "tilt_deg", "distance_m",
                "drape", "drape_detail", "pins", "profile_line", "cut", "width_px", "height_px")
 
@@ -99,6 +113,7 @@ def open_surface_json(session_id: str) -> str:
             "z_min_m": round(float(np.min(z[finite])), 2), "z_max_m": round(float(np.max(z[finite])), 2),
             "cells": int(h * w), "cells_no_data": int((~finite).sum()),
             "source": grid.source, "source_sha256": grid.source_sha256,
+            "relief_radius_m": _relief_radius(s),
             "statement": STATEMENT,
         })
     except Exception as e:                      # shown to the user, never hidden
@@ -114,6 +129,31 @@ def surface_heights(session_id: str) -> bytes:
     ref = float(np.median(z[finite])) if finite.any() else 0.0
     out = np.where(finite, z - ref, np.nan).astype("<f4")
     return out.tobytes()
+
+
+def _relief_radius(s: Dict) -> float:
+    params = s["result"].get("provenance", {}).get("parameters", {}) or {}
+    return float(params.get("relief_radius_m") or 300.0)
+
+
+def surface_base(session_id: str) -> bytes:
+    """cut-v2: local base level per cell (mean ground within the relief
+    radius) minus the same window median as surface_heights(), float32
+    little-endian, row-major. NaN where the stored cell has no value."""
+    s = _session(session_id)
+    grid = s["result"]["grid"]
+    z = np.asarray(grid.values, dtype=np.float64)
+    dx, dy = grid.cell_size_m()
+    finite = np.isfinite(z)
+    ref = float(np.median(z[finite])) if finite.any() else 0.0
+    relief = fi.local_relief(z, dx, dy, _relief_radius(s))
+    base = z - relief
+    out = np.where(np.isfinite(base), base - ref, np.nan).astype("<f4")
+    return out.tobytes()
+
+
+def cut_face_rule(session_id: str) -> str:
+    return CUT_FACE_RULE % _relief_radius(_session(session_id))
 
 
 def _clean_state(state_json: str) -> Dict:
@@ -157,10 +197,14 @@ def export_snapshot_json(db_root: str, session_id: str, png_bytes, state_json: s
                         "that all have a value; cells without a value leave a hole",
             "ve_auto": ve_auto, "ve_auto_info": info,
             "view": _clean_state(state_json),
+            "cut_face": None,
             "processing_parameters": s.get("processing_parameters"),
             "outputs": {"png_sha256": hashlib.sha256(data).hexdigest()},
             "statement": STATEMENT,
         }
+        cut = str(prov["view"].get("cut") or "off")
+        if cut != "off":
+            prov["cut_face"] = CUT_FACE_RULE % _relief_radius(s)
         with open(prov_path, "w", encoding="utf-8") as f:
             json.dump(prov, f, indent=2, sort_keys=True)
         return json.dumps({"ok": True, "paths": {"png": png_path, "provenance": prov_path}})
