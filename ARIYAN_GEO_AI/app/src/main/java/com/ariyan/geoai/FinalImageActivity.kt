@@ -114,6 +114,9 @@ import java.util.Locale
  * the map, the 3D drape and the cut face (grey ramp; hatched = empty bin; nothing
  * interpolated). "Deeper / Shallower" step through depths of the shown field slice
  * or volume slice. Footprints now say how many DEM cells they cover.
+ * ef-v4a.1 (2026-10-31): depth stepping is queued: each tap moves a target depth at
+ * once (shown on screen); one slice loads at a time and the newest target is loaded
+ * when the previous one finishes, so no tap is lost or applied to an old depth.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -928,8 +931,8 @@ class FinalImageActivity : AppCompatActivity() {
             .setNegativeButton("Cancel", null).show()
     }
 
-    private fun openVolumeSlice(k: Int) {
-        val sid = sessionId ?: return
+    private fun openVolumeSlice(k: Int, onDone: (() -> Unit)? = null) {
+        val sid = sessionId ?: run { onDone?.invoke(); return }
         setLoading(true)
         lifecycleScope.launch {
             try {
@@ -962,6 +965,7 @@ class FinalImageActivity : AppCompatActivity() {
                 showError("Not enough memory for the volume; choose a smaller window.")
             } finally {
                 setLoading(false)
+                onDone?.invoke()
             }
         }
     }
@@ -1340,8 +1344,8 @@ class FinalImageActivity : AppCompatActivity() {
         b.show()
     }
 
-    private fun openFieldSlice(datasetId: String, k: Int) {
-        val sid = sessionId ?: return
+    private fun openFieldSlice(datasetId: String, k: Int, onDone: (() -> Unit)? = null) {
+        val sid = sessionId ?: run { onDone?.invoke(); return }
         setLoading(true)
         lifecycleScope.launch {
             try {
@@ -1375,25 +1379,49 @@ class FinalImageActivity : AppCompatActivity() {
                 showError("Not enough memory for this survey slice.")
             } finally {
                 setLoading(false)
+                onDone?.invoke()
             }
         }
     }
 
+    // ef-v4a.1: queued depth stepping
+    private var wantDepth: Int? = null       // where the taps say we should be
+    private var depthLoading = false         // one slice load at a time
+
     /** Deeper / Shallower: step the shown field slice, or the shown volume slice */
     private fun stepDepth(delta: Int) {
         val fid = fieldId
-        if (fid != null) {
-            val k = fieldK + delta
-            if (k < 0 || (fieldSlices > 0 && k >= fieldSlices)) { info.text = "No more depth slices in this survey."; return }
-            openFieldSlice(fid, k); return
-        }
         val vk = volK
-        if (vk != null) {
-            val k = vk + delta
-            if (k < 0 || k >= 20) { info.text = "The volume goes from 0 to 10 m."; return }
-            openVolumeSlice(k); return
+        if (fid == null && vk == null) {
+            info.text = "Show a field-data depth slice (Field data) or a volume slice (Volume) first."
+            return
         }
-        info.text = "Show a field-data depth slice (Field data) or a volume slice (Volume) first."
+        val max = if (fid != null) (if (fieldSlices > 0) fieldSlices else fieldK + 1) else 20
+        val from = wantDepth ?: (if (fid != null) fieldK else vk!!)
+        val k = from + delta
+        if (k < 0 || k >= max) {
+            info.text = if (fid != null) "No more depth slices in this survey." else "The volume goes from 0 to 10 m."
+            return
+        }
+        wantDepth = k
+        info.text = "\u2192 going to " + (if (fid != null) "slice ${k + 1} of $max" else volDepthText(k)) + "\u2026"
+        if (!depthLoading) loadWantedDepth()
+    }
+
+    private fun loadWantedDepth() {
+        val k = wantDepth ?: return
+        depthLoading = true
+        val done = {
+            depthLoading = false
+            val shown = if (fieldId != null) fieldK else volK
+            when {
+                shown != k -> wantDepth = null                                    // the load failed: stop, never loop
+                wantDepth != null && wantDepth != shown -> loadWantedDepth()      // more taps arrived meanwhile
+                else -> wantDepth = null
+            }
+        }
+        val fid = fieldId
+        if (fid != null) openFieldSlice(fid, k, done) else openVolumeSlice(k, done)
     }
 
     private fun updateFieldLegend() {
