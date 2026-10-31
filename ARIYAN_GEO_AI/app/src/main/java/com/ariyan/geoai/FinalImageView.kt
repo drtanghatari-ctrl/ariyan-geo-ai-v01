@@ -62,6 +62,25 @@ class FinalImageView(context: Context) : View(context) {
     /** line ends and the trace cursor, grid-pixel coordinates */
     var profileA: FloatArray? = null
     var profileB: FloatArray? = null
+
+    // ef-v2 (2026-10-31): the user's footprint hypotheses (grid units, x0,y0,x1,y1,...),
+    // drawn as dashed purple outlines; sketch = the footprint being drawn now
+    var footprints: List<FloatArray> = emptyList()
+    var footprintLabels: List<String> = emptyList()
+    var sketch: FloatArray? = null
+    private val fpPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; strokeWidth = 2.5f * resources.displayMetrics.density
+        color = Color.rgb(190, 130, 255)
+        pathEffect = android.graphics.DashPathEffect(floatArrayOf(10f * resources.displayMetrics.density, 6f * resources.displayMetrics.density), 0f)
+    }
+    private val fpShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; strokeWidth = 4.5f * resources.displayMetrics.density; color = Color.argb(160, 0, 0, 0)
+    }
+    private val sketchPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE; strokeWidth = 3f * resources.displayMetrics.density; color = Color.rgb(230, 60, 170)
+    }
+    private val sketchDot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(230, 60, 170) }
+    private val fpPath = android.graphics.Path()
     var profileCursor: FloatArray? = null
     private val profileLine = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; strokeWidth = 2.5f * resources.displayMetrics.density }
     private val profileShadow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; strokeWidth = 4.5f * resources.displayMetrics.density }
@@ -398,7 +417,34 @@ class FinalImageView(context: Context) : View(context) {
         drawScaleBar(canvas)
         drawNorth(canvas)
         if (showLabels) drawLabels(canvas)
+        drawFootprints(canvas)
         drawProfile(canvas)
+    }
+
+    /** ef-v2: saved footprint hypotheses (dashed purple) and the one being drawn (magenta) */
+    private fun drawFootprints(canvas: Canvas) {
+        for (poly in footprints) {
+            if (poly.size < 6) continue
+            fpPath.reset()
+            fpPath.moveTo(tx + poly[0] * scale, ty + poly[1] * scale)
+            var i = 2
+            while (i + 1 < poly.size) { fpPath.lineTo(tx + poly[i] * scale, ty + poly[i + 1] * scale); i += 2 }
+            fpPath.close()
+            canvas.drawPath(fpPath, fpShadow)
+            canvas.drawPath(fpPath, fpPaint)
+        }
+        val sk = sketch ?: return
+        val r = 5f * d
+        var i = 0
+        while (i + 1 < sk.size) {
+            val x = tx + sk[i] * scale; val y = ty + sk[i + 1] * scale
+            canvas.drawCircle(x, y, r, sketchDot)
+            if (i >= 2) canvas.drawLine(tx + sk[i - 2] * scale, ty + sk[i - 1] * scale, x, y, sketchPaint)
+            i += 2
+        }
+        if (sk.size >= 6) canvas.drawLine(tx + sk[sk.size - 2] * scale, ty + sk[sk.size - 1] * scale,
+            tx + sk[0] * scale, ty + sk[1] * scale, sketchPaint.apply { alpha = 120 })
+        sketchPaint.alpha = 255
     }
 
     private fun drawProfile(canvas: Canvas) {
