@@ -55,6 +55,15 @@ import java.util.Locale
  * landscape puts them side by side (map ~60 %). The view keeps the same ground
  * on any size change; state is saved as ground, never pixels. "View across"
  * reports the shorter side; the past-native banner uses the active layer's cell.
+ *
+ * fs-v1 (2026-10-31): Surfer panel layout. Four sub-tabs over one shared map:
+ * Contour & Surface (image, colour, window, satellite, layers, export),
+ * 3D Visualization (s3d-v1, next build), Profile & Section (fa-v1) and
+ * Filters & Tools (fa-v2). A tab only changes the button row; the map, an
+ * open profile, filter or satellite layer stay as they are. A collapsible
+ * "Processing parameters" box states what was really used (native grid, no
+ * gridding or interpolation, contours, colour, hillshade, overlay); the export
+ * writes the same block and the screen state into the provenance file.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -118,6 +127,17 @@ class FinalImageActivity : AppCompatActivity() {
     private var pendingGround: FloatArray? = null   // from savedInstanceState, applied once
     private var restoring = false
 
+    // fs-v1 (2026-10-31): Surfer panel sub-tabs + processing parameters
+    private val tabKeys = listOf("contour", "3d", "profile", "filters")
+    private val tabTitles = listOf("Contour & Surface", "3D Visualization", "Profile & Section", "Filters & Tools")
+    private val tabViews = mutableListOf<TextView>()
+    private val tabRows = mutableListOf<View>()
+    private lateinit var toolRow: HorizontalScrollView
+    private var tab = 0
+    private lateinit var paramsHead: TextView
+    private lateinit var paramsText: TextView
+    private var paramsOpen = false
+
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -135,6 +155,8 @@ class FinalImageActivity : AppCompatActivity() {
             preset = s.getString("preset")
             lineAsk = s.getFloatArray("lineAsk")
             pendingGround = s.getFloatArray("ground")
+            tab = s.getInt("tab", 0).coerceIn(0, 3)
+            paramsOpen = s.getBoolean("paramsOpen", false)
         }
         buildUi()
         if (s != null) {
@@ -155,6 +177,8 @@ class FinalImageActivity : AppCompatActivity() {
         out.putString("filterParams", filterParams?.toString())
         out.putString("preset", preset)
         out.putFloatArray("lineAsk", if (profile != null) lineAsk else null)
+        out.putInt("tab", tab)
+        out.putBoolean("paramsOpen", paramsOpen)
         if (::view.isInitialized) {
             out.putBoolean("smooth", view.smooth)
             view.groundState()?.let { out.putFloatArray("ground", it) }
@@ -195,30 +219,72 @@ class FinalImageActivity : AppCompatActivity() {
         }
         root.addView(title)
 
-        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(pad / 2, 0, pad / 2, 0) }
+        // fs-v1: sub-tab strip (Surfer panel); each tab has its own button row over the same map
+        val strip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(pad / 2, 0, pad / 2, pad / 4) }
+        tabTitles.forEachIndexed { i, t ->
+            val tv = TextView(this).apply {
+                text = t; textSize = 12f
+                setPadding(pad, pad / 2, pad, pad / 2)
+                setOnClickListener { selectTab(i) }
+            }
+            tabViews.add(tv)
+            strip.addView(tv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { marginEnd = pad / 3 })
+        }
+        root.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(strip) })
+
+        fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(pad / 2, 0, pad / 2, 0) }
         fun button(t: String, onClick: () -> Unit) = MaterialButton(this).apply {
             text = t; isAllCaps = false; textSize = 12f
             setOnClickListener { onClick() }
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 .apply { marginStart = pad / 3; marginEnd = pad / 3 }
         }
+
+        // Contour & Surface
+        val contourRow = row()
         modeBtn = button("Exact cells") { toggleMode() }
         colourBtn = button("Colour: relief") { toggleColour() }
         windowBtn = button("Window: \u00B11 km") { chooseWindow() }
-        buttons.addView(modeBtn)
-        buttons.addView(colourBtn)
-        buttons.addView(windowBtn)
         satBtn = button("Satellite: off") { chooseSatellite() }
-        buttons.addView(satBtn)
+        contourRow.addView(modeBtn)
+        contourRow.addView(colourBtn)
+        contourRow.addView(windowBtn)
+        contourRow.addView(satBtn)
+        contourRow.addView(button("Layers") { chooseLayers() })
+        contourRow.addView(button("Fit") { view.fitToScreen() })
+        contourRow.addView(button("Centre") { centreOnCandidate() })
+        contourRow.addView(button("Export") { export() })
+
+        // 3D Visualization (s3d-v1 is the next build; nothing is drawn here yet)
+        val threeDRow = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(smallText(R.color.ariyan_text_secondary).apply {
+                text = "3D surface: next build (s3d-v1). Nothing is drawn here yet."
+                setPadding(pad / 2, pad / 2, pad / 2, pad / 2)
+            })
+        }
+
+        // Profile & Section (fa-v1)
+        val profileRow = row()
+        profileBtn = button("Draw A\u2013A\u2032") { if (sessionId != null) startPick() }
+        profileRow.addView(profileBtn)
+        profileRow.addView(button("N\u2013S") { runPreset("NS") })
+        profileRow.addView(button("E\u2013W") { runPreset("EW") })
+        profileRow.addView(button("Export") { if (profile != null) exportProfile() else showError("Open a profile first.") })
+        profileRow.addView(button("Close") { closeProfile() })
+
+        // Filters & Tools (fa-v2)
+        val filtersRow = row()
         filterBtn = button("Filters: off") { chooseFilter() }
-        buttons.addView(filterBtn)
-        profileBtn = button("Profile") { chooseProfile() }
-        buttons.addView(profileBtn)
-        buttons.addView(button("Layers") { chooseLayers() })
-        buttons.addView(button("Fit") { view.fitToScreen() })
-        buttons.addView(button("Centre") { centreOnCandidate() })
-        buttons.addView(button("Export") { export() })
-        root.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(buttons) })
+        filtersRow.addView(filterBtn)
+        filtersRow.addView(button("Opacity") { if (view.hasOverlay) chooseOpacity() else showError("No layer or filter is shown.") })
+        filtersRow.addView(button("Export") { if (filterMeta != null) exportFilter() else showError("Choose a filter first.") })
+
+        tabRows.addAll(listOf(contourRow, threeDRow, profileRow, filtersRow))
+        toolRow = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        root.addView(toolRow)
+        selectTab(tab)
 
         // fi-v2.2: map and side column share `body`; applyOrientation() decides the layout.
         // The map never gets a pixel height; it takes whatever the layout gives it.
@@ -254,6 +320,17 @@ class FinalImageActivity : AppCompatActivity() {
         sideCol.addView(legendRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         sideCol.addView(View(this).apply { setBackgroundColor(col(R.color.ariyan_text_secondary)); alpha = 0.35f },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, d.toInt())).apply { topMargin = pad / 3 })
+
+        // fs-v1: Processing parameters (collapsed by default; tap to open)
+        paramsHead = smallText(R.color.ariyan_text_primary).apply {
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            setPadding(pad, pad / 3, pad, 0)
+            setOnClickListener { paramsOpen = !paramsOpen; updateParams() }
+        }
+        sideCol.addView(paramsHead)
+        paramsText = smallText(R.color.ariyan_text_secondary).apply { setPadding(pad, pad / 4, pad, 0) }
+        sideCol.addView(paramsText)
+        updateParams()
 
         notes = smallText(R.color.ariyan_text_secondary).apply { setPadding(pad, pad / 3, pad, pad) }
         notesScroll = ScrollView(this).apply {
@@ -319,6 +396,55 @@ class FinalImageActivity : AppCompatActivity() {
         // portrait keeps the 88 dp notes box; landscape lets the whole column scroll
         notesScroll.layoutParams = LinearLayout.LayoutParams(mp, if (land) wc else (88 * d).toInt())
         body.requestLayout()
+    }
+
+    /** fs-v1: a tab only swaps the button row; the map and anything open on it stay */
+    private fun selectTab(i: Int) {
+        tab = i.coerceIn(0, tabRows.size - 1)
+        tabViews.forEachIndexed { k, tv ->
+            val on = k == tab
+            tv.setTextColor(col(if (on) R.color.ariyan_accent else R.color.ariyan_text_secondary))
+            tv.typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            tv.background = if (on) GradientDrawable().apply {
+                setCornerRadius(8 * resources.displayMetrics.density)
+                setColor(col(R.color.ariyan_accent)); setAlpha(40)
+            } else null
+        }
+        toolRow.removeAllViews()
+        toolRow.addView(tabRows[tab])
+    }
+
+    /** fs-v1: what was really used to draw what is on screen */
+    private fun updateParams() {
+        if (!::paramsHead.isInitialized) return
+        paramsHead.text = "Processing parameters " + if (paramsOpen) "\u25BE" else "\u25B8 (tap)"
+        if (!paramsOpen) { paramsText.visibility = View.GONE; return }
+        paramsText.visibility = View.VISIBLE
+        val pp = meta?.optJSONObject("processing_parameters")
+        if (pp == null) { paramsText.text = "Not available yet (image not loaded)."; return }
+        paramsText.text = buildString {
+            val lines = pp.optJSONArray("lines")
+            if (lines != null) for (i in 0 until lines.length()) append("\u2022 ").append(lines.optString(i)).append('\n')
+            append("\u2022 Display: ").append(if (::view.isInitialized && view.smooth)
+                "Smooth (colours between cell centres interpolated, visual only)" else "Exact cells (each square = one stored cell)").append('\n')
+            append("\u2022 Overlay: ").append(when {
+                satMeta != null -> (satLabels[satProduct] ?: satProduct ?: "satellite") + " (own pixels, not resampled)"
+                filterMeta != null -> filterMeta!!.optString("label") + " " + (filterParams?.toString() ?: "")
+                else -> "none"
+            }).append('\n')
+            append("(").append(pp.optString("version")).append(", read from the image as drawn)")
+        }
+    }
+
+    private fun displayState(): JSONObject = JSONObject().apply {
+        put("display_mode", if (view.smooth) "smooth" else "cells")
+        put("tab", tabKeys[tab])
+        when {
+            satMeta != null -> { put("overlay_kind", "satellite"); put("overlay_name", satProduct) }
+            filterMeta != null -> { put("overlay_kind", "filter"); put("overlay_name", filterName)
+                filterParams?.let { put("overlay_params", it) } }
+            else -> put("overlay_kind", "none")
+        }
     }
 
     private fun spanText(m: Double) =
@@ -457,6 +583,7 @@ class FinalImageActivity : AppCompatActivity() {
         satMeta?.let { sb.insert(0, satNotes(it) + "\n\n") }
         filterMeta?.let { sb.insert(0, filterNotes(it) + "\n\n") }
         notes.text = sb.toString()
+        updateParams()
     }
 
     private fun updateInfo() {
@@ -505,6 +632,7 @@ class FinalImageActivity : AppCompatActivity() {
         view.smooth = !view.smooth
         modeBtn.text = if (view.smooth) "Smooth" else "Exact cells"
         updateInfo()
+        updateParams()
     }
 
     private fun toggleColour() {
@@ -572,18 +700,20 @@ class FinalImageActivity : AppCompatActivity() {
 
     private fun export() {
         val sid = sessionId ?: return
+        val disp = displayState().toString()   // fs-v1: screen state goes into the provenance file
         setLoading(true)
         lifecycleScope.launch {
             try {
                 val r = withContext(Dispatchers.Default) {
-                    JSONObject(python.getModule("final_image_mobile").callAttr("export_final_image_json", offlineDataRoot, sid).toString())
+                    JSONObject(python.getModule("final_image_mobile").callAttr("export_final_image_json", offlineDataRoot, sid, disp).toString())
                 }
                 if (r.has("error")) showError(r.getString("error")) else {
                     val p = r.getJSONObject("paths")
                     val text = p.keys().asSequence().joinToString("\n\n") { k -> "$k:\n" + p.getString(k) }
                     AlertDialog.Builder(this@FinalImageActivity)
                         .setTitle("Exported (full window, native cells)")
-                        .setMessage("$text\n\nThe GeoTIFF opens georeferenced in QGIS / Surfer / ArcGIS. The provenance file records the source tile and checksums.")
+                        .setMessage("$text\n\nThe GeoTIFF opens georeferenced in QGIS / Surfer / ArcGIS. The provenance file records the source tile, " +
+                            "checksums, the processing parameters and what the screen showed (a satellite layer or filter is not baked into these files).")
                         .setPositiveButton("OK", null).show()
                 }
             } catch (e: PyException) {
