@@ -406,13 +406,20 @@ def _anthropogenic_position(candidate: dict, context: dict) -> Position:
             f"({', '.join(sources) if sources else 'multiple sources'}), which this "
             "project treats as materially stronger evidence than any single source alone."
         )
-        if ndvi_synth is False:
+        # dbr-v1.1 (2026-10-31): the NDVI bonus and both NDVI sentences apply only
+        # when NDVI is itself one of the sources that CORROBORATED this candidate.
+        # Before, a real-but-non-corroborating NDVI check still added +0.15 and the
+        # text claimed an "NDVI corroboration" while the listed sources were e.g.
+        # DEM, THERMAL, SAR. Debates stored before this fix keep their old text and
+        # their old rules SHA-256 (debate_store.py).
+        ndvi_corroborates = "NDVI" in sources
+        if ndvi_corroborates and ndvi_synth is False:
             score += 0.15
             reasoning.append(
                 "The vegetation (NDVI) corroboration is real satellite data, not synthetic, "
                 "so this corroboration reflects an actual real-world signal."
             )
-        elif ndvi_synth is True:
+        elif ndvi_corroborates and ndvi_synth is True:
             reasoning.append(
                 "Note: the vegetation corroboration on this platform is currently "
                 "SYNTHETIC (placeholder) data, not a real satellite signal -- this "
