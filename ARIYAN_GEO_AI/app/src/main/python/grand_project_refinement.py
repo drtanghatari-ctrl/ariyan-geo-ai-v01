@@ -1018,6 +1018,9 @@ def _refine_candidate_impl(
                     except ValueError:
                         continue
         entry = debates_by_index.get(matched_index)
+        # dbr-v1 (2026-10-31): keep the refinement's debate too (never blocks Pass 2)
+        import debate_store
+        debate_store.record_quietly(db_root, candidate_id, entry, refinement_investigation_id, "refinement")
         if entry is None:
             steward_note = "No debate/Steward output was available for the reproduced anomaly."
         elif entry.get("steward_error"):
