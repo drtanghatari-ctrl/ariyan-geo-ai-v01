@@ -92,6 +92,12 @@ import java.util.Locale
  * asm-v1 (2026-10-31): fifth tab "Assessment": the Steward verdict, the confidence
  * history and the stored AI Debate (dbr-v1) for this candidate, read from the
  * database (assessment_mobile.py). Recorded results only; nothing recomputed.
+ * ef-v1 (2026-10-31): "Volume" in the 3D tab: the 3D Evidence Fusion volume
+ * (evidence_volume.py). Blocks one DEM cell wide, 0.5 m thick, 0-10 m below ground;
+ * a chosen depth slice is shown as an overlay (map, 3D drape and cut face):
+ * orange = DERIVED raised material, purple = HYPOTHESIZED by the user, hatched =
+ * UNKNOWN. Plus the raised body's real numbers (area, volume above base, height,
+ * extent). No field data placed; display only.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -180,6 +186,9 @@ class FinalImageActivity : AppCompatActivity() {
     // cut-v2 part 2: the user's hypotheses that lie on the open line (drawn on the face)
     private var hypsOnLine: List<JSONObject> = emptyList()
     private var hypLineLength = 0.0
+    // ef-v1: evidence volume; volK = the depth slice shown (null = off)
+    private var volSummary: JSONObject? = null
+    private var volK: Int? = null
 
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
@@ -320,6 +329,7 @@ class FinalImageActivity : AppCompatActivity() {
         cutBtn = button("Cut: off") { chooseCut() }
         threeDRow.addView(cutBtn)
         threeDRow.addView(button("Hypotheses") { chooseHypothesis() })
+        threeDRow.addView(button("Volume") { chooseVolume() })
         threeDRow.addView(button("Reset view") { glView?.resetView() })
         threeDRow.addView(button("Snapshot") { snapshot3D() })
 
@@ -499,6 +509,7 @@ class FinalImageActivity : AppCompatActivity() {
             append("\u2022 Display: ").append(if (::view.isInitialized && view.smooth)
                 "Smooth (colours between cell centres interpolated, visual only)" else "Exact cells (each square = one stored cell)").append('\n')
             append("\u2022 Overlay: ").append(when {
+                volK != null -> "evidence volume slice " + volDepthText(volK!!) + " (ef-v1, one block per DEM cell)"
                 satMeta != null -> (satLabels[satProduct] ?: satProduct ?: "satellite") + " (own pixels, not resampled)"
                 filterMeta != null -> filterMeta!!.optString("label") + " " + (filterParams?.toString() ?: "")
                 else -> "none"
@@ -511,6 +522,7 @@ class FinalImageActivity : AppCompatActivity() {
         put("display_mode", if (view.smooth) "smooth" else "cells")
         put("tab", tabKeys[tab])
         when {
+            volK != null -> { put("overlay_kind", "evidence_volume"); put("overlay_name", "slice " + volDepthText(volK!!)) }
             satMeta != null -> { put("overlay_kind", "satellite"); put("overlay_name", satProduct) }
             filterMeta != null -> { put("overlay_kind", "filter"); put("overlay_name", filterName)
                 filterParams?.let { put("overlay_params", it) } }
@@ -556,6 +568,7 @@ class FinalImageActivity : AppCompatActivity() {
     private fun currentVe(): Float = veChosen ?: s3dMeta?.optDouble("ve_auto", 1.0)?.toFloat() ?: 1f
 
     private fun drapeLabel(): String = when {
+        volK != null -> "Evidence volume slice " + volDepthText(volK!!) + " below ground"
         satMeta != null -> satLabels[satProduct] ?: (satProduct ?: "satellite layer")
         filterMeta != null -> filterMeta!!.optString("label")
         else -> "Terrain colour (" + (if (colourBy == "relief") "relief" else "elevation") + ", hillshaded)"
@@ -802,6 +815,126 @@ class FinalImageActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton("Cancel", null).show()
+    }
+
+    // ------------------------------------------------------------------ evidence volume (ef-v1)
+
+    private fun volDepthText(k: Int): String =
+        String.format(Locale.US, "%.1f\u2013%.1f m", k * 0.5, (k + 1) * 0.5)
+
+    private fun bodyText(b: JSONObject?): String = buildString {
+        if (b == null) return@buildString
+        if (!b.optBoolean("present")) {
+            append(b.optString("note"))
+            if (!b.isNull("relief_at_candidate_m"))
+                append(String.format(Locale.US, " Relief at the candidate: %+.2f m.", b.optDouble("relief_at_candidate_m")))
+            return@buildString
+        }
+        append(String.format(Locale.US,
+            "Raised body containing the candidate (DERIVED): %.0f m\u00B2, %.0f m\u00B3 of material above the local base, " +
+            "highest %.2f m above base, %.0f m E\u2013W \u00D7 %.0f m N\u2013S (relief at the candidate %+.2f m).",
+            b.optDouble("area_m2"), b.optDouble("volume_m3"), b.optDouble("max_height_m"),
+            b.optDouble("extent_ew_m"), b.optDouble("extent_ns_m"), b.optDouble("relief_at_candidate_m")))
+        if (b.optBoolean("touches_window_edge")) append(" It reaches the window edge, so its true extent is larger than shown.")
+    }
+
+    private fun chooseVolume() {
+        val sid = sessionId ?: return
+        setLoading(true)
+        lifecycleScope.launch {
+            val v = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("evidence_volume").callAttr("volume_json", offlineDataRoot, sid).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) } finally { setLoading(false) }
+            if (v.has("error")) { showError(v.optString("error")); return@launch }
+            volSummary = v
+            val msg = buildString {
+                append(String.format(Locale.US, "Blocks: one DEM cell (%.1f \u00D7 %.1f m) wide, %.1f m thick, 0\u2013%.0f m below the ground.\n\n",
+                    v.getJSONObject("grid").optDouble("cell_dx_m"), v.getJSONObject("grid").optDouble("cell_dy_m"),
+                    v.optDouble("slice_m"), v.optDouble("depth_max_m")))
+                append(bodyText(v.optJSONObject("body"))).append("\n\n")
+                append(String.format(Locale.US, "These numbers use the local base level = mean ground within %.0f m; " +
+                    "a different radius gives different numbers.\n\n", v.optDouble("relief_radius_m")))
+                val hs = v.getJSONArray("hypotheses")
+                append("Your active hypotheses placed: ").append(hs.length())
+                for (i in 0 until hs.length()) { val h = hs.getJSONObject(i)
+                    append(String.format(Locale.US, "\n\u2022 %s, %.1f\u2013%.1f m deep, %d cells",
+                        h.optString("label"), h.optDouble("top_m"), h.optDouble("bottom_m"), h.optInt("cells"))) }
+                append("\n\nField readings (GPR/ERT) recorded: ").append(v.optInt("field_readings_recorded"))
+                append(" \u00B7 placed in the volume: 0 (not in ef-v1).\n\n").append(v.optString("statement"))
+            }
+            val b = AlertDialog.Builder(this@FinalImageActivity).setTitle("Evidence volume (ef-v1)").setMessage(msg)
+                .setPositiveButton("Choose depth\u2026") { _, _ -> chooseVolumeDepth(v) }
+                .setNegativeButton("Close", null)
+            if (volK != null) b.setNeutralButton("Turn off") { _, _ -> clearSatellite() }
+            b.show()
+        }
+    }
+
+    private fun chooseVolumeDepth(v: JSONObject) {
+        val sl = v.getJSONArray("slices")
+        val items = (0 until sl.length()).map { i ->
+            val s = sl.getJSONObject(i)
+            volDepthText(i) + String.format(Locale.US, "  \u00B7 orange %d \u00B7 purple %d",
+                s.optInt("derived_cells"), s.optInt("hypothesized_cells"))
+        }
+        AlertDialog.Builder(this).setTitle("Depth below the ground")
+            .setItems(items.toTypedArray()) { _, i -> openVolumeSlice(i) }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun openVolumeSlice(k: Int) {
+        val sid = sessionId ?: return
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val (v, bmp) = withContext(Dispatchers.Default) {
+                    val mod = python.getModule("evidence_volume")
+                    // (re)build for this window so a new window or a new hypothesis is always included
+                    val j = JSONObject(mod.callAttr("volume_json", offlineDataRoot, sid).toString())
+                    if (j.has("error")) Pair(j, null) else {
+                        val bytes = mod.callAttr("volume_slice_rgba", sid, k).toJava(ByteArray::class.java)
+                        val g = j.getJSONObject("grid")
+                        val bm = Bitmap.createBitmap(g.getInt("width"), g.getInt("height"), Bitmap.Config.ARGB_8888)
+                        bm.copyPixelsFromBuffer(ByteBuffer.wrap(bytes))
+                        Pair(j, bm)
+                    }
+                }
+                if (v.has("error") || bmp == null) { showError(v.optString("error", "volume failed")); return@launch }
+                // one overlay at a time: the slice replaces a satellite layer or a filter
+                if (filterName != null) dropFilter()
+                if (satMeta != null) { satProduct = null; satMeta = null; satBtn.text = "Satellite: off" }
+                volSummary = v; volK = k
+                setMapOverlay(bmp, 0f, 0f, 1f, 1f)
+                updateVolumeLegend()
+                meta?.let { updateNotes(it) }
+                updateInfo()
+                refreshProfile(true)
+            } catch (e: PyException) {
+                showError(e.message ?: "volume failed")
+            } catch (e: OutOfMemoryError) {
+                showError("Not enough memory for the volume; choose a smaller window.")
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    private fun updateVolumeLegend() {
+        val k = volK ?: return
+        legendBar.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+            intArrayOf(android.graphics.Color.rgb(237, 140, 46), android.graphics.Color.rgb(237, 140, 46),
+                android.graphics.Color.rgb(158, 82, 242), android.graphics.Color.rgb(158, 82, 242)))
+        legendText.text = "Depth " + volDepthText(k) + " below ground: orange = DERIVED raised material, " +
+            "purple = HYPOTHESIZED by you, hatched = UNKNOWN (no measurement)"
+    }
+
+    private fun volumeNotes(v: JSONObject): String = buildString {
+        append("EVIDENCE VOLUME (").append(v.optString("version")).append(") \u00B7 slice ")
+        append(volDepthText(volK ?: 0)).append(" below ground\n")
+        append(bodyText(v.optJSONObject("body"))).append('\n')
+        append(v.optString("statement"))
     }
 
     // ------------------------------------------------------------------ assessment (asm-v1)
@@ -1052,7 +1185,9 @@ class FinalImageActivity : AppCompatActivity() {
         if (!keepView && !wasRestoring && preset == null && lineAsk != null) closeProfile()
         val sp = satProduct
         val fn = filterName
-        if (sp != null) openSatellite(sp, fetch = false, quiet = true)   // refreshes the profile itself
+        val vk = volK
+        if (vk != null && sp == null && fn == null) { openVolumeSlice(vk); }
+        else if (sp != null) openSatellite(sp, fetch = false, quiet = true)   // refreshes the profile itself
         else if (fn != null) openFilter(fn, filterParams ?: JSONObject(), quiet = true)
         else refreshProfile(true)
         // s3d-v1: 3D tab restored after rotation/rebuild, or a new window/colour while in 3D
@@ -1092,6 +1227,7 @@ class FinalImageActivity : AppCompatActivity() {
 
     private fun updateLegend(m: JSONObject) {
         colourBtn.text = "Colour: " + if (colourBy == "relief") "relief" else "elevation"
+        if (volK != null && volSummary != null) { updateVolumeLegend(); return }
         satMeta?.let { updateSatLegend(it); return }
         filterMeta?.let { updateFilterLegend(it); return }
         val ramp = m.getJSONArray("ramp")
@@ -1129,6 +1265,7 @@ class FinalImageActivity : AppCompatActivity() {
             else m.optString("statement"))
         satMeta?.let { sb.insert(0, satNotes(it) + "\n\n") }
         filterMeta?.let { sb.insert(0, filterNotes(it) + "\n\n") }
+        if (volK != null) volSummary?.let { sb.insert(0, volumeNotes(it) + "\n\n") }
         notes.text = sb.toString()
         updateParams()
     }
@@ -1328,7 +1465,7 @@ class FinalImageActivity : AppCompatActivity() {
     }
 
     private fun clearSatellite() {
-        satProduct = null; satMeta = null
+        satProduct = null; satMeta = null; volK = null
         setMapOverlay(null, 0f, 0f, 1f, 1f)
         satBtn.text = "Satellite: off"
         meta?.let { updateLegend(it); updateNotes(it) }
@@ -1378,6 +1515,7 @@ class FinalImageActivity : AppCompatActivity() {
                     else -> {
                         val pl = r.getJSONObject("placement")
                         if (filterName != null) dropFilter()
+                        volK = null   // ef-v1: the satellite layer replaces a volume slice
                         satProduct = product; satMeta = r
                         setMapOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
                             pl.getDouble("sx").toFloat(), pl.getDouble("sy").toFloat())
@@ -1518,6 +1656,7 @@ class FinalImageActivity : AppCompatActivity() {
                 }
                 // one overlay at a time: the filter replaces a satellite layer (it is not deleted, just hidden)
                 if (satMeta != null) { satProduct = null; satMeta = null; satBtn.text = "Satellite: off"; updateInfo() }
+                volK = null   // ef-v1: the filter replaces a volume slice
                 filterName = name; filterParams = r.optJSONObject("params") ?: params; filterMeta = r
                 val pl = r.getJSONObject("placement")
                 setMapOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
