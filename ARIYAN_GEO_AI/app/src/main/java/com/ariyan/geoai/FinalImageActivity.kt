@@ -121,10 +121,14 @@ import java.util.Locale
  * depth, value) is placed on the open profile line A->A' or on typed start/end
  * coordinates. When the 3D cut follows that line, the MEASURED section is drawn on
  * the cut face (log10 resistivity, blue low -> red high, dark = empty cell).
+ * polish-v1 (2026-10-31): the "Zoomed past native" banner shows only when cells are
+ * visibly blocky on screen (at least BLOCKY_DP dp per cell), not at almost every zoom.
  */
 class FinalImageActivity : AppCompatActivity() {
 
     companion object {
+        /** polish-v1: dp per cell from which the "Zoomed past native" banner shows */
+        const val BLOCKY_DP = 8f
         const val EXTRA_CANDIDATE_ID = "candidate_id"
         fun newIntent(ctx: Context, candidateId: String) =
             Intent(ctx, FinalImageActivity::class.java).putExtra(EXTRA_CANDIDATE_ID, candidateId)
@@ -1944,7 +1948,9 @@ class FinalImageActivity : AppCompatActivity() {
             else -> "DEM cell"
         }
         val pxPerCell = view.scale * (cellM / demCellM).toFloat()   // view.scale = screen px per DEM cell
-        val beyond = pxPerCell > 1f
+        // polish-v1: warn only when a cell is a visible square on screen; at 1-8 dp per
+        // cell the picture is still at (or near) its native look and the banner was noise
+        val beyond = pxPerCell / d >= BLOCKY_DP
 
         val resLabel = if (onSat)
             String.format(Locale.US, "%s %.0f m/pixel (DEM %.1f m/cell)", sm!!.optString("label", "Satellite"), satPx, nativeRes)
