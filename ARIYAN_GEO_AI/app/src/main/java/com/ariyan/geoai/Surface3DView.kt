@@ -49,6 +49,13 @@ import kotlin.math.sqrt
  * (no GPR, no ERT), and the wall's depth is a drawing aid, not a depth.
  * Whole triangles are kept or removed by their centre, so the cut edge follows
  * the cells; the wall breaks where cells have no value.
+ *
+ * cut-v2 (2026-10-31): the face has three bands, all from stored DEM cells:
+ *   orange  = DERIVED raised material: ground above its local base level
+ *             (mean ground within the relief radius); make-up unknown
+ *   blue    = DERIVED hollow: translucent band from the ground up to the base
+ *   grey    = UNKNOWN below the lower of ground and base (no measurement)
+ * Nothing is drawn that the DEM does not give; no layer, wall or chamber.
  */
 class Surface3DView(context: Context) : GLSurfaceView(context) {
 
@@ -79,9 +86,10 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
 
     /** heights: row-major H*W, metres relative to the window median, NaN = no value */
     fun setSurface(heights: FloatArray, w: Int, h: Int, dx: Float, dy: Float, ve: Float,
-                   drape: Drape, pins: List<Pin>, line: FloatArray?, resetCamera: Boolean, cut: Int = 0) {
+                   drape: Drape, pins: List<Pin>, line: FloatArray?, resetCamera: Boolean, cut: Int = 0,
+                   base: FloatArray? = null) {
         queueEvent {
-            r.setData(heights, w, h, dx, dy, ve, drape, pins, line, cut)
+            r.setData(heights, w, h, dx, dy, ve, drape, pins, line, cut, base)
             if (resetCamera) r.resetCamera()
         }
         requestRender()
@@ -171,6 +179,9 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
         private var line: FloatArray? = null
         private var cut = 0
         private var wallStrips: List<FloatBuffer> = emptyList()
+        private var raisedStrips: List<FloatBuffer> = emptyList()   // cut-v2 orange
+        private var hollowStrips: List<FloatBuffer> = emptyList()   // cut-v2 blue
+        private var baseArr: FloatArray? = null
         private var wallProg = 0
 
         private var bands: List<Band> = emptyList()
@@ -187,8 +198,9 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
         private val mvp = FloatArray(16)
 
         fun setData(hg: FloatArray, w0: Int, h0: Int, dx0: Float, dy0: Float, ve0: Float,
-                    dr: Drape, p: List<Pin>, ln: FloatArray?, ct: Int) {
+                    dr: Drape, p: List<Pin>, ln: FloatArray?, ct: Int, bs: FloatArray?) {
             heights = hg; w = w0; h = h0; dx = dx0; dy = dy0; ve = ve0
+            baseArr = bs?.takeIf { it.size == hg.size }
             drape = dr; pins = p; line = ln
             cut = if (ln == null) 0 else ct
             texDirty = true
@@ -324,40 +336,70 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
             }
             lineStrips = strips
 
-            // cut-v1: the cut face, from the stored cell heights along the whole line down to a drawing base
+            // cut-v1/v2: the cut face along the whole line. For every sample (nearest stored cell):
+            //   ground g, local base b (cut-v2), drawing floor f.
+            //   grey  (UNKNOWN)  from min(g, b) down to f
+            //   orange (DERIVED raised) from g down to b where g > b
+            //   blue  (DERIVED hollow)  from b down to g where b > g (translucent)
             val walls = ArrayList<FloatBuffer>()
+            val raised = ArrayList<FloatBuffer>()
+            val hollow = ArrayList<FloatBuffer>()
             val ln = line
+            val bArr = baseArr
             if (cut != 0 && ln != null) {
                 var lo = Float.MAX_VALUE
                 for (v in hg) if (!v.isNaN() && v < lo) lo = v
-                val base = lo * ve - across * 0.08f
+                if (bArr != null) for (v in bArr) if (!v.isNaN() && v < lo) lo = v
+                val floorY = lo * ve - across * 0.08f
                 val seg = CutGeometry.clipToWindow(ln, w.toFloat(), h.toFloat())
                 if (seg != null) {
                     val len = sqrt((seg[2] - seg[0]) * (seg[2] - seg[0]) + (seg[3] - seg[1]) * (seg[3] - seg[1]))
                     val steps = max(2, (len * 4).toInt())
-                    var cur = ArrayList<Float>()
+                    var g1 = ArrayList<Float>(); var o1 = ArrayList<Float>(); var b1 = ArrayList<Float>()
                     var along = 0f
                     val stepM = len / steps * sqrt(dx * dy)   // approximate metres per step, for the hatch only
+                    fun flush() {
+                        if (g1.size >= 20) walls.add(toBuf(g1))
+                        if (o1.size >= 20) raised.add(toBuf(o1))
+                        if (b1.size >= 20) hollow.add(toBuf(b1))
+                        g1 = ArrayList(); o1 = ArrayList(); b1 = ArrayList()
+                    }
+                    fun put(list: ArrayList<Float>, x: Float, top: Float, bottom: Float, zz: Float, a: Float) {
+                        list.add(x); list.add(top); list.add(zz); list.add(a); list.add(top - floorY)
+                        list.add(x); list.add(bottom); list.add(zz); list.add(a); list.add(bottom - floorY)
+                    }
                     for (i in 0..steps) {
                         val f = i.toFloat() / steps
                         val gx = seg[0] + f * (seg[2] - seg[0])
                         val gy = seg[1] + f * (seg[3] - seg[1])
                         val z = cellHeight(gx, gy)
-                        if (z.isNaN()) {
-                            if (cur.size >= 20) walls.add(toBuf(cur))
-                            cur = ArrayList()
-                        } else {
-                            val top = z * ve
-                            // top vertex then bottom vertex (triangle strip); x,y,z, along (m), height above base
-                            cur.add(wx(gx)); cur.add(top); cur.add(wz(gy)); cur.add(along); cur.add(top - base)
-                            cur.add(wx(gx)); cur.add(base); cur.add(wz(gy)); cur.add(along); cur.add(0f)
+                        if (z.isNaN()) { flush() } else {
+                            val g = z * ve
+                            val bc = if (bArr != null) {
+                                val c = floor(gx).toInt().coerceIn(0, w - 1)
+                                val rr = floor(gy).toInt().coerceIn(0, h - 1)
+                                bArr[rr * w + c]
+                            } else Float.NaN
+                            val x = wx(gx); val zz = wz(gy)
+                            if (bc.isNaN()) {
+                                put(g1, x, g, floorY, zz, along)
+                                put(o1, x, g, g, zz, along)          // zero-height: keeps strips aligned
+                                put(b1, x, g, g, zz, along)
+                            } else {
+                                val b = bc * ve
+                                put(g1, x, min(g, b), floorY, zz, along)
+                                put(o1, x, g, min(g, b), zz, along)  // zero height where g <= b
+                                put(b1, x, max(g, b), g, zz, along)  // zero height where g >= b
+                            }
                         }
                         along += stepM
                     }
-                    if (cur.size >= 20) walls.add(toBuf(cur))
+                    flush()
                 }
             }
             wallStrips = walls
+            raisedStrips = raised
+            hollowStrips = hollow
         }
         private var pinCount = 0
 
@@ -475,23 +517,45 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
         }
 
         private fun drawWall() {
-            if (wallStrips.isEmpty()) return
+            if (wallStrips.isEmpty() && raisedStrips.isEmpty() && hollowStrips.isEmpty()) return
             GLES20.glUseProgram(wallProg)
             val uMvp = GLES20.glGetUniformLocation(wallProg, "uMvp")
             val uPeriod = GLES20.glGetUniformLocation(wallProg, "uPeriod")
+            val uColour = GLES20.glGetUniformLocation(wallProg, "uColour")
+            val uHatch = GLES20.glGetUniformLocation(wallProg, "uHatch")
             val aPos = GLES20.glGetAttribLocation(wallProg, "aPos")
             val aW = GLES20.glGetAttribLocation(wallProg, "aW")
             GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
             GLES20.glUniform1f(uPeriod, max(w * dx, h * dy) * 0.02f)
-            for (s in wallStrips) {
-                s.position(0)
-                GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 20, s)
-                GLES20.glEnableVertexAttribArray(aPos)
-                s.position(3)
-                GLES20.glVertexAttribPointer(aW, 2, GLES20.GL_FLOAT, false, 20, s)
-                GLES20.glEnableVertexAttribArray(aW)
-                s.position(0)
-                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, s.capacity() / 5)
+            fun strips(list: List<FloatBuffer>) {
+                for (s in list) {
+                    s.position(0)
+                    GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 20, s)
+                    GLES20.glEnableVertexAttribArray(aPos)
+                    s.position(3)
+                    GLES20.glVertexAttribPointer(aW, 2, GLES20.GL_FLOAT, false, 20, s)
+                    GLES20.glEnableVertexAttribArray(aW)
+                    s.position(0)
+                    GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, s.capacity() / 5)
+                }
+            }
+            // UNKNOWN: grey, hatched
+            GLES20.glUniform4f(uColour, 0.55f, 0.55f, 0.58f, 1f)
+            GLES20.glUniform1f(uHatch, 1f)
+            strips(wallStrips)
+            // DERIVED raised material: solid orange
+            GLES20.glUniform4f(uColour, 0.93f, 0.55f, 0.18f, 1f)
+            GLES20.glUniform1f(uHatch, 0f)
+            strips(raisedStrips)
+            // DERIVED hollow: translucent blue, drawn last without writing depth
+            if (hollowStrips.isNotEmpty()) {
+                GLES20.glEnable(GLES20.GL_BLEND)
+                GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                GLES20.glDepthMask(false)
+                GLES20.glUniform4f(uColour, 0.30f, 0.55f, 0.98f, 0.45f)
+                strips(hollowStrips)
+                GLES20.glDepthMask(true)
+                GLES20.glDisable(GLES20.GL_BLEND)
             }
             GLES20.glDisableVertexAttribArray(aPos)
             GLES20.glDisableVertexAttribArray(aW)
@@ -620,14 +684,17 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
                     gl_Position = uMvp * vec4(aPos, 1.0);
                     vW = aW;
                 }"""
+            // cut-v2: one colour per band; uHatch = 1 adds the diagonal "no measurement" hatch
             const val WALL_FS = """
                 precision mediump float;
                 uniform float uPeriod;
+                uniform float uHatch;
+                uniform vec4 uColour;
                 varying vec2 vW;
                 void main() {
                     float t = mod(vW.x + vW.y, uPeriod) / uPeriod;
-                    vec3 c = t < 0.18 ? vec3(0.30, 0.30, 0.33) : vec3(0.55, 0.55, 0.58);
-                    gl_FragColor = vec4(c, 1.0);
+                    vec3 c = (uHatch > 0.5 && t < 0.18) ? uColour.rgb * 0.55 : uColour.rgb;
+                    gl_FragColor = vec4(c, uColour.a);
                 }"""
             const val FLAT_FS = """
                 precision mediump float;
