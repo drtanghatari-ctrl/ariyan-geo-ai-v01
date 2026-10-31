@@ -78,6 +78,7 @@ import java.util.Locale
  * profile line A-A' (keep the left or right side). The cut face is a grey
  * hatched wall labelled NO SUBSURFACE MEASUREMENT: nothing below the ground line
  * is measured, and the wall's depth is a drawing aid only.
+ * cut-v1.1: portrait map keeps 58 % of the height; profile graphs hidden in the 3D tab.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -427,15 +428,17 @@ class FinalImageActivity : AppCompatActivity() {
         setTextColor(col(colour))
     }
 
-    /** fi-v2.2: portrait: map over the side column; landscape: side by side, map ~60 % */
+    /** fi-v2.2: portrait: map over the side column; landscape: side by side, map ~60 %.
+     *  cut-v1.1: in portrait the map (or 3D view) always keeps 58 % of the height and the
+     *  side column scrolls; before, an open profile could squeeze the map to nothing. */
     private fun applyOrientation() {
         val d = resources.displayMetrics.density
         val land = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
         val mp = ViewGroup.LayoutParams.MATCH_PARENT
         val wc = ViewGroup.LayoutParams.WRAP_CONTENT
         body.orientation = if (land) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
-        mapFrame.layoutParams = if (land) LinearLayout.LayoutParams(0, mp, 0.6f) else LinearLayout.LayoutParams(mp, 0, 1f)
-        side.layoutParams = if (land) LinearLayout.LayoutParams(0, mp, 0.4f) else LinearLayout.LayoutParams(mp, wc)
+        mapFrame.layoutParams = if (land) LinearLayout.LayoutParams(0, mp, 0.6f) else LinearLayout.LayoutParams(mp, 0, 0.58f)
+        side.layoutParams = if (land) LinearLayout.LayoutParams(0, mp, 0.4f) else LinearLayout.LayoutParams(mp, 0, 0.42f)
         // portrait keeps the 88 dp notes box; landscape lets the whole column scroll
         notesScroll.layoutParams = LinearLayout.LayoutParams(mp, if (land) wc else (88 * d).toInt())
         body.requestLayout()
@@ -515,6 +518,7 @@ class FinalImageActivity : AppCompatActivity() {
         }
         glView!!.visibility = View.VISIBLE
         view.visibility = View.INVISIBLE
+        profilePanel.visibility = View.GONE   // cut-v1.1: the line is drawn on the 3D surface instead
         refresh3D(resetCamera = s3dMeta == null)
     }
 
@@ -522,6 +526,7 @@ class FinalImageActivity : AppCompatActivity() {
         val gv = glView ?: return
         gv.visibility = View.GONE
         view.visibility = View.VISIBLE
+        if (profile != null) profilePanel.visibility = View.VISIBLE
         updateInfo()
     }
 
@@ -1397,7 +1402,7 @@ class FinalImageActivity : AppCompatActivity() {
             p.getDouble("bearing_deg"), p.getInt("cells"),
             if (p.getInt("cells_no_data") > 0) " (${p.getInt("cells_no_data")} no data)" else "")
         readout.text = profileSummary(p)
-        profilePanel.visibility = View.VISIBLE
+        profilePanel.visibility = if (is3DShown()) View.GONE else View.VISIBLE
         // frame the map on the whole line (re-applied once the map has shrunk for the panel)
         view.fitLine(lineAsk!![0], lineAsk!![1], lineAsk!![2], lineAsk!![3])
         // vertical exaggeration is known only once the panels are laid out and drawn
