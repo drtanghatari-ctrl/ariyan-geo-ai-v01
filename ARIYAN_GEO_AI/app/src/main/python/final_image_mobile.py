@@ -14,11 +14,20 @@ image_rgba(session_id)   the composite as raw RGBA bytes (H*W*4), straight
                          picture.
 export_final_image_json() writes PNG + GeoTIFF + provenance JSON.
 
+fs-v1 (2026-10-31): open_final_image_json() also returns
+"processing_parameters" -- what was REALLY used to draw the image (native
+grid, no gridding/interpolation, contour interval and its rule, colour
+ramp and range rule, relief radius, hillshade suns). The values are read
+from the result and from final_image.py's own defaults, never typed in
+twice. The export writes the same block, plus what the screen showed at
+export time (display mode, overlay), into the provenance file.
+
 Read-only on the database: this module never writes a candidate, a review,
 a status or a confidence.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import threading
@@ -34,6 +43,89 @@ _SESSIONS: Dict[str, Dict] = {}
 _LOCK = threading.Lock()
 _MAX_SESSIONS = 3                      # phone memory: keep only the latest few
 WINDOW_CHOICES_M = (500.0, 1000.0, 2500.0, 5000.0)
+FS_VERSION = "fs-v1"
+_DISPLAY_KEYS = ("display_mode", "overlay_kind", "overlay_name", "overlay_params", "tab")
+
+
+def _default(fn, name):
+    """A parameter's default as written in final_image.py (single source of truth)."""
+    return inspect.signature(fn).parameters[name].default
+
+
+def processing_parameters(res: Dict, half_size_m: float) -> Dict:
+    """What was really used to draw this Final Image (fs-v1). Read-only."""
+    grid = res["grid"]
+    dx, dy = grid.cell_size_m()
+    h, w = grid.shape
+    lg = res["legend"]
+    params = res["provenance"].get("parameters", {})
+    fixed = params.get("contour_interval")
+    iv = res["contours"]["interval_m"]
+    target = _default(fi.nice_interval, "target_lines")
+    lo_pct = _default(fi.robust_range, "lo_pct")
+    hi_pct = _default(fi.robust_range, "hi_pct")
+    strength = _default(fi.compose, "shade_strength")
+    relief = lg.get("colour_by") == "relief"
+    out = {
+        "version": FS_VERSION,
+        "grid": {"cell_dx_m": round(dx, 2), "cell_dy_m": round(dy, 2),
+                 "native_resolution_m": res["native_resolution_m"],
+                 "cells_wide": int(w), "cells_high": int(h),
+                 "window_half_size_m": float(half_size_m)},
+        "gridding": "none (native DEM lattice)",
+        "interpolation": "none in the stored image: every square is one stored DEM cell",
+        "contours": {"interval_m": iv,
+                     "interval_rule": ("fixed" if fixed else
+                                       "automatic: a round step giving about %d lines over the window's height range" % target),
+                     "index_every": 5,
+                     "method": "marching squares between cell centres"},
+        "colour": {"colour_by": lg.get("colour_by"), "ramp": lg.get("ramp"),
+                   "min": lg.get("min"), "max": lg.get("max"), "units": lg.get("units"),
+                   "range_rule": ("%g-%g percentile of the window" % (lo_pct, hi_pct))
+                                 + (", made symmetric around 0" if relief else "")},
+        "relief_radius_m": lg.get("relief_radius_m"),
+        "hillshade": {"azimuths_deg": list(lg.get("hillshade_azimuths") or []),
+                      "altitude_deg": lg.get("hillshade_altitude"),
+                      "strength": strength},
+        "source": grid.source, "source_sha256": grid.source_sha256,
+    }
+
+    def n(v):
+        return ("%g" % v) if v is not None else "none"
+    lines = [
+        "Grid: native DEM cell %.1f x %.1f m, %d x %d cells, window +/-%s m"
+        % (dx, dy, w, h, n(float(half_size_m))),
+        "Gridding / interpolation: none. The DEM is already a grid; methods such as kriging "
+        "only apply to scattered points and would invent values between them.",
+        ("Contours: none (terrain too flat for a useful interval)" if iv is None else
+         "Contours: every %s m (%s), thick every 5th, %s"
+         % (n(iv), out["contours"]["interval_rule"], out["contours"]["method"])),
+        "Colour: %s, ramp %s, %s ... %s %s (%s)"
+        % (lg.get("colour_by"), lg.get("ramp"), n(lg.get("min")), n(lg.get("max")),
+           lg.get("units"), out["colour"]["range_rule"]),
+    ]
+    if relief:
+        lines.append("Relief: elevation minus the mean within %s m" % n(lg.get("relief_radius_m")))
+    lines.append("Hillshade: %d suns at %s deg, altitude %s deg, strength %s"
+                 % (len(out["hillshade"]["azimuths_deg"]),
+                    "/".join("%g" % a for a in out["hillshade"]["azimuths_deg"]),
+                    n(lg.get("hillshade_altitude")), n(strength)))
+    lines.append("Source: %s, sha256 %s..." % (grid.source, (grid.source_sha256 or "")[:12]))
+    out["lines"] = lines
+    return out
+
+
+def _clean_display(display_json: str) -> Dict:
+    """Only the known screen-state keys go into the provenance file."""
+    if not display_json:
+        return {}
+    try:
+        d = json.loads(display_json)
+    except ValueError:
+        return {"error": "display state not readable"}
+    if not isinstance(d, dict):
+        return {}
+    return {k: d[k] for k in _DISPLAY_KEYS if k in d}
 
 
 def _storage_folder(lat: float, lon: float) -> str:
@@ -109,8 +201,10 @@ def open_final_image_json(db_root: str, candidate_id: str, half_size_m: float = 
         dx, dy = grid.cell_size_m()
         sid = uuid.uuid4().hex[:12]
         with _LOCK:
+            pp = processing_parameters(res, float(half_size_m))   # fs-v1
             _SESSIONS[sid] = {"result": res, "candidate_id": candidate_id, "t": time.time(),
-                             "markers": markers, "focus": (fx, fy)}   # fa-v1 profile
+                             "markers": markers, "focus": (fx, fy),   # fa-v1 profile
+                             "processing_parameters": pp}
             while len(_SESSIONS) > _MAX_SESSIONS:
                 oldest = min(_SESSIONS, key=lambda k: _SESSIONS[k]["t"])
                 _SESSIONS.pop(oldest)
@@ -134,6 +228,7 @@ def open_final_image_json(db_root: str, candidate_id: str, half_size_m: float = 
             "bounds": b, "source": grid.source,
             "statement": res["provenance"]["statement"],
             "window_choices_m": list(WINDOW_CHOICES_M),
+            "processing_parameters": pp,
         })
     except Exception as e:                      # surfaced to the user, never hidden
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
@@ -159,7 +254,7 @@ def render_view_rgba(session_id: str, x0: float, y0: float, x1: float, y1: float
     return _clean_rgba(out).tobytes()
 
 
-def export_final_image_json(db_root: str, session_id: str) -> str:
+def export_final_image_json(db_root: str, session_id: str, display_json: str = "") -> str:
     try:
         with _LOCK:
             s = _SESSIONS.get(session_id)
@@ -167,7 +262,20 @@ def export_final_image_json(db_root: str, session_id: str) -> str:
             return json.dumps({"error": "final image session expired; reopen the image"})
         stem = "fi_%s_%s" % (s["candidate_id"][:8], time.strftime("%Y%m%d_%H%M%S", time.gmtime()))
         out_dir = os.path.join(db_root, "exports", "final_image")
-        paths = fi.export_files(s["result"], out_dir, stem)
+        # fs-v1: the provenance file also records the processing parameters and
+        # what the screen showed; the PNG/GeoTIFF stay the base terrain image.
+        res = dict(s["result"])
+        prov = dict(res["provenance"])
+        prov["processing_parameters"] = s.get("processing_parameters") or \
+            processing_parameters(res, float(prov.get("parameters", {}).get("half_size_m", 0.0)))
+        disp = _clean_display(display_json)
+        if disp:
+            disp["note"] = ("Screen state at export. The PNG and GeoTIFF hold the base terrain "
+                            "image at native cells; a satellite layer or filter shown on screen "
+                            "is not baked in (it has its own export).")
+            prov["display_at_export"] = disp
+        res["provenance"] = prov
+        paths = fi.export_files(res, out_dir, stem)
         return json.dumps({"ok": True, "paths": paths})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
