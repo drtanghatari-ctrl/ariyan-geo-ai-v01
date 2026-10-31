@@ -5,9 +5,17 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# polish-v1 (2026-10-31): when several files are committed one after another,
+# only the NEWEST commit is built; older runs still in progress are cancelled,
+# so a half-committed state can no longer leave a misleading red run behind.
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: ARIYAN_GEO_AI
