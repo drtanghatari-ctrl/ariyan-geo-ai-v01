@@ -89,6 +89,9 @@ import java.util.Locale
  * below ground, note). Stored append-only with the candidate (section_hypothesis.py),
  * drawn purple on the cut face, withdrawable with a reason. Never evidence; never
  * changes status, review or confidence. The app never creates one by itself.
+ * asm-v1 (2026-10-31): fifth tab "Assessment": the Steward verdict, the confidence
+ * history and the stored AI Debate (dbr-v1) for this candidate, read from the
+ * database (assessment_mobile.py). Recorded results only; nothing recomputed.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -153,8 +156,8 @@ class FinalImageActivity : AppCompatActivity() {
     private var restoring = false
 
     // fs-v1 (2026-10-31): Surfer panel sub-tabs + processing parameters
-    private val tabKeys = listOf("contour", "3d", "profile", "filters")
-    private val tabTitles = listOf("Contour & Surface", "3D Visualization", "Profile & Section", "Filters & Tools")
+    private val tabKeys = listOf("contour", "3d", "profile", "filters", "assessment")
+    private val tabTitles = listOf("Contour & Surface", "3D Visualization", "Profile & Section", "Filters & Tools", "Assessment")
     private val tabViews = mutableListOf<TextView>()
     private val tabRows = mutableListOf<View>()
     private lateinit var toolRow: HorizontalScrollView
@@ -195,7 +198,7 @@ class FinalImageActivity : AppCompatActivity() {
             preset = s.getString("preset")
             lineAsk = s.getFloatArray("lineAsk")
             pendingGround = s.getFloatArray("ground")
-            tab = s.getInt("tab", 0).coerceIn(0, 3)
+            tab = s.getInt("tab", 0).coerceIn(0, 4)
             paramsOpen = s.getBoolean("paramsOpen", false)
             if (s.containsKey("veChosen")) veChosen = s.getFloat("veChosen")
             cutSide = s.getInt("cutSide", 0)
@@ -336,7 +339,13 @@ class FinalImageActivity : AppCompatActivity() {
         filtersRow.addView(button("Opacity") { if (view.hasOverlay) chooseOpacity() else showError("No layer or filter is shown.") })
         filtersRow.addView(button("Export") { if (filterMeta != null) exportFilter() else showError("Choose a filter first.") })
 
-        tabRows.addAll(listOf(contourRow, threeDRow, profileRow, filtersRow))
+        // Assessment (asm-v1): recorded Steward + AI Debate results
+        val assessRow = row()
+        assessRow.addView(button("Steward verdict") { showAssessment("steward") })
+        assessRow.addView(button("AI Debate") { showAssessment("debate") })
+        assessRow.addView(button("Confidence history") { showAssessment("history") })
+
+        tabRows.addAll(listOf(contourRow, threeDRow, profileRow, filtersRow, assessRow))
         toolRow = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         root.addView(toolRow)
         selectTab(tab)
@@ -793,6 +802,110 @@ class FinalImageActivity : AppCompatActivity() {
                 }
             }
             .setNegativeButton("Cancel", null).show()
+    }
+
+    // ------------------------------------------------------------------ assessment (asm-v1)
+
+    private fun showAssessment(part: String) {
+        setLoading(true)
+        lifecycleScope.launch {
+            val a = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("assessment_mobile").callAttr("assessment_json", offlineDataRoot, candidateId).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) } finally { setLoading(false) }
+            if (a.has("error")) { showError(a.optString("error")); return@launch }
+            val (title, text) = when (part) {
+                "debate" -> "AI Debate (stored)" to debateText(a)
+                "history" -> "Confidence history (Steward)" to historyText(a)
+                else -> "Steward verdict" to stewardText(a)
+            }
+            val d = resources.displayMetrics.density
+            val tv = smallText(R.color.ariyan_text_primary).apply {
+                this.text = text + "\n\n" + a.optString("statement")
+                setPadding((16 * d).toInt(), (8 * d).toInt(), (16 * d).toInt(), (8 * d).toInt())
+                setTextIsSelectable(true)
+            }
+            AlertDialog.Builder(this@FinalImageActivity).setTitle(title)
+                .setView(ScrollView(this@FinalImageActivity).apply { addView(tv) })
+                .setPositiveButton("Close", null).show()
+        }
+    }
+
+    private fun fmtConf(band: String?, num: Double): String =
+        (band?.takeIf { it.isNotBlank() && it != "null" } ?: "not rated") +
+            (if (num.isNaN()) "" else String.format(Locale.US, " (%.2f)", num))
+
+    private fun stewardText(a: JSONObject): String = buildString {
+        val c = a.getJSONObject("candidate")
+        append("Candidate ").append(a.optString("candidate_id").take(8))
+        append(String.format(Locale.US, "  (%.5f, %.5f)\n", c.optDouble("lat"), c.optDouble("lon")))
+        append("Confidence now: ").append(fmtConf(c.optString("band"), c.optDouble("numeric"))).append('\n')
+        append("Status: ").append(c.optString("status"))
+        if (c.optString("review_source").isNotBlank() && c.optString("review_source") != "null")
+            append(" (").append(c.optString("review_source")).append(')')
+        append('\n')
+        if (c.optString("review_reason").isNotBlank() && c.optString("review_reason") != "null")
+            append("Review reason: ").append(c.optString("review_reason")).append('\n')
+        if (c.optString("job_id").isNotBlank() && c.optString("job_id") != "null")
+            append("Job ").append(c.optString("job_id").take(6)).append(" \u00B7 trust ")
+                .append(c.optString("job_trust").takeIf { it.isNotBlank() && it != "null" } ?: "not set")
+                .append(" \u00B7 target ").append(c.optString("job_target")).append('\n')
+        val h = a.getJSONArray("history")
+        if (h.length() == 0) append("\nThe Steward has not rated this candidate yet.")
+        else {
+            val last = h.getJSONObject(h.length() - 1)
+            append("\nLATEST STEWARD VERDICT (").append(last.optString("recorded_at")).append(")\n")
+            append(fmtConf(last.optString("band"), last.optDouble("numeric"))).append('\n')
+            val r = last.getJSONArray("reasoning")
+            for (i in 0 until r.length()) append("\u2022 ").append(r.optString(i)).append('\n')
+        }
+    }
+
+    private fun historyText(a: JSONObject): String = buildString {
+        val h = a.getJSONArray("history")
+        if (h.length() == 0) { append("No Steward ratings recorded for this candidate."); return@buildString }
+        append(h.length()).append(" rating(s), oldest first (append-only record).\n")
+        for (i in 0 until h.length()) {
+            val e = h.getJSONObject(i)
+            append("\n").append(i + 1).append(". ").append(e.optString("recorded_at")).append("  ")
+                .append(fmtConf(e.optString("band"), e.optDouble("numeric")))
+            val inv = e.optString("investigation_id")
+            if (inv.isNotBlank() && inv != "null") append("  \u00B7 run ").append(inv.take(8))
+            append('\n')
+            val r = e.getJSONArray("reasoning")
+            for (k in 0 until r.length()) append("   \u2022 ").append(r.optString(k)).append('\n')
+        }
+    }
+
+    private fun debateText(a: JSONObject): String = buildString {
+        val ds = a.getJSONArray("debates")
+        if (ds.length() == 0) { append(a.optString("debate_note")); return@buildString }
+        val d = ds.getJSONObject(ds.length() - 1)
+        append("Latest of ").append(ds.length()).append(" stored debate(s) \u00B7 ").append(d.optString("recorded_at"))
+        append("\nFrom: ").append(if (d.optString("origin") == "refinement") "Pass 2 refinement" else "detection run")
+        append(" \u00B7 rules sha256 ").append(d.optString("engine_sha256").take(12)).append("\u2026\n")
+        val syn = d.optJSONObject("synthesis")
+        if (syn != null) {
+            append("\nSYNTHESIS: ").append(syn.optString("agreement_level"))
+            val lead = syn.optString("leading_position")
+            if (lead.isNotBlank() && lead != "null") append(" \u00B7 leading: ").append(lead)
+            append('\n').append(syn.optString("steward_note")).append('\n')
+        }
+        val ps = d.getJSONArray("positions")
+        for (i in 0 until ps.length()) {
+            val p = ps.getJSONObject(i)
+            append("\n\u25A0 ").append(p.optString("perspective").uppercase(Locale.US))
+            if (p.optBoolean("insufficient_data")) append("  (insufficient data)")
+            else append(String.format(Locale.US, "  %s %.2f", p.optString("confidence_label"), p.optDouble("confidence_score")))
+            append('\n').append(p.optString("stance")).append('\n')
+            val r = p.optJSONArray("reasoning")
+            if (r != null) for (k in 0 until r.length()) append("   \u2022 ").append(r.optString(k)).append('\n')
+        }
+        if (d.optString("steward_error").isNotBlank() && d.optString("steward_error") != "null")
+            append("\nSteward could not evaluate this debate: ").append(d.optString("steward_error")).append('\n')
+        else if (d.has("steward_band"))
+            append("\nSteward on this debate: ").append(fmtConf(d.optString("steward_band"), d.optDouble("steward_numeric"))).append('\n')
     }
 
     private fun update3DInfo() {
