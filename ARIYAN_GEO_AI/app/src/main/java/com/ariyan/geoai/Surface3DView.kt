@@ -61,6 +61,12 @@ import kotlin.math.sqrt
  * section_hypothesis.py) are drawn on the face in purple with a bright outline:
  * from..to metres along A->A', top..bottom metres below the ground line (times
  * the height exaggeration, like everything else). Only the user creates them.
+ *
+ * ef-v4b (2026-10-31): MEASURED ERT sections (field_data.py) are drawn on the cut
+ * face as a picture: distance along the line -> across the face, depth below the
+ * stored ground line -> down (times the height exaggeration), NEAREST sampling so
+ * each model cell stays a sharp block; empty cells are dark. Drawn just in front
+ * of the face, behind the user's purple hypotheses.
  */
 class Surface3DView(context: Context) : GLSurfaceView(context) {
 
@@ -105,6 +111,14 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
 
     /** cut-v2 part 2: one user hypothesis on the open line (metres along A->A', metres below ground) */
     class Hyp(val fromM: Float, val toM: Float, val topM: Float, val bottomM: Float)
+
+    /** ef-v4b: one measured ERT section on the open line. fromM..toM = distance along
+     *  its line (outer edges of its first and last bins), topM..bottomM = depth below
+     *  ground; reversed = its distance 0 is at A' instead of A */
+    class Section(val bitmap: Bitmap, val lengthM: Float, val fromM: Float, val toM: Float,
+                  val topM: Float, val bottomM: Float, val reversed: Boolean)
+
+    fun setSections(list: List<Section>) { queueEvent { r.setSections(list) }; requestRender() }
 
     /** lengthM = the real length of the open line A-A' in metres */
     fun setHypotheses(list: List<Hyp>, lengthM: Float) { queueEvent { r.setHyps(list, lengthM) }; requestRender() }
@@ -197,6 +211,11 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
         private var hypLenM = 0f
         private var hypFill: List<FloatBuffer> = emptyList()      // purple fill strips (stride 5)
         private var hypOutline: List<FloatBuffer> = emptyList()   // outline line strips (stride 3)
+        // ef-v4b: measured ERT sections on the face
+        private var sections: List<Section> = emptyList()
+        private var secStrips: List<Pair<Int, FloatBuffer>> = emptyList()   // (section index, strip stride 8)
+        private var secTex = IntArray(0)
+        private var secDirty = false
         private var wallProg = 0
 
         private var bands: List<Band> = emptyList()
@@ -227,6 +246,8 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
         fun setCut(side: Int) { cut = if (line == null) 0 else side; rebuild() }
 
         fun setHyps(list: List<Hyp>, lengthM: Float) { hyps = list; hypLenM = lengthM; rebuild() }
+
+        fun setSections(list: List<Section>) { sections = list; secDirty = true; rebuild() }
 
         /** cut-v1: is a grid point on the side that is kept? */
         private fun kept(gx: Float, gy: Float): Boolean {
@@ -468,6 +489,39 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
             }
             hypFill = fills
             hypOutline = outlines
+
+            // ef-v4b: measured ERT sections on the face (slightly nearer the face than hypotheses)
+            val sstrips = ArrayList<Pair<Int, FloatBuffer>>()
+            if (cut != 0 && ln != null && sections.isNotEmpty()) {
+                val ldx = ln[2] - ln[0]; val ldy = ln[3] - ln[1]
+                val ll = sqrt(ldx * ldx + ldy * ldy).coerceAtLeast(1e-6f)
+                val side = if (cut > 0) 1f else -1f
+                val nx = -ldy / ll * side * 0.08f
+                val ny = ldx / ll * side * 0.08f
+                sections.forEachIndexed { si, sc ->
+                    if (sc.lengthM <= 0f || sc.toM <= sc.fromM) return@forEachIndexed
+                    val n = max(2, ((sc.toM - sc.fromM) / sc.lengthM * ll * 4).toInt())
+                    var cur = ArrayList<Float>()
+                    fun flush() { if (cur.size >= 32) sstrips.add(Pair(si, toBuf(cur))); cur = ArrayList() }
+                    for (i in 0..n) {
+                        val dM = sc.fromM + (sc.toM - sc.fromM) * i / n
+                        val along = (dM / sc.lengthM).coerceIn(0f, 1f)
+                        val f = if (sc.reversed) 1f - along else along
+                        val gx = ln[0] + f * ldx
+                        val gy = ln[1] + f * ldy
+                        val z = cellHeight(gx, gy)
+                        if (z.isNaN()) { flush(); continue }
+                        val g = z * ve
+                        val u = i.toFloat() / n
+                        val x = wx(gx + nx); val zz = wz(gy + ny)
+                        // top vertex then bottom vertex: pos, uv, normal (up)
+                        cur.add(x); cur.add(g - sc.topM * ve); cur.add(zz); cur.add(u); cur.add(0f); cur.add(0f); cur.add(1f); cur.add(0f)
+                        cur.add(x); cur.add(g - sc.bottomM * ve); cur.add(zz); cur.add(u); cur.add(1f); cur.add(0f); cur.add(1f); cur.add(0f)
+                    }
+                    flush()
+                }
+            }
+            secStrips = sstrips
         }
         private var pinCount = 0
 
@@ -495,6 +549,8 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
             wallProg = program(WALL_VS, WALL_FS)
             texId = 0
             texDirty = true
+            secTex = IntArray(0)          // ef-v4b: textures are gone with the old context
+            secDirty = true
         }
 
         override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -518,6 +574,7 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
                 drawPins()
                 drawLine()
                 drawWall()
+                drawSections()
                 drawHypOutline()
             }
             shotCallback?.let { cb ->
@@ -637,6 +694,56 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
             }
             GLES20.glDisableVertexAttribArray(aPos)
             GLES20.glDisableVertexAttribArray(aW)
+        }
+
+        private fun uploadSections() {
+            if (secTex.isNotEmpty()) GLES20.glDeleteTextures(secTex.size, secTex, 0)
+            secTex = IntArray(sections.size)
+            if (sections.isNotEmpty()) GLES20.glGenTextures(sections.size, secTex, 0)
+            sections.forEachIndexed { i, sc ->
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, secTex[i])
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_NEAREST)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_NEAREST)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                if (!sc.bitmap.isRecycled) GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, sc.bitmap, 0)
+            }
+            secDirty = false
+        }
+
+        /** ef-v4b: measured sections, textured with the mesh program (same layout: pos, uv, normal) */
+        private fun drawSections() {
+            if (secDirty) uploadSections()
+            if (secStrips.isEmpty() || secTex.isEmpty()) return
+            GLES20.glUseProgram(meshProg)
+            val uMvp = GLES20.glGetUniformLocation(meshProg, "uMvp")
+            val uLight = GLES20.glGetUniformLocation(meshProg, "uLight")
+            val uTex = GLES20.glGetUniformLocation(meshProg, "uTex")
+            val aPos = GLES20.glGetAttribLocation(meshProg, "aPos")
+            val aUv = GLES20.glGetAttribLocation(meshProg, "aUv")
+            val aN = GLES20.glGetAttribLocation(meshProg, "aN")
+            GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
+            GLES20.glUniform3f(uLight, 0f, 1f, 0f)           // flat, full light: colours stay true
+            GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            GLES20.glUniform1i(uTex, 0)
+            for ((si, b) in secStrips) {
+                if (si >= secTex.size) continue
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, secTex[si])
+                b.position(0)
+                GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 32, b)
+                GLES20.glEnableVertexAttribArray(aPos)
+                b.position(3)
+                GLES20.glVertexAttribPointer(aUv, 2, GLES20.GL_FLOAT, false, 32, b)
+                GLES20.glEnableVertexAttribArray(aUv)
+                b.position(5)
+                GLES20.glVertexAttribPointer(aN, 3, GLES20.GL_FLOAT, false, 32, b)
+                GLES20.glEnableVertexAttribArray(aN)
+                b.position(0)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, b.capacity() / 8)
+            }
+            GLES20.glDisableVertexAttribArray(aPos)
+            GLES20.glDisableVertexAttribArray(aUv)
+            GLES20.glDisableVertexAttribArray(aN)
         }
 
         private fun drawHypOutline() {
