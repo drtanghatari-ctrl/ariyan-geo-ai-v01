@@ -68,7 +68,7 @@ def test_bridge_builds_volume_with_user_hypothesis_and_writes_nothing(tmp_path):
     cand_before = tuple(conn.execute("SELECT * FROM candidate WHERE id=?", (cid,)).fetchone()); conn.close()
     v = json.loads(ev.volume_json(root, sid))
     assert "error" not in v, v
-    assert v["grid"]["width"] == w and len(v["slices"]) == 20 and v["version"] == "ef-v2"
+    assert v["grid"]["width"] == w and len(v["slices"]) == 20 and v["version"] == "ef-v4a"
     assert v["hypotheses"][0]["label"] == "wall?" and v["hypotheses"][0]["cells"] > 0
     assert v["measured_in_volume"] == 0 and v["field_readings_recorded"] == 0
     assert any(s["hypothesized_cells"] > 0 for s in v["slices"][2:6])
@@ -100,4 +100,3 @@ def test_expired_session_is_an_error():
     assert "expired" in json.loads(ev.volume_json("/nowhere", "gone"))["error"]
     with pytest.raises(KeyError):
         ev.volume_slice_rgba("gone", 0)
-
