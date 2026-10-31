@@ -123,6 +123,10 @@ import java.util.Locale
  * the cut face (log10 resistivity, blue low -> red high, dark = empty cell).
  * polish-v1 (2026-10-31): the "Zoomed past native" banner shows only when cells are
  * visibly blocky on screen (at least BLOCKY_DP dp per cell), not at almost every zoom.
+ * ov-v1 (2026-10-31): "Overview" tab (shown first): the mock-up dashboard, phone-sized.
+ * Cards (two columns in landscape): candidate details, a map preview, Steward, AI
+ * Debate, evidence layers checklist (only what really exists), your hypotheses, other
+ * candidates in the window (tap to open theirs), map information. Recorded results only.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -189,8 +193,11 @@ class FinalImageActivity : AppCompatActivity() {
     private var restoring = false
 
     // fs-v1 (2026-10-31): Surfer panel sub-tabs + processing parameters
-    private val tabKeys = listOf("contour", "3d", "profile", "filters", "assessment")
-    private val tabTitles = listOf("Contour & Surface", "3D Visualization", "Profile & Section", "Filters & Tools", "Assessment")
+    private val tabKeys = listOf("contour", "3d", "profile", "filters", "assessment", "overview")
+    private val tabTitles = listOf("Contour & Surface", "3D Visualization", "Profile & Section", "Filters & Tools", "Assessment", "Overview")
+    private val OVERVIEW_TAB = 5
+    private lateinit var overviewScroll: ScrollView
+    private lateinit var overviewBox: LinearLayout
     private val tabViews = mutableListOf<TextView>()
     private val tabRows = mutableListOf<View>()
     private lateinit var toolRow: HorizontalScrollView
@@ -245,7 +252,7 @@ class FinalImageActivity : AppCompatActivity() {
             preset = s.getString("preset")
             lineAsk = s.getFloatArray("lineAsk")
             pendingGround = s.getFloatArray("ground")
-            tab = s.getInt("tab", 0).coerceIn(0, 4)
+            tab = s.getInt("tab", 0).coerceIn(0, 5)
             paramsOpen = s.getBoolean("paramsOpen", false)
             if (s.containsKey("veChosen")) veChosen = s.getFloat("veChosen")
             cutSide = s.getInt("cutSide", 0)
@@ -332,9 +339,11 @@ class FinalImageActivity : AppCompatActivity() {
                 setOnClickListener { selectTab(i) }
             }
             tabViews.add(tv)
-            strip.addView(tv, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                .apply { marginEnd = pad / 3 })
         }
+        // ov-v1: Overview is shown first in the strip (its index stays last, so nothing else moves)
+        for (i in listOf(OVERVIEW_TAB, 0, 1, 2, 3, 4))
+            strip.addView(tabViews[i], LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { marginEnd = pad / 3 })
         root.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(strip) })
 
         fun row() = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(pad / 2, 0, pad / 2, 0) }
@@ -398,7 +407,15 @@ class FinalImageActivity : AppCompatActivity() {
         assessRow.addView(button("AI Debate") { showAssessment("debate") })
         assessRow.addView(button("Confidence history") { showAssessment("history") })
 
-        tabRows.addAll(listOf(contourRow, threeDRow, profileRow, filtersRow, assessRow))
+        // Overview (ov-v1)
+        val overviewRow = row()
+        overviewRow.addView(button("Refresh") { loadOverview() })
+        overviewRow.addView(button("Map") { selectTab(0) })
+        overviewRow.addView(button("3D") { selectTab(1) })
+        overviewRow.addView(button("Section") { selectTab(2) })
+        overviewRow.addView(button("Assessment") { selectTab(4) })
+
+        tabRows.addAll(listOf(contourRow, threeDRow, profileRow, filtersRow, assessRow, overviewRow))
         // ef-v2: while a footprint is being drawn, this row replaces the tab's buttons
         sketchRow = row()
         sketchRow.addView(button("Finish footprint") { finishSketch() })
@@ -468,6 +485,10 @@ class FinalImageActivity : AppCompatActivity() {
         body.addView(side)
 
         root.addView(body, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        // ov-v1: the dashboard takes the map's place when its tab is chosen
+        overviewBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad / 2, pad / 2, pad / 2, pad) }
+        overviewScroll = ScrollView(this).apply { visibility = View.GONE; addView(overviewBox) }
+        root.addView(overviewScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         applyOrientation()
         setContentView(root)
     }
@@ -541,6 +562,13 @@ class FinalImageActivity : AppCompatActivity() {
         toolRow.addView(tabRows[tab])
         if (!::mapFrame.isInitialized) return     // first call from buildUi: the map comes later
         if (tab == 1) show3D() else hide3D()
+        // ov-v1: dashboard or map
+        if (::overviewScroll.isInitialized) {
+            val ovOn = tab == OVERVIEW_TAB
+            overviewScroll.visibility = if (ovOn) View.VISIBLE else View.GONE
+            body.visibility = if (ovOn) View.GONE else View.VISIBLE
+            if (ovOn) loadOverview()
+        }
     }
 
     /** fs-v1: what was really used to draw what is on screen */
@@ -1574,6 +1602,171 @@ class FinalImageActivity : AppCompatActivity() {
             "(nearest bin, values unchanged); map projection fit error %.3f m.\n",
             f.optInt("filled_bins"), f.optInt("bins"), f.optDouble("projection_fit_error_m")))
         append(f.optString("statement"))
+    }
+
+    // ------------------------------------------------------------------ overview dashboard (ov-v1)
+
+    private fun loadOverview() {
+        val sid = sessionId
+        if (sid == null) { overviewBox.removeAllViews(); overviewBox.addView(smallText(R.color.ariyan_text_secondary).apply { text = "Loading the image\u2026" }); return }
+        lifecycleScope.launch {
+            val o = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("overview_mobile").callAttr("overview_json", offlineDataRoot, sid).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) }
+            if (o.has("error")) { showError(o.optString("error")); return@launch }
+            buildOverview(o)
+        }
+    }
+
+    private fun card(title: String): LinearLayout {
+        val d = resources.displayMetrics.density
+        val pad = (10 * d).toInt()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
+            background = GradientDrawable().apply {
+                setCornerRadius(10 * d); setColor(col(R.color.ariyan_bg))
+                setStroke(maxOf(1, d.toInt()), col(R.color.ariyan_text_secondary))
+            }
+            addView(TextView(this@FinalImageActivity).apply {
+                text = title; textSize = 13f; typeface = Typeface.DEFAULT_BOLD
+                setTextColor(col(R.color.ariyan_accent))
+            })
+        }
+    }
+
+    private fun line(box: LinearLayout, text: String, primary: Boolean = false): TextView =
+        smallText(if (primary) R.color.ariyan_text_primary else R.color.ariyan_text_secondary).apply {
+            this.text = text; setPadding(0, (3 * resources.displayMetrics.density).toInt(), 0, 0)
+            box.addView(this)
+        }
+
+    private fun nz(o: JSONObject, k: String): String? = o.optString(k).takeIf { it.isNotBlank() && it != "null" }
+
+    private fun buildOverview(o: JSONObject) {
+        val d = resources.displayMetrics.density
+        val gap = (8 * d).toInt()
+        overviewBox.removeAllViews()
+        val cards = mutableListOf<View>()
+
+        // candidate details
+        val c = o.getJSONObject("candidate")
+        val m = o.getJSONObject("map")
+        cards += card("CANDIDATE " + o.optString("candidate_id").take(8)).apply {
+            line(this, String.format(Locale.US, "%.5f, %.5f  \u00B7  UTM %d%s E %.0f N %.0f", c.optDouble("lat"), c.optDouble("lon"),
+                m.optInt("utm_zone"), m.optString("hemisphere"), m.optDouble("easting"), m.optDouble("northing")), true)
+            line(this, "Confidence: " + fmtConf(nz(c, "band"), c.optDouble("numeric")), true)
+            val st = nz(c, "status") ?: "not reviewed"
+            val src = nz(c, "review_source")
+            line(this, "Status: " + st + if (src != null && !st.contains("($src)")) " ($src)" else "", true)
+            nz(c, "review_reason")?.let { line(this, it) }
+            nz(c, "job_id")?.let { line(this, "Job " + it.take(6) + " \u00B7 trust " + (nz(c, "job_trust") ?: "not set")) }
+            val et = c.optJSONArray("evidence_types")
+            line(this, "Evidence linked: " + if (et == null || et.length() == 0) "none" else (0 until et.length()).joinToString(", ") { et.optString(it) })
+        }
+
+        // map preview (the stored terrain image, exact cells) -> tap opens the map
+        baseBmp?.takeIf { !it.isRecycled }?.let { b ->
+            val copy = b.copy(Bitmap.Config.ARGB_8888, false)
+            cards += card("MAP (tap to open)").apply {
+                addView(android.widget.ImageView(this@FinalImageActivity).apply {
+                    setImageDrawable(android.graphics.drawable.BitmapDrawable(resources, copy).apply { setFilterBitmap(false) })
+                    adjustViewBounds = true
+                    scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, (170 * d).toInt())
+                })
+                line(this, String.format(Locale.US, "%d \u00D7 %d DEM cells of %.1f \u00D7 %.1f m \u00B7 3D, section and volume: tabs above",
+                    m.getJSONArray("cells").optInt(0), m.getJSONArray("cells").optInt(1), m.optDouble("cell_dx_m"), m.optDouble("cell_dy_m")))
+                setOnClickListener { selectTab(0) }
+            }
+        }
+
+        // Steward
+        cards += card("STEWARD").apply {
+            val sw = o.optJSONObject("steward")
+            if (sw == null) line(this, "Not rated yet.") else {
+                line(this, fmtConf(nz(sw, "band"), sw.optDouble("numeric")) + "  \u00B7  " + sw.optInt("ratings") + " rating(s)", true)
+                val r = sw.optJSONArray("reasoning")
+                if (r != null) for (i in 0 until r.length()) line(this, "\u2022 " + r.optString(i))
+            }
+            setOnClickListener { selectTab(4) }
+        }
+
+        // AI Debate
+        cards += card("AI DEBATE").apply {
+            val db = o.getJSONObject("debate")
+            if (db.optInt("stored") == 0) line(this, "No debate stored yet (runs before dbr-v1 were not kept).")
+            else {
+                line(this, db.optInt("stored").toString() + " stored \u00B7 latest from " +
+                    (if (db.optString("origin") == "refinement") "Pass 2 refinement" else "a detection run"), true)
+                line(this, (nz(db, "agreement") ?: "") + (nz(db, "leading")?.let { " \u00B7 leading: $it" } ?: ""))
+                line(this, "A ranked rule-based opinion, not proof. The Steward decides confidence.")
+            }
+            setOnClickListener { selectTab(4) }
+        }
+
+        // evidence layers checklist
+        cards += card("EVIDENCE LAYERS (this candidate / window)").apply {
+            val ls = o.getJSONArray("layers")
+            for (i in 0 until ls.length()) {
+                val l = ls.getJSONObject(i)
+                val mark = when (l.optString("state")) {
+                    "USED", "EVIDENCE" -> "\u2713"; "MEASURED" -> "\u25C9"; "SAVED" -> "\u25CB"; else -> "\u2013" }
+                line(this, mark + " " + l.optString("name") + " \u2014 " + l.optString("detail"), l.optString("state") != "NONE")
+            }
+            line(this, "\u2713 used / linked   \u25C9 measured field data   \u25CB saved, context only   \u2013 not available")
+        }
+
+        // hypotheses
+        cards += card("YOUR HYPOTHESES").apply {
+            val h = o.getJSONObject("hypotheses")
+            line(this, String.format(Locale.US, "%d on section lines \u00B7 %d footprints (active)", h.optInt("section"), h.optInt("footprint")), true)
+            val f = o.getJSONObject("field_datasets")
+            line(this, String.format(Locale.US, "Field data: %d GPR \u00B7 %d ERT", f.optInt("gpr"), f.optInt("ert")))
+            line(this, "Yours only, never evidence. 3D tab: Hypotheses, Footprints, Volume, Survey plan.")
+            setOnClickListener { selectTab(1) }
+        }
+
+        // other candidates in the window
+        cards += card("OTHER CANDIDATES IN THIS WINDOW").apply {
+            val oth = o.getJSONArray("others")
+            if (oth.length() == 0) line(this, "None.")
+            for (i in 0 until minOf(oth.length(), 15)) {
+                val x = oth.getJSONObject(i)
+                line(this, String.format(Locale.US, "%s \u00B7 %s \u00B7 %s \u00B7 %.0f m away  \u203A",
+                    x.optString("label"), nz(x, "confidence_label") ?: "unrated", nz(x, "status") ?: "", x.optDouble("distance_m")), true).apply {
+                    setOnClickListener { startActivity(newIntent(this@FinalImageActivity, x.getString("id"))) }
+                }
+            }
+            if (oth.length() > 15) line(this, "\u2026 and " + (oth.length() - 15) + " more on the map.")
+        }
+
+        // map information
+        cards += card("MAP INFORMATION").apply {
+            line(this, String.format(Locale.US, "UTM zone %d%s (WGS84) \u00B7 cells %.1f \u00D7 %.1f m \u00B7 window \u00B1%s m",
+                m.optInt("utm_zone"), m.optString("hemisphere"), m.optDouble("cell_dx_m"), m.optDouble("cell_dy_m"),
+                trimNum(m.optDouble("window_half_m"))), true)
+            line(this, "DEM: " + m.optString("source") + " \u00B7 sha256 " + m.optString("source_sha256").take(12) + "\u2026")
+            line(this, "Interpolation: none (native grid). Confidence ceiling: set by the Steward.")
+        }
+
+        // layout: one column in portrait, two in landscape
+        val land = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val cols = if (land) 2 else 1
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val columns = (0 until cols).map { LinearLayout(this).apply { orientation = LinearLayout.VERTICAL } }
+        columns.forEachIndexed { i, colv ->
+            row.addView(colv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                if (i > 0) marginStart = gap })
+        }
+        cards.forEachIndexed { i, v ->
+            columns[i % cols].addView(v, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { bottomMargin = gap })
+        }
+        overviewBox.addView(row)
+        overviewBox.addView(smallText(R.color.ariyan_text_secondary).apply { text = o.optString("statement") })
     }
 
     // ------------------------------------------------------------------ assessment (asm-v1)
