@@ -41,6 +41,14 @@ import kotlin.math.sqrt
  *
  * One finger: rotate (left/right) and tilt (up/down). Two fingers: pinch to
  * zoom. Double tap: reset the view. Display only: nothing is written.
+ *
+ * cut-v1 (2026-10-31): cutaway along the profile line A-A'. The straight line
+ * through A and A' (across the whole window) cuts the surface; one side is
+ * kept. The cut face is a grey hatched wall from the stored cell heights along
+ * the line down to a drawing base: NOTHING below the ground line is measured
+ * (no GPR, no ERT), and the wall's depth is a drawing aid, not a depth.
+ * Whole triangles are kept or removed by their centre, so the cut edge follows
+ * the cells; the wall breaks where cells have no value.
  */
 class Surface3DView(context: Context) : GLSurfaceView(context) {
 
@@ -71,9 +79,9 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
 
     /** heights: row-major H*W, metres relative to the window median, NaN = no value */
     fun setSurface(heights: FloatArray, w: Int, h: Int, dx: Float, dy: Float, ve: Float,
-                   drape: Drape, pins: List<Pin>, line: FloatArray?, resetCamera: Boolean) {
+                   drape: Drape, pins: List<Pin>, line: FloatArray?, resetCamera: Boolean, cut: Int = 0) {
         queueEvent {
-            r.setData(heights, w, h, dx, dy, ve, drape, pins, line)
+            r.setData(heights, w, h, dx, dy, ve, drape, pins, line, cut)
             if (resetCamera) r.resetCamera()
         }
         requestRender()
@@ -81,6 +89,9 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
     }
 
     fun setExaggeration(ve: Float) { queueEvent { r.setVe(ve) }; requestRender() }
+
+    /** cut-v1: 0 = no cut, +1 = keep the left side of A->A', -1 = keep the right side */
+    fun setCut(side: Int) { queueEvent { r.setCut(side) }; requestRender() }
 
     fun resetView() { queueEvent { r.resetCamera() }; requestRender(); post { reportCamera() } }
 
@@ -158,6 +169,9 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
         private var drape: Drape? = null
         private var pins: List<Pin> = emptyList()
         private var line: FloatArray? = null
+        private var cut = 0
+        private var wallStrips: List<FloatBuffer> = emptyList()
+        private var wallProg = 0
 
         private var bands: List<Band> = emptyList()
         private var pinBuf: FloatBuffer? = null
@@ -173,14 +187,24 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
         private val mvp = FloatArray(16)
 
         fun setData(hg: FloatArray, w0: Int, h0: Int, dx0: Float, dy0: Float, ve0: Float,
-                    dr: Drape, p: List<Pin>, ln: FloatArray?) {
+                    dr: Drape, p: List<Pin>, ln: FloatArray?, ct: Int) {
             heights = hg; w = w0; h = h0; dx = dx0; dy = dy0; ve = ve0
             drape = dr; pins = p; line = ln
+            cut = if (ln == null) 0 else ct
             texDirty = true
             rebuild()
         }
 
         fun setVe(v: Float) { ve = v; rebuild() }
+
+        fun setCut(side: Int) { cut = if (line == null) 0 else side; rebuild() }
+
+        /** cut-v1: is a grid point on the side that is kept? */
+        private fun kept(gx: Float, gy: Float): Boolean {
+            val ln = line
+            if (cut == 0 || ln == null) return true
+            return CutGeometry.keep(ln, cut, gx, gy)
+        }
 
         fun resetCamera() {
             val across = max(w * dx, h * dy).coerceAtLeast(100f)
@@ -242,8 +266,14 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
                     val b = a + 1
                     val cc = a + w
                     val d = cc + 1
-                    idxList.add(a.toShort()); idxList.add(cc.toShort()); idxList.add(b.toShort())
-                    idxList.add(b.toShort()); idxList.add(cc.toShort()); idxList.add(d.toShort())
+                    // cut-v1: keep or drop each whole triangle by its centre (grid units)
+                    val x0 = c + 0.5f; val y0 = rr + 0.5f
+                    if (kept(x0 + 1f / 3f, y0 + 1f / 3f)) {
+                        idxList.add(a.toShort()); idxList.add(cc.toShort()); idxList.add(b.toShort())
+                    }
+                    if (kept(x0 + 2f / 3f, y0 + 2f / 3f)) {
+                        idxList.add(b.toShort()); idxList.add(cc.toShort()); idxList.add(d.toShort())
+                    }
                 }
                 val ib = ByteBuffer.allocateDirect(max(1, idxList.size) * 2).order(ByteOrder.nativeOrder()).asShortBuffer()
                 for (s in idxList) ib.put(s)
@@ -259,6 +289,7 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
             val pb = ByteBuffer.allocateDirect(max(1, pins.size) * 2 * 7 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
             var n = 0
             for (p in pins) {
+                if (!kept(p.x, p.y)) continue          // cut-v1: no pins floating over the removed side
                 val z = cellHeight(p.x, p.y)
                 if (z.isNaN()) continue
                 val cr = Color.red(p.colour) / 255f; val cg = Color.green(p.colour) / 255f; val cb = Color.blue(p.colour) / 255f
@@ -292,6 +323,41 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
                 if (cur.size >= 6) strips.add(toBuf(cur))
             }
             lineStrips = strips
+
+            // cut-v1: the cut face, from the stored cell heights along the whole line down to a drawing base
+            val walls = ArrayList<FloatBuffer>()
+            val ln = line
+            if (cut != 0 && ln != null) {
+                var lo = Float.MAX_VALUE
+                for (v in hg) if (!v.isNaN() && v < lo) lo = v
+                val base = lo * ve - across * 0.08f
+                val seg = CutGeometry.clipToWindow(ln, w.toFloat(), h.toFloat())
+                if (seg != null) {
+                    val len = sqrt((seg[2] - seg[0]) * (seg[2] - seg[0]) + (seg[3] - seg[1]) * (seg[3] - seg[1]))
+                    val steps = max(2, (len * 4).toInt())
+                    var cur = ArrayList<Float>()
+                    var along = 0f
+                    val stepM = len / steps * sqrt(dx * dy)   // approximate metres per step, for the hatch only
+                    for (i in 0..steps) {
+                        val f = i.toFloat() / steps
+                        val gx = seg[0] + f * (seg[2] - seg[0])
+                        val gy = seg[1] + f * (seg[3] - seg[1])
+                        val z = cellHeight(gx, gy)
+                        if (z.isNaN()) {
+                            if (cur.size >= 20) walls.add(toBuf(cur))
+                            cur = ArrayList()
+                        } else {
+                            val top = z * ve
+                            // top vertex then bottom vertex (triangle strip); x,y,z, along (m), height above base
+                            cur.add(wx(gx)); cur.add(top); cur.add(wz(gy)); cur.add(along); cur.add(top - base)
+                            cur.add(wx(gx)); cur.add(base); cur.add(wz(gy)); cur.add(along); cur.add(0f)
+                        }
+                        along += stepM
+                    }
+                    if (cur.size >= 20) walls.add(toBuf(cur))
+                }
+            }
+            wallStrips = walls
         }
         private var pinCount = 0
 
@@ -316,6 +382,7 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
             GLES20.glEnable(GLES20.GL_DEPTH_TEST)
             meshProg = program(MESH_VS, MESH_FS)
             flatProg = program(FLAT_VS, FLAT_FS)
+            wallProg = program(WALL_VS, WALL_FS)
             texId = 0
             texDirty = true
         }
@@ -340,6 +407,7 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
                 drawMesh()
                 drawPins()
                 drawLine()
+                drawWall()
             }
             shotCallback?.let { cb ->
                 shotCallback = null
@@ -404,6 +472,29 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
             for (i in 0 until pinCount) GLES20.glDrawArrays(GLES20.GL_POINTS, 2 * i + 1, 1)
             GLES20.glDisableVertexAttribArray(aPos)
             GLES20.glDisableVertexAttribArray(aCol)
+        }
+
+        private fun drawWall() {
+            if (wallStrips.isEmpty()) return
+            GLES20.glUseProgram(wallProg)
+            val uMvp = GLES20.glGetUniformLocation(wallProg, "uMvp")
+            val uPeriod = GLES20.glGetUniformLocation(wallProg, "uPeriod")
+            val aPos = GLES20.glGetAttribLocation(wallProg, "aPos")
+            val aW = GLES20.glGetAttribLocation(wallProg, "aW")
+            GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
+            GLES20.glUniform1f(uPeriod, max(w * dx, h * dy) * 0.02f)
+            for (s in wallStrips) {
+                s.position(0)
+                GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 20, s)
+                GLES20.glEnableVertexAttribArray(aPos)
+                s.position(3)
+                GLES20.glVertexAttribPointer(aW, 2, GLES20.GL_FLOAT, false, 20, s)
+                GLES20.glEnableVertexAttribArray(aW)
+                s.position(0)
+                GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, s.capacity() / 5)
+            }
+            GLES20.glDisableVertexAttribArray(aPos)
+            GLES20.glDisableVertexAttribArray(aW)
         }
 
         private fun drawLine() {
@@ -519,6 +610,25 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
                     vTop = (uSize > 2.0 && aCol.a > 0.5) ? 1.0 : 0.0;
                 }"""
             // a focus pin (aCol.a = 1) gets a white top
+            // cut-v1: grey face with diagonal hatch = NO subsurface measurement
+            const val WALL_VS = """
+                uniform mat4 uMvp;
+                attribute vec3 aPos;
+                attribute vec2 aW;
+                varying vec2 vW;
+                void main() {
+                    gl_Position = uMvp * vec4(aPos, 1.0);
+                    vW = aW;
+                }"""
+            const val WALL_FS = """
+                precision mediump float;
+                uniform float uPeriod;
+                varying vec2 vW;
+                void main() {
+                    float t = mod(vW.x + vW.y, uPeriod) / uPeriod;
+                    vec3 c = t < 0.18 ? vec3(0.30, 0.30, 0.33) : vec3(0.55, 0.55, 0.58);
+                    gl_FragColor = vec4(c, 1.0);
+                }"""
             const val FLAT_FS = """
                 precision mediump float;
                 varying vec4 vCol;
@@ -528,5 +638,33 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
                     gl_FragColor = vec4(c, 1.0);
                 }"""
         }
+    }
+}
+
+/** cut-v1: pure geometry for the cutaway (grid units: x right, y down; north up on the map) */
+object CutGeometry {
+    /** +1 = keep the left side of A->A' (as seen on the north-up map), -1 = keep the right side */
+    fun keep(line: FloatArray, side: Int, gx: Float, gy: Float): Boolean {
+        val cross = (line[2] - line[0]) * (gy - line[1]) - (line[3] - line[1]) * (gx - line[0])
+        // with y pointing down, cross > 0 means the point is to the RIGHT of A->A'
+        return if (side > 0) cross <= 0f else cross >= 0f
+    }
+
+    /** the straight line through A and A', clipped to the window [0,w] x [0,h]; null if it misses */
+    fun clipToWindow(line: FloatArray, w: Float, h: Float): FloatArray? {
+        val ax = line[0]; val ay = line[1]
+        val ddx = line[2] - ax; val ddy = line[3] - ay
+        if (ddx == 0f && ddy == 0f) return null
+        var t0 = -1e9f; var t1 = 1e9f
+        fun clip(p: Float, q: Float): Boolean {
+            if (p == 0f) return q >= 0f
+            val t = q / p
+            if (p < 0f) { if (t > t1) return false; if (t > t0) t0 = t }
+            else { if (t < t0) return false; if (t < t1) t1 = t }
+            return true
+        }
+        if (!clip(-ddx, ax) || !clip(ddx, w - ax) || !clip(-ddy, ay) || !clip(ddy, h - ay)) return null
+        if (t1 <= t0) return null
+        return floatArrayOf(ax + t0 * ddx, ay + t0 * ddy, ax + t1 * ddx, ay + t1 * ddy)
     }
 }
