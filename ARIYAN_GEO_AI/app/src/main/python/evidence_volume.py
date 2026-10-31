@@ -35,6 +35,13 @@ lies inside the polygon, within the depth range. Section hypotheses still
 count. Where two or more different hypotheses claim the same block it is
 CONTESTED (magenta): the app never picks one (no artificial closure). The
 summary lists, for each hypothesis, which others it overlaps.
+
+ef-v4a (2026-10-31): real field data (field_data.py). Every DEM block that
+contains at least one filled bin of an active GPR dataset at that depth gets
+the MEASURED bit and is counted ("measured_in_volume"). The survey itself is
+shown at its OWN resolution as a separate overlay (field_data.slice_image);
+pushing centimetre data into 25-30 m blocks would average a target away.
+Footprints now report how many DEM cell centres they cover.
 """
 from __future__ import annotations
 
@@ -50,7 +57,7 @@ import numpy as np
 import final_image as fi
 import final_image_mobile as fim
 
-VERSION = "ef-v2"
+VERSION = "ef-v4a"
 DEPTH_MAX_M = 10.0
 SLICE_M = 0.5
 DERIVED, HYPOTHESIZED, MEASURED = 1, 2, 4
@@ -257,6 +264,46 @@ def _hyp_cells(db_root: str, s: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def _mark_measured(db_root: str, s: Dict[str, Any], states: np.ndarray):
+    """ef-v4a: set MEASURED on DEM blocks holding filled bins of active GPR datasets."""
+    import field_data as fd
+    import utm_projection as up
+    grid = s["result"]["grid"]
+    h, w, k = states.shape
+    total = 0
+    listed = []
+    for r in fd.list_for_candidate(db_root, s["candidate_id"]):
+        m = r["meta"]
+        c = fd._dataset(db_root, r["id"])
+        cnt = c["count"]
+        edges = c["edges"]
+        kk, rr, cc = np.nonzero(cnt > 0)
+        before = int(((states & MEASURED) > 0).sum())
+        if kk.size:
+            e = m["e0"] + cc * m["dx_m"]
+            n = m["n1"] - rr * m["dy_m"]
+            # affine UTM -> lon/lat from the dataset's own corners (exact inverse projections)
+            ce = np.array([[m["e0"], m["n1"]], [m["e0"] + m["w"] * m["dx_m"], m["n1"]],
+                           [m["e0"], m["n1"] - m["h"] * m["dy_m"]],
+                           [m["e0"] + m["w"] * m["dx_m"], m["n1"] - m["h"] * m["dy_m"]]])
+            ll = np.array([up.utm_inverse(x, y, m["utm_zone"], m["northern"]) for x, y in ce])  # lat, lon
+            import field_data as _fd
+            a = _fd.fit_affine(ce, ll[:, ::-1])                      # -> lon, lat
+            lon = a[0, 0] * e + a[1, 0] * n + a[2, 0]
+            lat = a[0, 1] * e + a[1, 1] * n + a[2, 1]
+            px = (lon - grid.west) / grid.dlon
+            py = (grid.north - lat) / grid.dlat
+            col = np.floor(px).astype(int); row = np.floor(py).astype(int)
+            mid = (edges[kk] + edges[kk + 1]) / 2.0
+            ks = np.floor(mid / SLICE_M).astype(int)
+            ok = (col >= 0) & (col < w) & (row >= 0) & (row < h) & (ks >= 0) & (ks < k)
+            states[row[ok], col[ok], ks[ok]] |= MEASURED
+        after = int(((states & MEASURED) > 0).sum())
+        listed.append({"id": r["id"], "label": r["label"], "method": r["method"], "blocks": after - before})
+        total = after
+    return total, listed
+
+
 def _build(db_root: str, session_id: str) -> Dict[str, Any]:
     with fim._LOCK:
         s = fim._SESSIONS.get(session_id)
@@ -270,6 +317,7 @@ def _build(db_root: str, session_id: str) -> Dict[str, Any]:
     relief = fi.local_relief(z, dx, dy, radius)
     hyps = _hyp_cells(db_root, s)
     states = build_states(relief, hyps)
+    measured_blocks, datasets = _mark_measured(db_root, s, states)
     counts = build_counts(relief.shape, hyps)
     ov = overlaps(hyps)
     fx, fy = s.get("focus") or (z.shape[1] / 2.0, z.shape[0] / 2.0)
@@ -290,7 +338,8 @@ def _build(db_root: str, session_id: str) -> Dict[str, Any]:
                         "bottom_m": h["bottom_m"], "cells": len(set(map(tuple, h["cells"]))),
                         "area_m2": h.get("area_m2"), "overlaps": ov.get(h["id"], [])} for h in hyps],
         "field_readings_recorded": _field_reading_count(db_root, s["candidate_id"]),
-        "measured_in_volume": 0,
+        "measured_in_volume": measured_blocks,
+        "field_datasets": datasets,
         "source": grid.source, "source_sha256": grid.source_sha256,
         "statement": STATEMENT,
     }
@@ -364,7 +413,12 @@ def add_footprint_json(db_root: str, session_id: str, points_grid_json: str, lab
             lon, lat = grid.pixel_to_lonlat(float(x), float(y))
             latlon.append([lat, lon])
         hid = fph.add(db_root, s["candidate_id"], latlon, label, float(depth_top_m), float(depth_bottom_m), note)
-        return json.dumps({"ok": True, "id": hid})
+        # ef-v4a: say how many DEM cell centres it covers; 0 means it cannot show in the volume
+        h, w = grid.shape
+        n_cells = len(polygon_cells([[float(x), float(y)] for x, y in pts], h, w))
+        dx, dy = grid.cell_size_m()
+        return json.dumps({"ok": True, "id": hid, "cells": n_cells,
+                           "cell_dx_m": round(dx, 1), "cell_dy_m": round(dy, 1)})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
@@ -376,4 +430,3 @@ def withdraw_footprint_json(db_root: str, hypothesis_id: str, reason: str) -> st
         return json.dumps({"ok": True})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
-
