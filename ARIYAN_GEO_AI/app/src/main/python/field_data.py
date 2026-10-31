@@ -27,6 +27,19 @@ What the app does with it -- and does NOT do:
     are comparable as depth increases.
 MEASURED means: these are the user's survey numbers. Interpreting them stays
 with the user; nothing here changes a candidate, review, status or confidence.
+
+ef-v4b (2026-10-31): ERT sections. A text export of an inverted section,
+one model cell per line:  distance, depth, value
+  distance : metres along the line from its START
+  depth    : metres below the ground, positive downward
+  value    : resistivity (ohm m) -- coloured on a log10 scale when every value
+             is positive, otherwise on a linear scale (said so on screen)
+The line's start and end are given at import (the open profile line A-A' or
+typed coordinates). The section is binned on its own distance spacing and its
+own depth layers (layer edges halfway between the file's depths); the image
+used for drawing has uniform rows of the thinnest layer, each pixel taking
+the layer it lies in (values unchanged, nothing interpolated). It is drawn on
+the 3D cut face when the cut follows the same line.
 """
 from __future__ import annotations
 
@@ -46,7 +59,7 @@ import numpy as np
 import grand_project_db as db
 import utm_projection as up
 
-VERSION = "fd-v1"
+VERSION = "fd-v2"
 MAX_POINTS = 3_000_000
 MAX_BINS_PER_SIDE = 1500
 MAX_OWN_DEPTHS = 60
@@ -117,8 +130,9 @@ def _conn(db_root: str):
 _SPLIT = re.compile(r"[,;\t ]+")
 
 
-def parse_points(text: str) -> Tuple[np.ndarray, int]:
-    """(N, 4) float array of x, y, depth, value; and the number of skipped lines."""
+def parse_points(text: str, ncols: int = 4) -> Tuple[np.ndarray, int]:
+    """(N, ncols) float array (GPR: x, y, depth, value; ERT: distance, depth,
+    value) and the number of skipped lines."""
     rows: List[List[float]] = []
     skipped = 0
     for line in text.splitlines():
@@ -126,11 +140,11 @@ def parse_points(text: str) -> Tuple[np.ndarray, int]:
         if not line:
             continue
         parts = [p for p in _SPLIT.split(line) if p]
-        if len(parts) < 4:
+        if len(parts) < ncols:
             skipped += 1
             continue
         try:
-            vals = [float(p) for p in parts[:4]]
+            vals = [float(p) for p in parts[:ncols]]
         except ValueError:
             skipped += 1
             continue
@@ -141,7 +155,7 @@ def parse_points(text: str) -> Tuple[np.ndarray, int]:
         if len(rows) > MAX_POINTS:
             raise ValueError("more than %d points; split the file" % MAX_POINTS)
     if not rows:
-        return np.zeros((0, 4)), skipped
+        return np.zeros((0, ncols)), skipped
     return np.asarray(rows, dtype=np.float64), skipped
 
 
@@ -450,16 +464,27 @@ def field_json(db_root: str, session_id: str) -> str:
         s = _session(session_id)
         zone, north = _utm_of_window(s)
         ds = []
+        grid = s["result"]["grid"]
+        gh, gw = grid.shape
         for r in list_for_candidate(db_root, s["candidate_id"], include_withdrawn=True):
             m = r["meta"]
             ed = m["depth_edges_m"]
-            ds.append({"id": r["id"], "label": r["label"], "method": r["method"], "status": r["status"],
+            extra = {}
+            if r["method"] == "ERT":
+                ln = m["line"]
+                pax, pay = grid.lonlat_to_pixel(ln["a_lon"], ln["a_lat"])
+                pbx, pby = grid.lonlat_to_pixel(ln["b_lon"], ln["b_lat"])
+                extra = {"line_grid": [pax, pay, pbx, pby], "line_length_m": ln["length_m"],
+                         "line_in_window": all(0 <= v <= lim for v, lim in ((pax, gw), (pbx, gw), (pay, gh), (pby, gh))),
+                         "log_scale": m["log_scale"], "depth_bottom_m": m["depth_bottom_m"]}
+            ds.append(dict(extra, **{"id": r["id"], "label": r["label"], "method": r["method"], "status": r["status"],
                        "status_reason": r["status_reason"], "created_at": r["created_at"],
                        "source_filename": r["source_filename"], "file_sha256": r["file_sha256"],
                        "value_units": r["value_units"], "points": m["points"], "dx_m": m["dx_m"], "dy_m": m["dy_m"],
                        "depth_mode": m["depth_mode"],
                        "slices": [{"k": i, "top_m": ed[i], "bottom_m": ed[i + 1]} for i in range(len(ed) - 1)],
-                       "value_lo": m["value_lo"], "value_hi": m["value_hi"]})
+                       "value_lo": m.get("value_lo", m.get("colour_lo")),
+                       "value_hi": m.get("value_hi", m.get("colour_hi"))}))
         return json.dumps({"ok": True, "inbox": inbox_dir(db_root), "inbox_files": list_inbox(db_root),
                            "utm_zone": zone, "northern": north, "datasets": ds, "statement": STATEMENT})
     except Exception as e:
@@ -507,5 +532,219 @@ def withdraw_json(db_root: str, dataset_id: str, reason: str) -> str:
     try:
         withdraw(db_root, dataset_id, reason)
         return json.dumps({"ok": True})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+# ---------------------------------------------------------------------------
+# ef-v4b: ERT sections
+# ---------------------------------------------------------------------------
+
+MAX_SECTION_PIXELS = 1024
+ERT_RAMP = [(0.0, (40, 60, 200)), (0.25, (40, 170, 230)), (0.5, (60, 190, 90)),
+            (0.75, (240, 210, 50)), (1.0, (220, 50, 40))]
+
+
+def ramp_rgba(t: np.ndarray, ok: np.ndarray) -> np.ndarray:
+    out = np.zeros(t.shape + (4,), dtype=np.uint8)
+    t = np.clip(np.nan_to_num(t), 0.0, 1.0)
+    xs = [p[0] for p in ERT_RAMP]
+    for ch in range(3):
+        out[..., ch] = np.interp(t, xs, [p[1][ch] for p in ERT_RAMP]).astype(np.uint8)
+    out[..., 3] = np.where(ok, 255, 0).astype(np.uint8)
+    return out
+
+
+def layer_edges(depths: np.ndarray) -> np.ndarray:
+    u = np.unique(np.round(depths, 3))
+    if u.size == 1:
+        return np.array([max(0.0, u[0] - 0.25), u[0] + 0.25])
+    mids = (u[:-1] + u[1:]) / 2.0
+    first = max(0.0, u[0] - (mids[0] - u[0]))
+    last = u[-1] + (u[-1] - mids[-1])
+    return np.concatenate([[first], mids, [last]])
+
+
+def bin_section(dist: np.ndarray, depth: np.ndarray, val: np.ndarray) -> Dict[str, Any]:
+    """Mean value per (layer, distance bin) on the data's own spacing; plus a
+    drawing image with uniform rows (thinnest layer), each pixel = its layer."""
+    dx = spacing(dist)
+    if dx <= 0:
+        raise ValueError("cannot find a distance spacing in the file (all points at one distance?)")
+    edges = layer_edges(depth)
+    nl = len(edges) - 1
+    d0 = float(dist.min())
+    cols = np.round((dist - d0) / dx).astype(np.int64)
+    w = int(cols.max()) + 1
+    if w > MAX_SECTION_PIXELS:
+        raise ValueError("section has %d distance bins; at most %d" % (w, MAX_SECTION_PIXELS))
+    lay = np.clip(np.searchsorted(edges, depth, side="right") - 1, 0, nl - 1)
+    tot = np.zeros((nl, w)); cnt = np.zeros((nl, w))
+    np.add.at(tot, (lay, cols), val); np.add.at(cnt, (lay, cols), 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cells = np.where(cnt > 0, tot / cnt, np.nan)
+    thin = float(np.min(np.diff(edges)))
+    top, bottom = float(edges[0]), float(edges[-1])
+    rows = int(math.ceil((bottom - top) / thin - 1e-9))
+    if rows > MAX_SECTION_PIXELS:
+        rows = MAX_SECTION_PIXELS
+    row_depth = top + (np.arange(rows) + 0.5) * (bottom - top) / rows
+    row_layer = np.clip(np.searchsorted(edges, row_depth, side="right") - 1, 0, nl - 1)
+    image = cells[row_layer, :]
+    return {"cells": cells, "count": cnt.astype(np.int32), "edges": edges, "dx": dx, "d0": d0,
+            "d1": d0 + (w - 1) * dx, "image": image, "top": top, "bottom": bottom}
+
+
+def _line_length_m(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> float:
+    zone = up.utm_zone_for((a_lon + b_lon) / 2.0)
+    pa = up.utm_forward(a_lat, a_lon, zone); pb = up.utm_forward(b_lat, b_lon, zone)
+    return float(math.hypot(pb.easting - pa.easting, pb.northing - pa.northing))
+
+
+def import_ert(db_root: str, candidate_id: str, filename: str, a_lat: float, a_lon: float,
+               b_lat: float, b_lon: float, label: str, value_units: str = "ohm m") -> Dict[str, Any]:
+    if not (label or "").strip():
+        raise ValueError("a label is required (for example: ERT line 1, 2026)")
+    if os.path.basename(filename) != filename:
+        raise ValueError("pick a file from the inbox")
+    for v, lim in ((a_lat, 90), (b_lat, 90), (a_lon, 180), (b_lon, 180)):
+        if v is None or not math.isfinite(float(v)) or abs(float(v)) > lim:
+            raise ValueError("the line's start and end must be valid latitude, longitude")
+    src = os.path.join(inbox_dir(db_root), filename)
+    if not os.path.isfile(src):
+        raise LookupError("file not found in the inbox")
+    cand = db.get_candidate(db_root, candidate_id)
+    if cand is None:
+        raise LookupError("candidate not found")
+    length = _line_length_m(a_lat, a_lon, b_lat, b_lon)
+    if length < 1.0:
+        raise ValueError("the line's start and end are the same point")
+    with open(src, "r", encoding="utf-8", errors="replace") as f:
+        pts, skipped = parse_points(f.read(), ncols=3)
+    if pts.shape[0] < 4:
+        raise ValueError("fewer than 4 data lines of distance, depth, value found (%d lines skipped)" % skipped)
+    dist, depth, val = pts[:, 0], pts[:, 1], pts[:, 2]
+    if (depth < 0).any():
+        raise ValueError("negative depths found: depth must be metres below the ground, positive downward")
+    if (dist < 0).any() or dist.max() > length * 1.05 + 1.0:
+        raise ValueError("distances run outside the line (0 to %.0f m); check the start/end or the file" % length)
+    log_scale = bool((val > 0).all())
+    sec = bin_section(dist, depth, val)
+    cv = np.log10(val) if log_scale else val
+    lo, hi = (float(x) for x in np.percentile(cv, [2.0, 98.0]))
+    did = uuid.uuid4().hex
+    sd = store_dir(db_root)
+    os.makedirs(sd, exist_ok=True)
+    sha = _sha256(src)
+    stored = os.path.join(sd, "%s_%s" % (sha[:16], filename))
+    if not os.path.exists(stored):
+        shutil.copyfile(src, stored)
+    np.savez_compressed(os.path.join(sd, did + ".npz"), values=sec["image"][None, :, :],
+                        count=sec["count"][:, :], edges=sec["edges"], cells=sec["cells"])
+    meta = {"line": {"a_lat": float(a_lat), "a_lon": float(a_lon), "b_lat": float(b_lat), "b_lon": float(b_lon),
+                     "length_m": length},
+            "dist_from_m": sec["d0"], "dist_to_m": sec["d1"], "dx_m": sec["dx"], "dy_m": sec["dx"],
+            "depth_top_m": sec["top"], "depth_bottom_m": sec["bottom"],
+            "depth_edges_m": [round(float(x), 3) for x in sec["edges"]], "depth_mode": "layers",
+            "image_rows": int(sec["image"].shape[0]), "image_cols": int(sec["image"].shape[1]),
+            "points": int(pts.shape[0]), "lines_skipped": int(skipped),
+            "log_scale": log_scale, "colour_lo": lo, "colour_hi": hi,
+            "value_min": float(val.min()), "value_max": float(val.max()),
+            "filled_bins": int((sec["count"] > 0).sum()), "bins": int(sec["count"].size),
+            "w": int(sec["image"].shape[1]), "h": int(len(sec["edges"]) - 1)}
+    now = db._now_iso()
+    conn = _conn(db_root)
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO field_dataset (id, candidate_id, grand_project_id, created_at, method, label, value_units, "
+                "source_filename, file_sha256, stored_path, coords, meta_json, version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (did, candidate_id, cand["grand_project_id"], now, "ERT", label.strip(), (value_units or "").strip(),
+                 filename, sha, stored, "LINE", json.dumps(meta), VERSION))
+            conn.execute("INSERT INTO field_dataset_event (dataset_id, event, reason, occurred_at) "
+                         "VALUES (?, 'IMPORTED', '', ?)", (did, now))
+    finally:
+        conn.close()
+    db.log_timeline_event(db_root, cand["grand_project_id"], "FIELD_DATA_IMPORTED", "candidate", candidate_id,
+                          "MEASURED ERT file '%s' (sha256 %s), %d model cells, line %.0f m, %d layers to %.1f m. "
+                          "Interpretation is the user's; status and confidence unchanged."
+                          % (filename, sha[:12], pts.shape[0], length, len(sec["edges"]) - 1, sec["bottom"]))
+    return {"id": did, "meta": meta, "file_sha256": sha}
+
+
+def section_image(db_root: str, dataset_id: str) -> Tuple[np.ndarray, Dict[str, Any]]:
+    c = _dataset(db_root, dataset_id)
+    if c["row"]["method"] != "ERT":
+        raise ValueError("not an ERT dataset")
+    m = c["meta"]
+    img = c["values"][0]
+    ok = np.isfinite(img)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cv = np.log10(np.where(ok & (img > 0), img, np.nan)) if m["log_scale"] else img
+    span = m["colour_hi"] - m["colour_lo"]
+    t = (cv - m["colour_lo"]) / (span if span > 0 else 1.0)
+    rgba = ramp_rgba(t, np.isfinite(cv))
+    return rgba, m
+
+
+def ert_on_line_json(db_root: str, session_id: str, ax: float, ay: float, bx: float, by: float,
+                     tol_cells: float = 1.5) -> str:
+    """Active ERT datasets of the candidate whose line is the open line A->A'
+    (either direction, ends within tol_cells). Each comes with its drawing
+    image (prepared one by one through section_rgba(i))."""
+    try:
+        s = _session(session_id)
+        grid = s["result"]["grid"]
+        out = []
+        imgs = []
+        for r in list_for_candidate(db_root, s["candidate_id"]):
+            if r["method"] != "ERT":
+                continue
+            ln = r["meta"]["line"]
+            pax, pay = grid.lonlat_to_pixel(ln["a_lon"], ln["a_lat"])
+            pbx, pby = grid.lonlat_to_pixel(ln["b_lon"], ln["b_lat"])
+            same = math.hypot(pax - ax, pay - ay) <= tol_cells and math.hypot(pbx - bx, pby - by) <= tol_cells
+            rev = math.hypot(pbx - ax, pby - ay) <= tol_cells and math.hypot(pax - bx, pay - by) <= tol_cells
+            if not (same or rev):
+                continue
+            rgba, m = section_image(db_root, r["id"])
+            imgs.append(rgba)
+            out.append({"id": r["id"], "label": r["label"], "reversed": bool(rev and not same),
+                        "line_length_m": ln["length_m"], "dist_from_m": m["dist_from_m"], "dist_to_m": m["dist_to_m"],
+                        "depth_top_m": m["depth_top_m"], "depth_bottom_m": m["depth_bottom_m"],
+                        "width": int(rgba.shape[1]), "height": int(rgba.shape[0]),
+                        "log_scale": m["log_scale"], "colour_lo": m["colour_lo"], "colour_hi": m["colour_hi"],
+                        "value_units": r["value_units"], "file_sha256": r["file_sha256"]})
+        with _LOCK:
+            _CACHE["__sections__"] = {"rgba": imgs}
+        return json.dumps({"ok": True, "sections": out})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def section_rgba(i: int) -> bytes:
+    with _LOCK:
+        c = _CACHE.get("__sections__")
+    if c is None or not 0 <= int(i) < len(c["rgba"]):
+        raise KeyError("no such prepared section")
+    return c["rgba"][int(i)].tobytes()
+
+
+def import_ert_json(db_root: str, session_id: str, filename: str, line_json: str, label: str,
+                    value_units: str = "ohm m") -> str:
+    """line_json: {"grid": [ax, ay, bx, by]} (the open profile line, this window's
+    pixels) or {"latlon": [a_lat, a_lon, b_lat, b_lon]} (typed)."""
+    try:
+        s = _session(session_id)
+        grid = s["result"]["grid"]
+        ln = json.loads(line_json)
+        if "grid" in ln:
+            ax, ay, bx, by = (float(v) for v in ln["grid"])
+            a_lon, a_lat = grid.pixel_to_lonlat(ax, ay)
+            b_lon, b_lat = grid.pixel_to_lonlat(bx, by)
+        else:
+            a_lat, a_lon, b_lat, b_lon = (float(v) for v in ln["latlon"])
+        r = import_ert(db_root, s["candidate_id"], filename, a_lat, a_lon, b_lat, b_lon, label, value_units)
+        return json.dumps({"ok": True, "id": r["id"], "meta": r["meta"]})
     except Exception as e:
         return json.dumps({"error": f"{type(e).__name__}: {e}"})
