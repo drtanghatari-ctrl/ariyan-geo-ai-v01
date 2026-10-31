@@ -29,7 +29,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 
 /**
@@ -64,6 +66,13 @@ import java.util.Locale
  * "Processing parameters" box states what was really used (native grid, no
  * gridding or interpolation, contours, colour, hillshade, overlay); the export
  * writes the same block and the screen state into the provenance file.
+ *
+ * s3d-v1 (2026-10-31): the 3D Visualization tab draws the stored DEM window as a
+ * 3D surface (Surface3DView, OpenGL ES 2.0; data from surface3d_mobile.py), draped
+ * with whatever the map shows (terrain colour, satellite layer such as Sentinel-2
+ * true colour, or a filter). Height exaggeration is automatic by default, with its
+ * rule printed; ×1 ... ×50 can be chosen. Candidate pins and an open profile line
+ * are drawn on it. Snapshot = PNG + provenance. Display only.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -138,6 +147,15 @@ class FinalImageActivity : AppCompatActivity() {
     private lateinit var paramsText: TextView
     private var paramsOpen = false
 
+    // s3d-v1 (2026-10-31): 3D surface
+    private var glView: Surface3DView? = null
+    private var s3dMeta: JSONObject? = null
+    private var veChosen: Float? = null          // null = automatic
+    private lateinit var veBtn: MaterialButton
+    private var baseBmp: Bitmap? = null          // the map's terrain image (owned by the 2D view)
+    private var ovBmp: Bitmap? = null            // the map's overlay (owned by the 2D view)
+    private val ovPlace = floatArrayOf(0f, 0f, 1f, 1f)
+
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -157,6 +175,7 @@ class FinalImageActivity : AppCompatActivity() {
             pendingGround = s.getFloatArray("ground")
             tab = s.getInt("tab", 0).coerceIn(0, 3)
             paramsOpen = s.getBoolean("paramsOpen", false)
+            if (s.containsKey("veChosen")) veChosen = s.getFloat("veChosen")
         }
         buildUi()
         if (s != null) {
@@ -179,6 +198,7 @@ class FinalImageActivity : AppCompatActivity() {
         out.putFloatArray("lineAsk", if (profile != null) lineAsk else null)
         out.putInt("tab", tab)
         out.putBoolean("paramsOpen", paramsOpen)
+        veChosen?.let { out.putFloat("veChosen", it) }
         if (::view.isInitialized) {
             out.putBoolean("smooth", view.smooth)
             view.groundState()?.let { out.putFloatArray("ground", it) }
@@ -189,6 +209,16 @@ class FinalImageActivity : AppCompatActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (::body.isInitialized) applyOrientation()   // the view's onSizeChanged keeps the ground
+    }
+
+    override fun onPause() {
+        super.onPause()
+        glView?.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        glView?.onResume()
     }
 
     override fun onDestroy() {
@@ -256,14 +286,12 @@ class FinalImageActivity : AppCompatActivity() {
         contourRow.addView(button("Centre") { centreOnCandidate() })
         contourRow.addView(button("Export") { export() })
 
-        // 3D Visualization (s3d-v1 is the next build; nothing is drawn here yet)
-        val threeDRow = row().apply {
-            gravity = Gravity.CENTER_VERTICAL
-            addView(smallText(R.color.ariyan_text_secondary).apply {
-                text = "3D surface: next build (s3d-v1). Nothing is drawn here yet."
-                setPadding(pad / 2, pad / 2, pad / 2, pad / 2)
-            })
-        }
+        // 3D Visualization (s3d-v1)
+        val threeDRow = row()
+        veBtn = button("Height: auto") { chooseVe() }
+        threeDRow.addView(veBtn)
+        threeDRow.addView(button("Reset view") { glView?.resetView() })
+        threeDRow.addView(button("Snapshot") { snapshot3D() })
 
         // Profile & Section (fa-v1)
         val profileRow = row()
@@ -328,8 +356,11 @@ class FinalImageActivity : AppCompatActivity() {
             setOnClickListener { paramsOpen = !paramsOpen; updateParams() }
         }
         sideCol.addView(paramsHead)
-        paramsText = smallText(R.color.ariyan_text_secondary).apply { setPadding(pad, pad / 4, pad, 0) }
+        paramsText = smallText(R.color.ariyan_text_secondary).apply { setPadding(pad, pad / 4, pad, pad / 3) }
         sideCol.addView(paramsText)
+        // s3d-v1: keep the notes box visibly apart from the parameters
+        sideCol.addView(View(this).apply { setBackgroundColor(col(R.color.ariyan_text_secondary)); alpha = 0.35f },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, maxOf(1, d.toInt())).apply { topMargin = pad / 4 })
         updateParams()
 
         notes = smallText(R.color.ariyan_text_secondary).apply { setPadding(pad, pad / 3, pad, pad) }
@@ -412,6 +443,8 @@ class FinalImageActivity : AppCompatActivity() {
         }
         toolRow.removeAllViews()
         toolRow.addView(tabRows[tab])
+        if (!::mapFrame.isInitialized) return     // first call from buildUi: the map comes later
+        if (tab == 1) show3D() else hide3D()
     }
 
     /** fs-v1: what was really used to draw what is on screen */
@@ -444,6 +477,170 @@ class FinalImageActivity : AppCompatActivity() {
             filterMeta != null -> { put("overlay_kind", "filter"); put("overlay_name", filterName)
                 filterParams?.let { put("overlay_params", it) } }
             else -> put("overlay_kind", "none")
+        }
+    }
+
+    // ------------------------------------------------------------------ 3D surface (s3d-v1)
+
+    /** every overlay change goes through here so the 3D drape follows the map */
+    private fun setMapOverlay(bmp: Bitmap?, x0: Float, y0: Float, sx: Float, sy: Float) {
+        view.setOverlay(bmp, x0, y0, sx, sy)
+        ovBmp = bmp
+        ovPlace[0] = x0; ovPlace[1] = y0; ovPlace[2] = sx; ovPlace[3] = sy
+        if (is3DShown()) refresh3D(resetCamera = false)
+    }
+
+    private fun is3DShown() = tab == 1 && glView?.visibility == View.VISIBLE
+
+    private fun show3D() {
+        if (glView == null) {
+            glView = Surface3DView(this).apply {
+                onCamera = { _, _, _ -> update3DInfo() }
+                onGlError = { msg -> showError(msg) }
+            }
+            // below the progress spinner, above the 2D map
+            mapFrame.addView(glView, 1, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        }
+        glView!!.visibility = View.VISIBLE
+        view.visibility = View.INVISIBLE
+        refresh3D(resetCamera = s3dMeta == null)
+    }
+
+    private fun hide3D() {
+        val gv = glView ?: return
+        gv.visibility = View.GONE
+        view.visibility = View.VISIBLE
+        updateInfo()
+    }
+
+    private fun currentVe(): Float = veChosen ?: s3dMeta?.optDouble("ve_auto", 1.0)?.toFloat() ?: 1f
+
+    private fun drapeLabel(): String = when {
+        satMeta != null -> satLabels[satProduct] ?: (satProduct ?: "satellite layer")
+        filterMeta != null -> filterMeta!!.optString("label")
+        else -> "Terrain colour (" + (if (colourBy == "relief") "relief" else "elevation") + ", hillshaded)"
+    }
+
+    private fun refresh3D(resetCamera: Boolean) {
+        val sid = sessionId ?: return
+        val gv = glView ?: return
+        lifecycleScope.launch {
+            try {
+                val (m, hg) = withContext(Dispatchers.Default) {
+                    val mod = python.getModule("surface3d_mobile")
+                    val j = JSONObject(mod.callAttr("open_surface_json", sid).toString())
+                    if (j.has("error")) Pair(j, null) else {
+                        val bytes = mod.callAttr("surface_heights", sid).toJava(ByteArray::class.java)
+                        val fb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+                        val arr = FloatArray(fb.remaining())
+                        fb.get(arr)
+                        Pair(j, arr)
+                    }
+                }
+                if (hg == null) { showError(m.optString("error", "3D surface failed")); return@launch }
+                if (sid != sessionId) return@launch            // a newer window replaced this one
+                s3dMeta = m
+                // the 2D view owns its bitmaps and may recycle them: give the 3D view a copy
+                val ov = ovBmp?.takeIf { !it.isRecycled }
+                val src = ov ?: baseBmp?.takeIf { !it.isRecycled } ?: return@launch
+                val copy = src.copy(Bitmap.Config.ARGB_8888, false) ?: return@launch
+                val drape = if (ov != null) Surface3DView.Drape(copy, ovPlace[0], ovPlace[1], ovPlace[2], ovPlace[3])
+                    else Surface3DView.Drape(copy, 0f, 0f, 1f, 1f)
+                val pins = if (view.showCandidates) view.markers.map {
+                    Surface3DView.Pin(it.x, it.y, FinalImageView.styleColour(it.style), it.focus)
+                } else emptyList()
+                val line = if (profile != null) lineAsk?.copyOf() else null
+                gv.setSurface(hg, m.getInt("width"), m.getInt("height"),
+                    m.getDouble("cell_dx_m").toFloat(), m.getDouble("cell_dy_m").toFloat(),
+                    currentVe(), drape, pins, line, resetCamera)
+                veBtn.text = "Height: " + (if (veChosen == null) "auto " else "") + "\u00D7" + trimNum(currentVe().toDouble())
+                update3DInfo()
+            } catch (e: PyException) {
+                showError(e.message ?: "3D surface failed")
+            } catch (e: OutOfMemoryError) {
+                showError("Not enough memory for the 3D surface; choose a smaller window.")
+            }
+        }
+    }
+
+    private fun chooseVe() {
+        val m = s3dMeta ?: return
+        val auto = m.optDouble("ve_auto", 1.0)
+        val arr = m.optJSONArray("ve_choices")
+        val steps = (0 until (arr?.length() ?: 0)).map { arr!!.getDouble(it) }
+        val labels = listOf("Automatic (\u00D7${trimNum(auto)})") +
+            steps.map { "\u00D7" + trimNum(it) + if (it == 1.0) " (true scale)" else "" }
+        AlertDialog.Builder(this).setTitle("Height exaggeration")
+            .setItems(labels.toTypedArray()) { _, i ->
+                veChosen = if (i == 0) null else steps[i - 1].toFloat()
+                glView?.setExaggeration(currentVe())
+                veBtn.text = "Height: " + (if (veChosen == null) "auto " else "") + "\u00D7" + trimNum(currentVe().toDouble())
+                update3DInfo()
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun update3DInfo() {
+        val m = s3dMeta ?: return
+        if (!is3DShown()) return
+        val cam = glView?.camera() ?: return
+        info.text = buildString {
+            append(String.format(Locale.US, "3D \u00B7 Height \u00D7%s (%s) \u00B7 view from %.0f\u00B0, tilt %.0f\u00B0\n",
+                trimNum(currentVe().toDouble()), if (veChosen == null) "automatic" else "chosen", cam[0], cam[1]))
+            if (veChosen == null) append(m.optString("ve_rule")).append('\n')
+            append("Drape: ").append(drapeLabel()).append(" (each image pixel a sharp square; dark = no data)\n")
+            append(String.format(Locale.US, "DEM %d \u00D7 %d cells, %d without a value (holes, not filled). ",
+                m.optInt("width"), m.optInt("height"), m.optInt("cells_no_data")))
+            append("Extra 3D lighting for depth only.\n")
+            append(m.optString("statement")).append('\n')
+            append("One finger: rotate / tilt \u00B7 two fingers: zoom \u00B7 double tap: reset")
+        }
+    }
+
+    private fun snapshot3D() {
+        val gv = glView ?: return
+        val sid = sessionId ?: return
+        if (!is3DShown()) return
+        val cam = gv.camera()
+        val state = JSONObject().apply {
+            put("ve", currentVe().toDouble()); put("ve_mode", if (veChosen == null) "auto" else "chosen")
+            put("azimuth_deg", cam[0].toDouble()); put("tilt_deg", cam[1].toDouble()); put("distance_m", cam[2].toDouble())
+            put("drape", drapeLabel())
+            satMeta?.let { sm -> put("drape_detail", JSONObject().put("product", satProduct)
+                .put("scene_date", sm.optString("scene_date"))
+                .put("sha256", sm.optJSONObject("provenance")?.optString("sha256") ?: "")) }
+            filterMeta?.let { put("drape_detail", JSONObject().put("filter", filterName).put("params", filterParams ?: JSONObject())) }
+            put("pins", if (view.showCandidates) view.markers.size else 0)
+            if (profile != null) lineAsk?.let { put("profile_line", JSONArray(it.map { v -> v.toDouble() })) }
+            put("width_px", gv.width); put("height_px", gv.height)
+        }.toString()
+        setLoading(true)
+        gv.snapshot { bmp ->
+            if (bmp == null) { setLoading(false); showError("Could not read the 3D picture."); return@snapshot }
+            lifecycleScope.launch {
+                try {
+                    val r = withContext(Dispatchers.Default) {
+                        val bos = ByteArrayOutputStream()
+                        bmp.compress(Bitmap.CompressFormat.PNG, 100, bos)
+                        bmp.recycle()
+                        JSONObject(python.getModule("surface3d_mobile").callAttr("export_snapshot_json",
+                            offlineDataRoot, sid, bos.toByteArray(), state).toString())
+                    }
+                    if (r.has("error")) showError(r.getString("error")) else {
+                        val ps = r.getJSONObject("paths")
+                        val text = ps.keys().asSequence().joinToString("\n\n") { k -> "$k:\n" + ps.getString(k) }
+                        AlertDialog.Builder(this@FinalImageActivity)
+                            .setTitle("3D snapshot saved")
+                            .setMessage("$text\n\nThe provenance file records the DEM tile and its SHA-256, the height " +
+                                "exaggeration, the camera, the drape and the SHA-256 of the picture. Display only.")
+                            .setPositiveButton("OK", null).show()
+                    }
+                } catch (e: PyException) {
+                    showError(e.message ?: "snapshot failed")
+                } finally {
+                    setLoading(false)
+                }
+            }
         }
     }
 
@@ -492,6 +689,7 @@ class FinalImageActivity : AppCompatActivity() {
         view.utmLines = parseUtm(m.optJSONObject("utm_grid"))
         view.markers = parseMarkers(m.getJSONArray("candidates"))
         view.setImage(bmp, m.optDouble("cell_dx_m", nativeRes), keepView)
+        baseBmp = bmp   // s3d-v1: the 2D view owns it; the 3D view takes a copy
         pendingGround?.let { view.restoreGround(it); pendingGround = null }   // fi-v2.2: after a rebuild
         title.text = String.format(Locale.US, "Final Image \u00B7 %s  (%.5f, %.5f)",
             candidateId.take(8), m.getDouble("lat"), m.getDouble("lon"))
@@ -510,6 +708,8 @@ class FinalImageActivity : AppCompatActivity() {
         if (sp != null) openSatellite(sp, fetch = false, quiet = true)   // refreshes the profile itself
         else if (fn != null) openFilter(fn, filterParams ?: JSONObject(), quiet = true)
         else refreshProfile(true)
+        // s3d-v1: 3D tab restored after rotation/rebuild, or a new window/colour while in 3D
+        if (tab == 1 && !is3DShown()) show3D() else if (is3DShown()) refresh3D(resetCamera = !keepView)
     }
 
     private fun parseLevels(c: JSONObject): List<FinalImageView.Level> {
@@ -587,6 +787,7 @@ class FinalImageActivity : AppCompatActivity() {
     }
 
     private fun updateInfo() {
+        if (is3DShown()) { update3DInfo(); return }
         val m = meta ?: return
         val d = resources.displayMetrics.density
         val demCellM = m.optDouble("cell_dx_m", nativeRes)
@@ -602,6 +803,9 @@ class FinalImageActivity : AppCompatActivity() {
         val satPx = sm?.optDouble("pixel_m") ?: Double.NaN
         val onSat = sm != null && !satPx.isNaN() && satPx > 0
         val cellM = if (onSat) satPx else demCellM
+        // s3d-v1: DEM cells are not square here; say both sides
+        val cellSize = if (onSat) "${trimNum(cellM)} m"
+            else "${trimNum(demCellM)} \u00D7 ${trimNum(m.optDouble("cell_dy_m", demCellM))} m"
         val cellKind = when {
             onSat -> (satLabels[satProduct]?.substringBefore(" (") ?: sm!!.optString("label", "satellite")) + " image cell"
             filterMeta != null -> "DEM cell (derived filter)"
@@ -619,8 +823,8 @@ class FinalImageActivity : AppCompatActivity() {
             resLabel, pxPerCell / d, if (onSat) "image cell" else "DEM cell",
             spanText(across), spanText(wM), spanText(hM), mode,
             when {
-                beyond && !view.smooth -> "\nZoomed past native: each square is one $cellKind (${trimNum(cellM)} m), no new detail added."
-                beyond -> "\nZoomed past native ($cellKind, ${trimNum(cellM)} m): colours between cell centres are interpolated, not measured."
+                beyond && !view.smooth -> "\nZoomed past native: each square is one $cellKind ($cellSize), no new detail added."
+                beyond -> "\nZoomed past native ($cellKind, $cellSize): colours between cell centres are interpolated, not measured."
                 else -> ""
             })
         if (view.pickMode) info.append(if (pickA == null) "\nProfile: tap point A on the map." else "\nProfile: now tap point A\u2032.")
@@ -778,7 +982,7 @@ class FinalImageActivity : AppCompatActivity() {
 
     private fun clearSatellite() {
         satProduct = null; satMeta = null
-        view.setOverlay(null, 0f, 0f, 1f, 1f)
+        setMapOverlay(null, 0f, 0f, 1f, 1f)
         satBtn.text = "Satellite: off"
         meta?.let { updateLegend(it); updateNotes(it) }
         updateInfo()
@@ -828,7 +1032,7 @@ class FinalImageActivity : AppCompatActivity() {
                         val pl = r.getJSONObject("placement")
                         if (filterName != null) dropFilter()
                         satProduct = product; satMeta = r
-                        view.setOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
+                        setMapOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
                             pl.getDouble("sx").toFloat(), pl.getDouble("sy").toFloat())
                         satBtn.text = "Satellite: " + (satLabels[product]?.substringBefore(" (") ?: product)
                         updateSatLegend(r)
@@ -940,7 +1144,7 @@ class FinalImageActivity : AppCompatActivity() {
     private fun clearFilter() {
         val had = filterMeta != null
         dropFilter()
-        if (had) view.setOverlay(null, 0f, 0f, 1f, 1f)
+        if (had) setMapOverlay(null, 0f, 0f, 1f, 1f)
         meta?.let { updateLegend(it); updateNotes(it) }
         refreshProfile(true)
     }
@@ -969,7 +1173,7 @@ class FinalImageActivity : AppCompatActivity() {
                 if (satMeta != null) { satProduct = null; satMeta = null; satBtn.text = "Satellite: off"; updateInfo() }
                 filterName = name; filterParams = r.optJSONObject("params") ?: params; filterMeta = r
                 val pl = r.getJSONObject("placement")
-                view.setOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
+                setMapOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
                     pl.getDouble("sx").toFloat(), pl.getDouble("sy").toFloat())
                 filterBtn.text = "Filters: " + r.optString("label").removePrefix("DERIVED: ").substringBefore(" (")
                 updateFilterLegend(r)
