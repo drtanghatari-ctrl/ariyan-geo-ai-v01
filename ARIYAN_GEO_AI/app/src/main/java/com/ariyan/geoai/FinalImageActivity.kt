@@ -117,6 +117,10 @@ import java.util.Locale
  * ef-v4a.1 (2026-10-31): depth stepping is queued: each tap moves a target depth at
  * once (shown on screen); one slice loads at a time and the newest target is loaded
  * when the previous one finishes, so no tap is lost or applied to an old depth.
+ * ef-v4b (2026-10-31): ERT sections. Import asks GPR or ERT; an ERT file (distance,
+ * depth, value) is placed on the open profile line A->A' or on typed start/end
+ * coordinates. When the 3D cut follows that line, the MEASURED section is drawn on
+ * the cut face (log10 resistivity, blue low -> red high, dark = empty cell).
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -217,6 +221,8 @@ class FinalImageActivity : AppCompatActivity() {
     private var fieldK = 0
     private var fieldInfo: JSONObject? = null
     private var fieldSlices = 0
+    // ef-v4b: ERT sections drawn on the current cut face
+    private var ertOnFace: List<JSONObject> = emptyList()
 
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
@@ -656,6 +662,7 @@ class FinalImageActivity : AppCompatActivity() {
                 veBtn.text = "Height: " + (if (veChosen == null) "auto " else "") + "\u00D7" + trimNum(currentVe().toDouble())
                 update3DInfo()
                 loadHypotheses()
+                loadErtSections()
             } catch (e: PyException) {
                 showError(e.message ?: "3D surface failed")
             } catch (e: OutOfMemoryError) {
@@ -710,6 +717,7 @@ class FinalImageActivity : AppCompatActivity() {
                 cutSide = when (i) { 1 -> 1; 2 -> -1; else -> 0 }
                 cutBtn.text = "Cut: " + if (cutSide == 0) "off" else if (cutSide > 0) "left" else "right"
                 glView?.setCut(cutSide)
+                loadErtSections()
                 update3DInfo()
             }
             .setNegativeButton("Cancel", null).show()
@@ -1243,9 +1251,12 @@ class FinalImageActivity : AppCompatActivity() {
             val all = (0 until ds.length()).map { ds.getJSONObject(it) }
             val items = mutableListOf("+ Import a file from the inbox\u2026")
             items += all.map { d ->
-                String.format(Locale.US, "%s \u00B7 %s \u00B7 %d points \u00B7 %d depths \u00B7 %s",
-                    d.optString("label"), d.optString("method"), d.optInt("points"),
-                    d.getJSONArray("slices").length(), if (d.optString("status") == "WITHDRAWN") "withdrawn" else "active")
+                val st = if (d.optString("status") == "WITHDRAWN") "withdrawn" else "active"
+                if (d.optString("method") == "ERT")
+                    String.format(Locale.US, "%s \u00B7 ERT \u00B7 %d cells \u00B7 line %.0f m, to %.1f m deep \u00B7 %s",
+                        d.optString("label"), d.optInt("points"), d.optDouble("line_length_m"), d.optDouble("depth_bottom_m"), st)
+                else String.format(Locale.US, "%s \u00B7 %s \u00B7 %d points \u00B7 %d depths \u00B7 %s",
+                    d.optString("label"), d.optString("method"), d.optInt("points"), d.getJSONArray("slices").length(), st)
             }
             AlertDialog.Builder(this).setTitle("Field data (MEASURED)")
                 .setItems(items.toTypedArray()) { _, i -> if (i == 0) chooseInboxFile(r) else showDataset(all[i - 1]) }
@@ -1267,7 +1278,14 @@ class FinalImageActivity : AppCompatActivity() {
         val labels = (0 until files.length()).map { i ->
             val f = files.getJSONObject(i); String.format(Locale.US, "%s (%.1f kB)", f.optString("name"), f.optDouble("bytes") / 1024.0) }
         AlertDialog.Builder(this).setTitle("Pick a GPR file")
-            .setItems(labels.toTypedArray()) { _, i -> importDialog(names[i], r.optInt("utm_zone"), r.optBoolean("northern")) }
+            .setItems(labels.toTypedArray()) { _, i ->
+                AlertDialog.Builder(this).setTitle("What kind of file is " + names[i] + "?")
+                    .setItems(arrayOf("GPR (x, y, depth, value) \u2014 depth slices",
+                        "ERT section (distance, depth, value) \u2014 a line")) { _, k ->
+                        if (k == 0) importDialog(names[i], r.optInt("utm_zone"), r.optBoolean("northern")) else importErtDialog(names[i])
+                    }
+                    .setNegativeButton("Cancel", null).show()
+            }
             .setNegativeButton("Cancel", null).show()
     }
 
@@ -1308,6 +1326,100 @@ class FinalImageActivity : AppCompatActivity() {
             .setNegativeButton("Cancel", null).show()
     }
 
+    private fun importErtDialog(name: String) {
+        val d = resources.displayMetrics.density
+        val pad = (16 * d).toInt()
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad / 2, pad, 0) }
+        val label = EditText(this).apply { hint = "Label, e.g. ERT line 1 (2026)"; inputType = InputType.TYPE_CLASS_TEXT }
+        val units = EditText(this).apply { setText("ohm m"); inputType = InputType.TYPE_CLASS_TEXT }
+        box.addView(label); box.addView(units)
+        val ln = if (profile != null) lineAsk else null
+        val useLine = android.widget.RadioButton(this).apply {
+            text = if (ln != null) "The open profile line A\u2192A\u2032 (distance 0 = A)" else "The open profile line (none is open)"
+            isEnabled = ln != null; id = 7411 }
+        val typed = android.widget.RadioButton(this).apply { text = "Type the line's start and end"; id = 7412 }
+        val group = android.widget.RadioGroup(this).apply { addView(useLine); addView(typed); check(if (ln != null) useLine.id else typed.id) }
+        box.addView(group)
+        fun num(h: String) = EditText(this).apply {
+            hint = h; inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED
+            box.addView(this) }
+        val aLat = num("Start latitude"); val aLon = num("Start longitude")
+        val bLat = num("End latitude"); val bLon = num("End longitude")
+        box.addView(smallText(R.color.ariyan_text_secondary).apply {
+            text = "Distance 0 in the file is the line's START. The file is stored unchanged with its SHA-256; " +
+                "model cells are kept as they are (nothing interpolated). MEASURED data: the interpretation is yours."
+            setPadding(0, pad / 2, 0, 0)
+        })
+        AlertDialog.Builder(this).setTitle("Import ERT section $name")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Import") { _, _ ->
+                val sid = sessionId ?: return@setPositiveButton
+                val lineJson = if (group.checkedRadioButtonId == useLine.id && ln != null)
+                    JSONObject().put("grid", JSONArray(ln.map { it.toDouble() })).toString()
+                else {
+                    fun v(e: EditText) = e.text.toString().trim().replace(',', '.').toDoubleOrNull() ?: Double.NaN
+                    JSONObject().put("latlon", JSONArray(listOf(v(aLat), v(aLon), v(bLat), v(bLon)))).toString()
+                }
+                fieldCall("import_ert_json", offlineDataRoot, sid, name, lineJson, label.text.toString(), units.text.toString()) { res ->
+                    val m = res.getJSONObject("meta")
+                    AlertDialog.Builder(this@FinalImageActivity).setTitle("Imported (MEASURED)")
+                        .setMessage(String.format(Locale.US,
+                            "%d model cells (%d lines skipped)\nLine %.0f m; section %.1f\u2013%.1f m along it, every %.2f m\n" +
+                            "%d layers, %.2f\u2013%.2f m deep\nColours: %s\n\nTo see it: Profile & Section must show this line, " +
+                            "then 3D \u2192 Cut. (Field data \u2192 this dataset \u2192 Open its line does it for you.)",
+                            m.optInt("points"), m.optInt("lines_skipped"), m.getJSONObject("line").optDouble("length_m"),
+                            m.optDouble("dist_from_m"), m.optDouble("dist_to_m"), m.optDouble("dx_m"),
+                            m.getJSONArray("depth_edges_m").length() - 1, m.optDouble("depth_top_m"), m.optDouble("depth_bottom_m"),
+                            if (m.optBoolean("log_scale")) "log10 of the values" else "linear (some values are not positive)"))
+                        .setPositiveButton("OK", null).show()
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    /** ef-v4b: draw the MEASURED ERT sections that lie on the open cut line */
+    private fun loadErtSections() {
+        val sid = sessionId ?: return
+        val gv = glView ?: return
+        val ln = if (profile != null && cutSide != 0) lineAsk else null
+        if (ln == null) { ertOnFace = emptyList(); gv.setSections(emptyList()); return }
+        lifecycleScope.launch {
+            try {
+                val (r, bmps) = withContext(Dispatchers.Default) {
+                    val mod = python.getModule("field_data")
+                    val j = JSONObject(mod.callAttr("ert_on_line_json", offlineDataRoot, sid,
+                        ln[0].toDouble(), ln[1].toDouble(), ln[2].toDouble(), ln[3].toDouble()).toString())
+                    if (j.has("error")) Pair(j, emptyList<Bitmap>()) else {
+                        val arr = j.getJSONArray("sections")
+                        val list = (0 until arr.length()).map { i ->
+                            val e = arr.getJSONObject(i)
+                            val bytes = mod.callAttr("section_rgba", i).toJava(ByteArray::class.java)
+                            Bitmap.createBitmap(e.getInt("width"), e.getInt("height"), Bitmap.Config.ARGB_8888).also {
+                                it.copyPixelsFromBuffer(ByteBuffer.wrap(bytes)) }
+                        }
+                        Pair(j, list)
+                    }
+                }
+                if (r.has("error")) { showError(r.optString("error")); return@launch }
+                val arr = r.getJSONArray("sections")
+                ertOnFace = (0 until arr.length()).map { arr.getJSONObject(it) }
+                gv.setSections(ertOnFace.mapIndexed { i, e ->
+                    val w = e.getInt("width")
+                    val from = e.getDouble("dist_from_m"); val to = e.getDouble("dist_to_m")
+                    val dx = if (w > 1) (to - from) / (w - 1) else 1.0
+                    Surface3DView.Section(bmps[i], e.getDouble("line_length_m").toFloat(),
+                        (from - dx / 2).toFloat().coerceAtLeast(0f), (to + dx / 2).toFloat(),
+                        e.getDouble("depth_top_m").toFloat(), e.getDouble("depth_bottom_m").toFloat(), e.optBoolean("reversed"))
+                })
+                update3DInfo()
+            } catch (e: PyException) {
+                showError(e.message ?: "ERT section failed")
+            } catch (e: OutOfMemoryError) {
+                showError("Not enough memory for the ERT section.")
+            }
+        }
+    }
+
     private fun showDataset(ds: JSONObject) {
         val msg = buildString {
             append(ds.optString("method")).append(" \u00B7 ").append(ds.optString("source_filename")).append('\n')
@@ -1319,7 +1431,25 @@ class FinalImageActivity : AppCompatActivity() {
             if (ds.optString("status_reason").isNotBlank()) append(" (").append(ds.optString("status_reason")).append(')')
         }
         val b = AlertDialog.Builder(this).setTitle(ds.optString("label")).setMessage(msg).setPositiveButton("Close", null)
-        if (ds.optString("status") == "ACTIVE") {
+        if (ds.optString("status") == "ACTIVE" && ds.optString("method") == "ERT") {
+            if (ds.optBoolean("line_in_window")) b.setNeutralButton("Open its line") { _, _ ->
+                val g = ds.getJSONArray("line_grid")
+                preset = null
+                lineAsk = floatArrayOf(g.getDouble(0).toFloat(), g.getDouble(1).toFloat(), g.getDouble(2).toFloat(), g.getDouble(3).toFloat())
+                runProfile()
+                info.text = "ERT line opened as the profile. In 3D, tap Cut to see the measured section on the face."
+            }
+            b.setNegativeButton("Withdraw\u2026") { _, _ ->
+                val reason = EditText(this).apply { hint = "Reason (required)" }
+                AlertDialog.Builder(this).setTitle("Withdraw \u201C" + ds.optString("label") + "\u201D")
+                    .setMessage("The file stays stored; the dataset is marked withdrawn with your reason.")
+                    .setView(reason)
+                    .setPositiveButton("Withdraw") { _, _ ->
+                        fieldCall("withdraw_json", offlineDataRoot, ds.getString("id"), reason.text.toString()) { loadErtSections() }
+                    }
+                    .setNegativeButton("Cancel", null).show()
+            }
+        } else if (ds.optString("status") == "ACTIVE") {
             b.setNeutralButton("Show depth\u2026") { _, _ ->
                 val sl = ds.getJSONArray("slices")
                 val items = (0 until sl.length()).map { i -> val x = sl.getJSONObject(i)
@@ -1573,6 +1703,11 @@ class FinalImageActivity : AppCompatActivity() {
                 append("  GREY HATCHED = UNKNOWN: no subsurface measurement (no GPR, no ERT); its drawn depth is a drawing aid.\n")
                 append("  PURPLE = HYPOTHESIZED by you: ").append(hypsOnLine.size)
                     .append(" on this line (your ideas, not measured, not evidence).\n")
+                for (e in ertOnFace) {
+                    append(String.format(Locale.US, "  MEASURED ERT \u201C%s\u201D on this face: %s %.3g \u2026 %.3g %s, blue low \u2192 red high, dark = empty cell, down to %.1f m.\n",
+                        e.optString("label"), if (e.optBoolean("log_scale")) "log10 of" else "",
+                        e.optDouble("colour_lo"), e.optDouble("colour_hi"), e.optString("value_units"), e.optDouble("depth_bottom_m")))
+                }
             }
             append(m.optString("statement")).append('\n')
             append("One finger: rotate / tilt \u00B7 two fingers: zoom \u00B7 double tap: reset")
@@ -2422,6 +2557,7 @@ class FinalImageActivity : AppCompatActivity() {
         profile = null; lineAsk = null; preset = null; pickA = null
         if (cutSide != 0) { cutSide = 0; if (::cutBtn.isInitialized) cutBtn.text = "Cut: off" }
         hypsOnLine = emptyList(); glView?.setHypotheses(emptyList(), 0f)
+        ertOnFace = emptyList(); glView?.setSections(emptyList())
         view.pickMode = false
         view.profileA = null; view.profileB = null; view.profileCursor = null
         view.clearLineFit(); view.invalidate()
