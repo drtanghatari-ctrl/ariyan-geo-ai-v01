@@ -79,6 +79,9 @@ import java.util.Locale
  * hatched wall labelled NO SUBSURFACE MEASUREMENT: nothing below the ground line
  * is measured, and the wall's depth is a drawing aid only.
  * cut-v1.1: portrait map keeps 58 % of the height; profile graphs hidden in the 3D tab.
+ * cut-v2 (2026-10-31): the cut face shows DERIVED raised material (orange, ground
+ * above its local base level) and DERIVED hollows (translucent blue) from the DEM,
+ * with UNKNOWN (grey hatched) below. Nothing invented below ground.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -543,17 +546,22 @@ class FinalImageActivity : AppCompatActivity() {
         val gv = glView ?: return
         lifecycleScope.launch {
             try {
-                val (m, hg) = withContext(Dispatchers.Default) {
+                val (m, both) = withContext(Dispatchers.Default) {
                     val mod = python.getModule("surface3d_mobile")
                     val j = JSONObject(mod.callAttr("open_surface_json", sid).toString())
                     if (j.has("error")) Pair(j, null) else {
-                        val bytes = mod.callAttr("surface_heights", sid).toJava(ByteArray::class.java)
-                        val fb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
-                        val arr = FloatArray(fb.remaining())
-                        fb.get(arr)
-                        Pair(j, arr)
+                        fun floats(name: String): FloatArray {
+                            val bytes = mod.callAttr(name, sid).toJava(ByteArray::class.java)
+                            val fb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+                            return FloatArray(fb.remaining()).also { fb.get(it) }
+                        }
+                        // cut-v2: local base level per cell (mean ground within the relief radius)
+                        j.put("cut_face_rule", mod.callAttr("cut_face_rule", sid).toString())
+                        Pair(j, Pair(floats("surface_heights"), floats("surface_base")))
                     }
                 }
+                val hg = both?.first
+                val baseLevels = both?.second
                 if (hg == null) { showError(m.optString("error", "3D surface failed")); return@launch }
                 if (sid != sessionId) return@launch            // a newer window replaced this one
                 s3dMeta = m
@@ -569,7 +577,7 @@ class FinalImageActivity : AppCompatActivity() {
                 val line = if (profile != null) lineAsk?.copyOf() else null
                 gv.setSurface(hg, m.getInt("width"), m.getInt("height"),
                     m.getDouble("cell_dx_m").toFloat(), m.getDouble("cell_dy_m").toFloat(),
-                    currentVe(), drape, pins, line, resetCamera, if (line == null) 0 else cutSide)
+                    currentVe(), drape, pins, line, resetCamera, if (line == null) 0 else cutSide, baseLevels)
                 veBtn.text = "Height: " + (if (veChosen == null) "auto " else "") + "\u00D7" + trimNum(currentVe().toDouble())
                 update3DInfo()
             } catch (e: PyException) {
@@ -644,9 +652,13 @@ class FinalImageActivity : AppCompatActivity() {
             append(String.format(Locale.US, "DEM %d \u00D7 %d cells, %d without a value (holes, not filled). ",
                 m.optInt("width"), m.optInt("height"), m.optInt("cells_no_data")))
             append("Extra 3D lighting for depth only.\n")
-            if (cutSide != 0) append("CUT along A\u2013A\u2032 (").append(cutLabel()).append("). Grey hatched face = " +
-                "NO SUBSURFACE MEASUREMENT: nothing below the ground line is measured here (no GPR, no ERT); " +
-                "its depth is a drawing aid, not a depth. Its top edge is the stored DEM cells along the line.\n")
+            if (cutSide != 0) {
+                append("CUT along A\u2013A\u2032 (").append(cutLabel()).append("). Cut face, from the stored DEM cells:\n")
+                append("  ORANGE = DERIVED raised material: ground standing above its local base level ")
+                append("(mean ground within ${trimNum(m.optDouble("relief_radius_m", 300.0))} m); what it is made of is unknown.\n")
+                append("  BLUE (see-through) = DERIVED hollow: ground below its local base.\n")
+                append("  GREY HATCHED = UNKNOWN: no subsurface measurement (no GPR, no ERT); its drawn depth is a drawing aid.\n")
+            }
             append(m.optString("statement")).append('\n')
             append("One finger: rotate / tilt \u00B7 two fingers: zoom \u00B7 double tap: reset")
         }
