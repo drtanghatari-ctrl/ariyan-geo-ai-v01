@@ -28,6 +28,13 @@ Real numbers for the candidate (DERIVED, from the DEM):
 
 Display only: nothing here changes a candidate, a review, a status or a
 confidence. The Steward stays above this layer.
+
+ef-v2 (2026-10-31): the user's FOOTPRINT hypotheses (footprint_hypothesis.py:
+a polygon drawn on the map + a depth range) fill every block whose cell centre
+lies inside the polygon, within the depth range. Section hypotheses still
+count. Where two or more different hypotheses claim the same block it is
+CONTESTED (magenta): the app never picks one (no artificial closure). The
+summary lists, for each hypothesis, which others it overlaps.
 """
 from __future__ import annotations
 
@@ -43,7 +50,7 @@ import numpy as np
 import final_image as fi
 import final_image_mobile as fim
 
-VERSION = "ef-v1"
+VERSION = "ef-v2"
 DEPTH_MAX_M = 10.0
 SLICE_M = 0.5
 DERIVED, HYPOTHESIZED, MEASURED = 1, 2, 4
@@ -51,9 +58,11 @@ DERIVED, HYPOTHESIZED, MEASURED = 1, 2, 4
 COLOURS = {  # RGBA for a depth slice; UNKNOWN stays transparent (the map hatches it)
     "DERIVED": (237, 140, 46, 215),
     "HYPOTHESIZED": (158, 82, 242, 235),
+    "CONTESTED": (230, 60, 170, 245),
 }
 STATEMENT = ("Evidence volume, display only. Orange = DERIVED raised material (from the DEM; make-up "
-             "unknown). Purple = HYPOTHESIZED by you. Hatched = UNKNOWN: no measurement. No field "
+             "unknown). Purple = HYPOTHESIZED by you; magenta = CONTESTED (two or more of your hypotheses "
+             "claim the same block; none is chosen). Hatched = UNKNOWN: no measurement. No field "
              "data (GPR/ERT) is placed in the volume in ef-v1. Nothing here is evidence of a buried "
              "feature and nothing changes status or confidence.")
 
@@ -92,12 +101,70 @@ def build_states(relief: np.ndarray, hyp_cells: List[Dict[str, Any]],
     return states
 
 
-def slice_rgba(states: np.ndarray, k: int) -> np.ndarray:
+def build_counts(shape: tuple, hyp_cells: List[Dict[str, Any]],
+                 depth_max_m: float = DEPTH_MAX_M, slice_m: float = SLICE_M) -> np.ndarray:
+    """(H, W, K) number of DIFFERENT hypotheses claiming each block."""
+    h, w = shape
+    k = n_slices(depth_max_m, slice_m)
+    tops = np.arange(k) * slice_m
+    counts = np.zeros((h, w, k), dtype=np.uint8)
+    for hp in hyp_cells:
+        t, b = float(hp["top_m"]), float(hp["bottom_m"])
+        ks = [i for i in range(k) if tops[i] < b and tops[i] + slice_m > t]
+        for (r, c) in set(map(tuple, hp["cells"])):
+            if 0 <= r < h and 0 <= c < w:
+                for i in ks:
+                    counts[r, c, i] = min(255, counts[r, c, i] + 1)
+    return counts
+
+
+def slice_rgba(states: np.ndarray, k: int, counts: np.ndarray = None) -> np.ndarray:
     s = states[:, :, k]
     out = np.zeros(s.shape + (4,), dtype=np.uint8)
     out[(s & DERIVED) > 0] = COLOURS["DERIVED"]
     out[(s & HYPOTHESIZED) > 0] = COLOURS["HYPOTHESIZED"]       # drawn over DERIVED
+    if counts is not None:
+        out[counts[:, :, k] >= 2] = COLOURS["CONTESTED"]
     return out
+
+
+def polygon_cells(poly_xy: List[List[float]], h: int, w: int) -> List[tuple]:
+    """Cells (r, c) whose CENTRE lies inside the polygon (grid units, even-odd rule)."""
+    if len(poly_xy) < 3:
+        return []
+    xs = [p[0] for p in poly_xy]
+    ys = [p[1] for p in poly_xy]
+    c0, c1 = max(0, int(math.floor(min(xs)))), min(w - 1, int(math.ceil(max(xs))))
+    r0, r1 = max(0, int(math.floor(min(ys)))), min(h - 1, int(math.ceil(max(ys))))
+    out = []
+    n = len(poly_xy)
+    for r in range(r0, r1 + 1):
+        py = r + 0.5
+        for c in range(c0, c1 + 1):
+            px = c + 0.5
+            inside = False
+            j = n - 1
+            for i in range(n):
+                xi, yi = poly_xy[i]
+                xj, yj = poly_xy[j]
+                if (yi > py) != (yj > py) and px < (xj - xi) * (py - yi) / (yj - yi) + xi:
+                    inside = not inside
+                j = i
+            if inside:
+                out.append((r, c))
+    return out
+
+
+def overlaps(hyps: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """For each hypothesis id: labels of the others sharing at least one block."""
+    res: Dict[str, List[str]] = {h["id"]: [] for h in hyps}
+    for i, a in enumerate(hyps):
+        ca = set(map(tuple, a["cells"]))
+        for b in hyps[i + 1:]:
+            if a["top_m"] < b["bottom_m"] and b["top_m"] < a["bottom_m"] and ca & set(map(tuple, b["cells"])):
+                res[a["id"]].append(b["label"])
+                res[b["id"]].append(a["label"])
+    return res
 
 
 def raised_body(relief: np.ndarray, r0: int, c0: int, dx: float, dy: float) -> Dict[str, Any]:
@@ -177,8 +244,16 @@ def _hyp_cells(db_root: str, s: Dict[str, Any]) -> List[Dict[str, Any]]:
         f1 = max(0.0, min(1.0, r["along_to_m"] / L))
         if f1 <= f0:
             continue
-        out.append({"id": r["id"], "label": r["label"], "top_m": r["depth_top_m"],
+        out.append({"id": r["id"], "label": r["label"], "top_m": r["depth_top_m"], "kind": "section",
                     "bottom_m": r["depth_bottom_m"], "cells": line_cells(ax, ay, bx, by, f0, f1)})
+    # ef-v2: footprint hypotheses drawn on the map
+    import footprint_hypothesis as fph
+    h, w = grid.shape
+    for r in fph.list_for_candidate(db_root, s["candidate_id"]):
+        poly = [list(grid.lonlat_to_pixel(lon, lat)) for lat, lon in r["polygon"]]
+        out.append({"id": r["id"], "label": r["label"], "top_m": r["depth_top_m"], "kind": "footprint",
+                    "bottom_m": r["depth_bottom_m"], "area_m2": r["area_m2"],
+                    "cells": polygon_cells(poly, h, w)})
     return out
 
 
@@ -195,27 +270,31 @@ def _build(db_root: str, session_id: str) -> Dict[str, Any]:
     relief = fi.local_relief(z, dx, dy, radius)
     hyps = _hyp_cells(db_root, s)
     states = build_states(relief, hyps)
+    counts = build_counts(relief.shape, hyps)
+    ov = overlaps(hyps)
     fx, fy = s.get("focus") or (z.shape[1] / 2.0, z.shape[0] / 2.0)
     body = raised_body(relief, int(math.floor(fy)), int(math.floor(fx)), dx, dy)
     k = states.shape[2]
-    counts = [{"top_m": round(i * SLICE_M, 2), "bottom_m": round((i + 1) * SLICE_M, 2),
+    slice_counts = [{"top_m": round(i * SLICE_M, 2), "bottom_m": round((i + 1) * SLICE_M, 2),
                "derived_cells": int(((states[:, :, i] & DERIVED) > 0).sum()),
-               "hypothesized_cells": int(((states[:, :, i] & HYPOTHESIZED) > 0).sum())} for i in range(k)]
+               "hypothesized_cells": int(((states[:, :, i] & HYPOTHESIZED) > 0).sum()),
+               "contested_cells": int((counts[:, :, i] >= 2).sum())} for i in range(k)]
     body_public = {kk: v for kk, v in body.items() if kk != "mask_cells"}
     summary = {
         "version": VERSION, "candidate_id": s["candidate_id"],
         "grid": {"width": int(z.shape[1]), "height": int(z.shape[0]),
                  "cell_dx_m": round(dx, 2), "cell_dy_m": round(dy, 2)},
         "depth_max_m": DEPTH_MAX_M, "slice_m": SLICE_M, "relief_radius_m": radius,
-        "slices": counts, "body": body_public,
-        "hypotheses": [{"id": h["id"], "label": h["label"], "top_m": h["top_m"], "bottom_m": h["bottom_m"],
-                        "cells": len(h["cells"])} for h in hyps],
+        "slices": slice_counts, "body": body_public,
+        "hypotheses": [{"id": h["id"], "label": h["label"], "kind": h["kind"], "top_m": h["top_m"],
+                        "bottom_m": h["bottom_m"], "cells": len(set(map(tuple, h["cells"]))),
+                        "area_m2": h.get("area_m2"), "overlaps": ov.get(h["id"], [])} for h in hyps],
         "field_readings_recorded": _field_reading_count(db_root, s["candidate_id"]),
         "measured_in_volume": 0,
         "source": grid.source, "source_sha256": grid.source_sha256,
         "statement": STATEMENT,
     }
-    return {"states": states, "summary": summary, "t": time.time()}
+    return {"states": states, "counts": counts, "summary": summary, "t": time.time()}
 
 
 def volume_json(db_root: str, session_id: str) -> str:
@@ -240,4 +319,60 @@ def volume_slice_rgba(session_id: str, k: int) -> bytes:
     k = int(k)
     if not 0 <= k < states.shape[2]:
         raise ValueError("no such depth slice")
-    return slice_rgba(states, k).tobytes()
+    return slice_rgba(states, k, v.get("counts")).tobytes()
+
+
+# ---------------------------------------------------------------------------
+# ef-v2: footprint hypotheses from the Final Image screen
+# ---------------------------------------------------------------------------
+
+def _session(session_id: str) -> Dict[str, Any]:
+    with fim._LOCK:
+        s = fim._SESSIONS.get(session_id)
+    if s is None:
+        raise KeyError("final image session expired; reopen the image")
+    return s
+
+
+def footprints_json(db_root: str, session_id: str) -> str:
+    """All footprints for the candidate (active and withdrawn), corners in this window's grid units."""
+    try:
+        import footprint_hypothesis as fph
+        s = _session(session_id)
+        grid = s["result"]["grid"]
+        out = []
+        for r in fph.list_for_candidate(db_root, s["candidate_id"], include_withdrawn=True):
+            out.append({"id": r["id"], "label": r["label"], "note": r["note"], "status": r["status"],
+                        "status_reason": r["status_reason"], "created_at": r["created_at"],
+                        "area_m2": r["area_m2"], "depth_top_m": r["depth_top_m"],
+                        "depth_bottom_m": r["depth_bottom_m"], "kind": r["kind"],
+                        "polygon_grid": [list(grid.lonlat_to_pixel(lon, lat)) for lat, lon in r["polygon"]]})
+        return json.dumps({"ok": True, "footprints": out})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def add_footprint_json(db_root: str, session_id: str, points_grid_json: str, label: str,
+                       depth_top_m: float, depth_bottom_m: float, note: str = "") -> str:
+    try:
+        import footprint_hypothesis as fph
+        s = _session(session_id)
+        grid = s["result"]["grid"]
+        pts = json.loads(points_grid_json)
+        latlon = []
+        for x, y in pts:
+            lon, lat = grid.pixel_to_lonlat(float(x), float(y))
+            latlon.append([lat, lon])
+        hid = fph.add(db_root, s["candidate_id"], latlon, label, float(depth_top_m), float(depth_bottom_m), note)
+        return json.dumps({"ok": True, "id": hid})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+
+def withdraw_footprint_json(db_root: str, hypothesis_id: str, reason: str) -> str:
+    try:
+        import footprint_hypothesis as fph
+        fph.withdraw(db_root, hypothesis_id, reason)
+        return json.dumps({"ok": True})
+    except Exception as e:
+        return json.dumps({"error": f"{type(e).__name__}: {e}"})
