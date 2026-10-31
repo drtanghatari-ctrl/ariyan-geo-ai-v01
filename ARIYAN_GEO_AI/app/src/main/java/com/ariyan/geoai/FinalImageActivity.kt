@@ -103,6 +103,11 @@ import java.util.Locale
  * stored append-only (footprint_hypothesis.py), drawn as dashed purple outlines,
  * filled into the volume; where two or more claim the same block it is CONTESTED
  * (magenta) and none is chosen. Withdraw needs a reason.
+ * ef-v3 (2026-10-31): "Survey plan" in the 3D tab (survey_plan.py): where a field
+ * survey would best separate the user's own hypotheses (CONTESTED zones first, then
+ * single hypotheses by claimed volume), with corner coordinates, depth range and a
+ * fixed qualitative method table (MAG, GPR, ERT, coring). A planning aid, not
+ * evidence; Export writes a text + JSON plan for a survey team.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -340,6 +345,7 @@ class FinalImageActivity : AppCompatActivity() {
         threeDRow.addView(button("Hypotheses") { chooseHypothesis() })
         threeDRow.addView(button("Volume") { chooseVolume() })
         threeDRow.addView(button("Footprints") { chooseFootprints() })
+        threeDRow.addView(button("Survey plan") { showSurveyPlan() })
         threeDRow.addView(button("Reset view") { glView?.resetView() })
         threeDRow.addView(button("Snapshot") { snapshot3D() })
 
@@ -1111,6 +1117,74 @@ class FinalImageActivity : AppCompatActivity() {
                 .setNegativeButton("Cancel", null).show()
         }
         b.show()
+    }
+
+    // ------------------------------------------------------------------ survey plan (ef-v3)
+
+    private fun showSurveyPlan() {
+        val sid = sessionId ?: return
+        setLoading(true)
+        lifecycleScope.launch {
+            val p = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("survey_plan").callAttr("plan_json", offlineDataRoot, sid).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) } finally { setLoading(false) }
+            if (p.has("error")) { showError(p.optString("error")); return@launch }
+            val text = buildString {
+                val items = p.getJSONArray("items")
+                if (items.length() == 0) append(p.optString("empty_reason")).append("\n\n")
+                for (i in 0 until items.length()) {
+                    val it = items.getJSONObject(i)
+                    val hs = it.getJSONArray("hypotheses")
+                    append(it.optInt("rank")).append(". ").append(if (it.optString("kind") == "CONTESTED") "CONTESTED: " else "")
+                        .append((0 until hs.length()).joinToString(" vs ") { k -> hs.optString(k) }).append('\n')
+                    append(String.format(Locale.US, "   %.1f\u2013%.1f m below ground \u00B7 %d cells\n",
+                        it.optDouble("depth_top_m"), it.optDouble("depth_bottom_m"), it.optInt("cells")))
+                    val c = it.getJSONArray("area_corners_latlon")
+                    append("   area corners: ")
+                    append((0 until c.length()).joinToString("; ") { k ->
+                        val pt = c.getJSONArray(k); String.format(Locale.US, "%.5f, %.5f", pt.getDouble(0), pt.getDouble(1)) })
+                    append('\n')
+                    append("   ").append(it.optString("why")).append('\n')
+                    val m = it.getJSONArray("methods")
+                    append("   methods, in order: ").append((0 until m.length()).joinToString(" \u2192 ") { k -> m.optString(k) }).append("\n\n")
+                }
+                append("METHODS\n")
+                val ms = p.getJSONObject("methods")
+                for (key in listOf("MAG", "GPR", "ERT", "CORE")) append("\u2022 ").append(key).append(": ").append(ms.optString(key)).append('\n')
+                append('\n').append(p.optString("statement"))
+            }
+            val d = resources.displayMetrics.density
+            val tv = smallText(R.color.ariyan_text_primary).apply {
+                this.text = text
+                setPadding((16 * d).toInt(), (8 * d).toInt(), (16 * d).toInt(), (8 * d).toInt())
+                setTextIsSelectable(true)
+            }
+            AlertDialog.Builder(this@FinalImageActivity).setTitle("Survey plan (planning aid)")
+                .setView(ScrollView(this@FinalImageActivity).apply { addView(tv) })
+                .setPositiveButton("Close", null)
+                .setNeutralButton("Export") { _, _ -> exportSurveyPlan() }
+                .show()
+        }
+    }
+
+    private fun exportSurveyPlan() {
+        val sid = sessionId ?: return
+        setLoading(true)
+        lifecycleScope.launch {
+            val r = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("survey_plan").callAttr("export_plan_json", offlineDataRoot, sid).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) } finally { setLoading(false) }
+            if (r.has("error")) { showError(r.optString("error")); return@launch }
+            val ps = r.getJSONObject("paths")
+            AlertDialog.Builder(this@FinalImageActivity).setTitle("Survey plan saved")
+                .setMessage("text:\n" + ps.optString("text") + "\n\njson:\n" + ps.optString("json") +
+                    "\n\nShare the text file with a survey team. It is a planning aid, not evidence.")
+                .setPositiveButton("OK", null).show()
+        }
     }
 
     // ------------------------------------------------------------------ assessment (asm-v1)
