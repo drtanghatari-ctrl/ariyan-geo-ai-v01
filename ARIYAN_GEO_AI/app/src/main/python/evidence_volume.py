@@ -274,6 +274,27 @@ def _mark_measured(db_root: str, s: Dict[str, Any], states: np.ndarray):
     listed = []
     for r in fd.list_for_candidate(db_root, s["candidate_id"]):
         m = r["meta"]
+        if r["method"] == "ERT":
+            before = int(((states & MEASURED) > 0).sum())
+            c = fd._dataset(db_root, r["id"])
+            cnt = c["count"]                                   # (layers, distance bins)
+            edges = c["edges"]
+            ln = m["line"]
+            ax, ay = grid.lonlat_to_pixel(ln["a_lon"], ln["a_lat"])
+            bx, by = grid.lonlat_to_pixel(ln["b_lon"], ln["b_lat"])
+            L = float(ln["length_m"]) or 1.0
+            lays, cols = np.nonzero(cnt > 0)
+            if lays.size:
+                f = (m["dist_from_m"] + cols * m["dx_m"]) / L
+                gx = ax + f * (bx - ax); gy = ay + f * (by - ay)
+                col = np.floor(gx).astype(int); row = np.floor(gy).astype(int)
+                ks = np.floor(((edges[lays] + edges[lays + 1]) / 2.0) / SLICE_M).astype(int)
+                ok = (col >= 0) & (col < w) & (row >= 0) & (row < h) & (ks >= 0) & (ks < k)
+                states[row[ok], col[ok], ks[ok]] |= MEASURED
+            after = int(((states & MEASURED) > 0).sum())
+            listed.append({"id": r["id"], "label": r["label"], "method": "ERT", "blocks": after - before})
+            total = after
+            continue
         c = fd._dataset(db_root, r["id"])
         cnt = c["count"]
         edges = c["edges"]
