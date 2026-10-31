@@ -100,3 +100,4 @@ def test_expired_session_is_an_error():
     assert "expired" in json.loads(ev.volume_json("/nowhere", "gone"))["error"]
     with pytest.raises(KeyError):
         ev.volume_slice_rgba("gone", 0)
+
