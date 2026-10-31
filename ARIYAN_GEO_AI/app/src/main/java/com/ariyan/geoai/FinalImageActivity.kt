@@ -108,6 +108,12 @@ import java.util.Locale
  * single hypotheses by claimed volume), with corner coordinates, depth range and a
  * fixed qualitative method table (MAG, GPR, ERT, coring). A planning aid, not
  * evidence; Export writes a text + JSON plan for a survey team.
+ * ef-v4a (2026-10-31): "Field data" in the 3D tab (field_data.py): import a GPR
+ * export (x, y, depth, value) from offline_data/field_data/inbox/, stored unchanged
+ * with its SHA-256; show any depth slice at the survey's OWN resolution, placed on
+ * the map, the 3D drape and the cut face (grey ramp; hatched = empty bin; nothing
+ * interpolated). "Deeper / Shallower" step through depths of the shown field slice
+ * or volume slice. Footprints now say how many DEM cells they cover.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -203,6 +209,11 @@ class FinalImageActivity : AppCompatActivity() {
     private var sketching = false
     private val sketchPts = mutableListOf<Float>()
     private lateinit var sketchRow: LinearLayout
+    // ef-v4a: field data slice shown (null = off)
+    private var fieldId: String? = null
+    private var fieldK = 0
+    private var fieldInfo: JSONObject? = null
+    private var fieldSlices = 0
 
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
@@ -346,6 +357,9 @@ class FinalImageActivity : AppCompatActivity() {
         threeDRow.addView(button("Volume") { chooseVolume() })
         threeDRow.addView(button("Footprints") { chooseFootprints() })
         threeDRow.addView(button("Survey plan") { showSurveyPlan() })
+        threeDRow.addView(button("Field data") { chooseFieldData() })
+        threeDRow.addView(button("Deeper \u25BC") { stepDepth(+1) })
+        threeDRow.addView(button("Shallower \u25B2") { stepDepth(-1) })
         threeDRow.addView(button("Reset view") { glView?.resetView() })
         threeDRow.addView(button("Snapshot") { snapshot3D() })
 
@@ -530,6 +544,7 @@ class FinalImageActivity : AppCompatActivity() {
             append("\u2022 Display: ").append(if (::view.isInitialized && view.smooth)
                 "Smooth (colours between cell centres interpolated, visual only)" else "Exact cells (each square = one stored cell)").append('\n')
             append("\u2022 Overlay: ").append(when {
+                fieldId != null -> "MEASURED " + (fieldInfo?.optString("label") ?: "field data") + " slice " + fieldDepthText() + " (own bins, not interpolated)"
                 volK != null -> "evidence volume slice " + volDepthText(volK!!) + " (ef-v1, one block per DEM cell)"
                 satMeta != null -> (satLabels[satProduct] ?: satProduct ?: "satellite") + " (own pixels, not resampled)"
                 filterMeta != null -> filterMeta!!.optString("label") + " " + (filterParams?.toString() ?: "")
@@ -543,6 +558,8 @@ class FinalImageActivity : AppCompatActivity() {
         put("display_mode", if (view.smooth) "smooth" else "cells")
         put("tab", tabKeys[tab])
         when {
+            fieldId != null -> { put("overlay_kind", "field_data"); put("overlay_name", (fieldInfo?.optString("label") ?: "") + " " + fieldDepthText())
+                put("overlay_params", JSONObject().put("dataset_id", fieldId).put("file_sha256", fieldInfo?.optString("file_sha256"))) }
             volK != null -> { put("overlay_kind", "evidence_volume"); put("overlay_name", "slice " + volDepthText(volK!!)) }
             satMeta != null -> { put("overlay_kind", "satellite"); put("overlay_name", satProduct) }
             filterMeta != null -> { put("overlay_kind", "filter"); put("overlay_name", filterName)
@@ -589,6 +606,7 @@ class FinalImageActivity : AppCompatActivity() {
     private fun currentVe(): Float = veChosen ?: s3dMeta?.optDouble("ve_auto", 1.0)?.toFloat() ?: 1f
 
     private fun drapeLabel(): String = when {
+        fieldId != null -> "MEASURED " + (fieldInfo?.optString("label") ?: "field data") + ", " + fieldDepthText() + " below ground"
         volK != null -> "Evidence volume slice " + volDepthText(volK!!) + " below ground"
         satMeta != null -> satLabels[satProduct] ?: (satProduct ?: "satellite layer")
         filterMeta != null -> filterMeta!!.optString("label")
@@ -932,6 +950,7 @@ class FinalImageActivity : AppCompatActivity() {
                 if (filterName != null) dropFilter()
                 if (satMeta != null) { satProduct = null; satMeta = null; satBtn.text = "Satellite: off" }
                 volSummary = v; volK = k
+                fieldId = null
                 setMapOverlay(bmp, 0f, 0f, 1f, 1f)
                 updateVolumeLegend()
                 meta?.let { updateNotes(it) }
@@ -1082,7 +1101,13 @@ class FinalImageActivity : AppCompatActivity() {
             endSketch()
             loadFootprints()
             volK?.let { openVolumeSlice(it) }      // a shown slice includes the new footprint at once
-            info.text = "Footprint saved. Open 3D \u2192 Volume to see it in the evidence volume."
+            val n = r.optInt("cells")
+            val cell = String.format(Locale.US, "%.1f \u00D7 %.1f m", r.optDouble("cell_dx_m"), r.optDouble("cell_dy_m"))
+            info.text = "Footprint saved. It covers $n DEM cell(s) (each $cell). Open 3D \u2192 Volume to see it."
+            if (n == 0) AlertDialog.Builder(this@FinalImageActivity).setTitle("Footprint too small for the volume")
+                .setMessage("It is saved, but it covers no DEM cell centre (cells here are $cell), so the evidence " +
+                    "volume cannot show it. Draw it larger, or withdraw it. The volume can never be finer than the DEM.")
+                .setPositiveButton("OK", null).show()
         }
     }
 
@@ -1185,6 +1210,208 @@ class FinalImageActivity : AppCompatActivity() {
                     "\n\nShare the text file with a survey team. It is a planning aid, not evidence.")
                 .setPositiveButton("OK", null).show()
         }
+    }
+
+    // ------------------------------------------------------------------ field data (ef-v4a)
+
+    private fun fieldDepthText(): String {
+        val f = fieldInfo ?: return ""
+        return String.format(Locale.US, "%.2f\u2013%.2f m", f.optDouble("depth_top_m"), f.optDouble("depth_bottom_m"))
+    }
+
+    private fun fieldCall(fn: String, vararg args: Any?, then: (JSONObject) -> Unit) {
+        lifecycleScope.launch {
+            setLoading(true)
+            val r = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("field_data").callAttr(fn, *args).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) } finally { setLoading(false) }
+            if (r.has("error")) showError(r.optString("error").removePrefix("ValueError: ").removePrefix("LookupError: "))
+            else then(r)
+        }
+    }
+
+    private fun chooseFieldData() {
+        val sid = sessionId ?: return
+        fieldCall("field_json", offlineDataRoot, sid) { r ->
+            val ds = r.getJSONArray("datasets")
+            val all = (0 until ds.length()).map { ds.getJSONObject(it) }
+            val items = mutableListOf("+ Import a file from the inbox\u2026")
+            items += all.map { d ->
+                String.format(Locale.US, "%s \u00B7 %s \u00B7 %d points \u00B7 %d depths \u00B7 %s",
+                    d.optString("label"), d.optString("method"), d.optInt("points"),
+                    d.getJSONArray("slices").length(), if (d.optString("status") == "WITHDRAWN") "withdrawn" else "active")
+            }
+            AlertDialog.Builder(this).setTitle("Field data (MEASURED)")
+                .setItems(items.toTypedArray()) { _, i -> if (i == 0) chooseInboxFile(r) else showDataset(all[i - 1]) }
+                .setNegativeButton("Close", null).show()
+        }
+    }
+
+    private fun chooseInboxFile(r: JSONObject) {
+        val files = r.getJSONArray("inbox_files")
+        if (files.length() == 0) {
+            AlertDialog.Builder(this).setTitle("Inbox is empty")
+                .setMessage("Copy your survey export into this folder, then try again:\n\n" + r.optString("inbox") +
+                    "\n\nGPR text, one point per line: x, y, depth, value (depth in metres below the ground, " +
+                    "positive downward; x, y as UTM metres or longitude, latitude). Headers are skipped.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        val names = (0 until files.length()).map { files.getJSONObject(it).optString("name") }
+        val labels = (0 until files.length()).map { i ->
+            val f = files.getJSONObject(i); String.format(Locale.US, "%s (%.1f kB)", f.optString("name"), f.optDouble("bytes") / 1024.0) }
+        AlertDialog.Builder(this).setTitle("Pick a GPR file")
+            .setItems(labels.toTypedArray()) { _, i -> importDialog(names[i], r.optInt("utm_zone"), r.optBoolean("northern")) }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun importDialog(name: String, zone: Int, northern: Boolean) {
+        val d = resources.displayMetrics.density
+        val pad = (16 * d).toInt()
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad / 2, pad, 0) }
+        val label = EditText(this).apply { hint = "Label, e.g. GPR grid 1 (2026)"; inputType = InputType.TYPE_CLASS_TEXT }
+        val units = EditText(this).apply { hint = "Value units (optional), e.g. amplitude"; inputType = InputType.TYPE_CLASS_TEXT }
+        box.addView(label); box.addView(units)
+        val utm = android.widget.RadioButton(this).apply { text = "x, y are UTM metres (zone $zone${if (northern) "N" else "S"}, this map)"; id = 7401 }
+        val ll = android.widget.RadioButton(this).apply { text = "x, y are longitude, latitude (degrees)"; id = 7402 }
+        val group = android.widget.RadioGroup(this).apply { addView(utm); addView(ll); check(utm.id) }
+        box.addView(group)
+        box.addView(smallText(R.color.ariyan_text_secondary).apply {
+            text = "The file is stored unchanged with its SHA-256. Points are binned on the survey's own spacing; " +
+                "empty bins stay empty; nothing is interpolated. MEASURED data: the interpretation is yours."
+            setPadding(0, pad / 2, 0, 0)
+        })
+        AlertDialog.Builder(this).setTitle("Import $name")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Import") { _, _ ->
+                val sid = sessionId ?: return@setPositiveButton
+                val coords = if (group.checkedRadioButtonId == ll.id) "LATLON" else "UTM"
+                fieldCall("import_json", offlineDataRoot, sid, name, coords, label.text.toString(), units.text.toString()) { res ->
+                    val m = res.getJSONObject("meta")
+                    AlertDialog.Builder(this@FinalImageActivity).setTitle("Imported (MEASURED)")
+                        .setMessage(String.format(Locale.US,
+                            "%d points (%d lines skipped)\nBins %.2f \u00D7 %.2f m, %d \u00D7 %d\n%d depth slices (%s)\n" +
+                            "%d of %d bins hold data\n\nOpen it from Field data to see its depth slices.",
+                            m.optInt("points"), m.optInt("lines_skipped"), m.optDouble("dx_m"), m.optDouble("dy_m"),
+                            m.optInt("w"), m.optInt("h"), m.getJSONArray("depth_edges_m").length() - 1,
+                            if (m.optString("depth_mode") == "own") "the file's own depths" else "0.5 m bins",
+                            m.optInt("filled_bins"), m.optInt("bins")))
+                        .setPositiveButton("OK", null).show()
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun showDataset(ds: JSONObject) {
+        val msg = buildString {
+            append(ds.optString("method")).append(" \u00B7 ").append(ds.optString("source_filename")).append('\n')
+            append("sha256 ").append(ds.optString("file_sha256").take(16)).append("\u2026\n")
+            append(String.format(Locale.US, "%d points, bins %.2f \u00D7 %.2f m, %d depth slices\n",
+                ds.optInt("points"), ds.optDouble("dx_m"), ds.optDouble("dy_m"), ds.getJSONArray("slices").length()))
+            append("Imported ").append(ds.optString("created_at")).append('\n')
+            append("Status: ").append(ds.optString("status"))
+            if (ds.optString("status_reason").isNotBlank()) append(" (").append(ds.optString("status_reason")).append(')')
+        }
+        val b = AlertDialog.Builder(this).setTitle(ds.optString("label")).setMessage(msg).setPositiveButton("Close", null)
+        if (ds.optString("status") == "ACTIVE") {
+            b.setNeutralButton("Show depth\u2026") { _, _ ->
+                val sl = ds.getJSONArray("slices")
+                val items = (0 until sl.length()).map { i -> val x = sl.getJSONObject(i)
+                    String.format(Locale.US, "%.2f\u2013%.2f m", x.optDouble("top_m"), x.optDouble("bottom_m")) }
+                AlertDialog.Builder(this).setTitle("Depth below the ground")
+                    .setItems(items.toTypedArray()) { _, i -> fieldSlices = sl.length(); openFieldSlice(ds.getString("id"), i) }
+                    .setNegativeButton("Cancel", null).show()
+            }
+            b.setNegativeButton("Withdraw\u2026") { _, _ ->
+                val reason = EditText(this).apply { hint = "Reason (required)" }
+                AlertDialog.Builder(this).setTitle("Withdraw \u201C" + ds.optString("label") + "\u201D")
+                    .setMessage("The file stays stored; the dataset is marked withdrawn with your reason.")
+                    .setView(reason)
+                    .setPositiveButton("Withdraw") { _, _ ->
+                        fieldCall("withdraw_json", offlineDataRoot, ds.getString("id"), reason.text.toString()) {
+                            if (fieldId == ds.optString("id")) clearSatellite()
+                        }
+                    }
+                    .setNegativeButton("Cancel", null).show()
+            }
+        }
+        b.show()
+    }
+
+    private fun openFieldSlice(datasetId: String, k: Int) {
+        val sid = sessionId ?: return
+        setLoading(true)
+        lifecycleScope.launch {
+            try {
+                val (info, bmp) = withContext(Dispatchers.Default) {
+                    val mod = python.getModule("field_data")
+                    val j = JSONObject(mod.callAttr("slice_json", offlineDataRoot, sid, datasetId, k).toString())
+                    if (j.has("error")) Pair(j, null) else {
+                        val pl = j.getJSONObject("placement")
+                        val bytes = mod.callAttr("slice_rgba").toJava(ByteArray::class.java)
+                        val bm = Bitmap.createBitmap(pl.getInt("width"), pl.getInt("height"), Bitmap.Config.ARGB_8888)
+                        bm.copyPixelsFromBuffer(ByteBuffer.wrap(bytes))
+                        Pair(j, bm)
+                    }
+                }
+                if (info.has("error") || bmp == null) { showError(info.optString("error", "field slice failed")); return@launch }
+                if (filterName != null) dropFilter()
+                if (satMeta != null) { satProduct = null; satMeta = null; satBtn.text = "Satellite: off" }
+                volK = null
+                fieldId = datasetId; fieldK = k; fieldInfo = info
+                if (fieldSlices == 0) fieldSlices = k + 1
+                val pl = info.getJSONObject("placement")
+                setMapOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
+                    pl.getDouble("sx").toFloat(), pl.getDouble("sy").toFloat())
+                updateFieldLegend()
+                meta?.let { updateNotes(it) }
+                updateInfo()
+                refreshProfile(true)
+            } catch (e: PyException) {
+                showError(e.message ?: "field slice failed")
+            } catch (e: OutOfMemoryError) {
+                showError("Not enough memory for this survey slice.")
+            } finally {
+                setLoading(false)
+            }
+        }
+    }
+
+    /** Deeper / Shallower: step the shown field slice, or the shown volume slice */
+    private fun stepDepth(delta: Int) {
+        val fid = fieldId
+        if (fid != null) {
+            val k = fieldK + delta
+            if (k < 0 || (fieldSlices > 0 && k >= fieldSlices)) { info.text = "No more depth slices in this survey."; return }
+            openFieldSlice(fid, k); return
+        }
+        val vk = volK
+        if (vk != null) {
+            val k = vk + delta
+            if (k < 0 || k >= 20) { info.text = "The volume goes from 0 to 10 m."; return }
+            openVolumeSlice(k); return
+        }
+        info.text = "Show a field-data depth slice (Field data) or a volume slice (Volume) first."
+    }
+
+    private fun updateFieldLegend() {
+        val f = fieldInfo ?: return
+        legendBar.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+            intArrayOf(android.graphics.Color.rgb(25, 25, 25), android.graphics.Color.rgb(255, 255, 255)))
+        legendText.text = String.format(Locale.US, "MEASURED %s, %s below ground: %.3g \u2026 %.3g %s (same scale at every depth; hatched = empty bin)",
+            f.optString("label"), fieldDepthText(), f.optDouble("value_lo"), f.optDouble("value_hi"), f.optString("value_units"))
+    }
+
+    private fun fieldNotes(f: JSONObject): String = buildString {
+        append("FIELD DATA (MEASURED) \u00B7 ").append(f.optString("label")).append(" \u00B7 ").append(f.optString("method"))
+        append(" \u00B7 slice ").append(fieldDepthText()).append('\n')
+        append("File ").append(f.optString("source_filename")).append(", sha256 ").append(f.optString("file_sha256").take(12)).append("\u2026\n")
+        append(String.format(Locale.US, "%d of %d bins in this slice hold data; shown at the survey's own spacing " +
+            "(nearest bin, values unchanged); map projection fit error %.3f m.\n",
+            f.optInt("filled_bins"), f.optInt("bins"), f.optDouble("projection_fit_error_m")))
+        append(f.optString("statement"))
     }
 
     // ------------------------------------------------------------------ assessment (asm-v1)
@@ -1303,7 +1530,8 @@ class FinalImageActivity : AppCompatActivity() {
             append(String.format(Locale.US, "3D \u00B7 Height \u00D7%s (%s) \u00B7 view from %.0f\u00B0, tilt %.0f\u00B0\n",
                 trimNum(currentVe().toDouble()), if (veChosen == null) "automatic" else "chosen", cam[0], cam[1]))
             if (veChosen == null) append(m.optString("ve_rule")).append('\n')
-            append("Drape: ").append(drapeLabel()).append(if (volK != null)
+            append("Drape: ").append(drapeLabel()).append(if (fieldId != null)
+                " (grey = measured value; dark = empty bin, no measurement)\n" else if (volK != null)
                 " (each block a sharp square; dark = UNKNOWN, no measurement)\n"
                 else " (each image pixel a sharp square; dark = no data)\n")
             append(String.format(Locale.US, "DEM %d \u00D7 %d cells, %d without a value (holes, not filled). ",
@@ -1438,7 +1666,9 @@ class FinalImageActivity : AppCompatActivity() {
         val sp = satProduct
         val fn = filterName
         val vk = volK
-        if (vk != null && sp == null && fn == null) { openVolumeSlice(vk); }
+        val fid = fieldId
+        if (fid != null && sp == null && fn == null) { openFieldSlice(fid, fieldK) }
+        else if (vk != null && sp == null && fn == null) { openVolumeSlice(vk); }
         else if (sp != null) openSatellite(sp, fetch = false, quiet = true)   // refreshes the profile itself
         else if (fn != null) openFilter(fn, filterParams ?: JSONObject(), quiet = true)
         else refreshProfile(true)
@@ -1480,6 +1710,7 @@ class FinalImageActivity : AppCompatActivity() {
 
     private fun updateLegend(m: JSONObject) {
         colourBtn.text = "Colour: " + if (colourBy == "relief") "relief" else "elevation"
+        if (fieldId != null && fieldInfo != null) { updateFieldLegend(); return }
         if (volK != null && volSummary != null) { updateVolumeLegend(); return }
         satMeta?.let { updateSatLegend(it); return }
         filterMeta?.let { updateFilterLegend(it); return }
@@ -1519,6 +1750,7 @@ class FinalImageActivity : AppCompatActivity() {
         satMeta?.let { sb.insert(0, satNotes(it) + "\n\n") }
         filterMeta?.let { sb.insert(0, filterNotes(it) + "\n\n") }
         if (volK != null) volSummary?.let { sb.insert(0, volumeNotes(it) + "\n\n") }
+        if (fieldId != null) fieldInfo?.let { sb.insert(0, fieldNotes(it) + "\n\n") }
         notes.text = sb.toString()
         updateParams()
     }
@@ -1719,7 +1951,7 @@ class FinalImageActivity : AppCompatActivity() {
     }
 
     private fun clearSatellite() {
-        satProduct = null; satMeta = null; volK = null
+        satProduct = null; satMeta = null; volK = null; fieldId = null
         setMapOverlay(null, 0f, 0f, 1f, 1f)
         satBtn.text = "Satellite: off"
         meta?.let { updateLegend(it); updateNotes(it) }
@@ -1770,6 +2002,7 @@ class FinalImageActivity : AppCompatActivity() {
                         val pl = r.getJSONObject("placement")
                         if (filterName != null) dropFilter()
                         volK = null   // ef-v1: the satellite layer replaces a volume slice
+                        fieldId = null
                         satProduct = product; satMeta = r
                         setMapOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
                             pl.getDouble("sx").toFloat(), pl.getDouble("sy").toFloat())
@@ -1911,6 +2144,7 @@ class FinalImageActivity : AppCompatActivity() {
                 // one overlay at a time: the filter replaces a satellite layer (it is not deleted, just hidden)
                 if (satMeta != null) { satProduct = null; satMeta = null; satBtn.text = "Satellite: off"; updateInfo() }
                 volK = null   // ef-v1: the filter replaces a volume slice
+                fieldId = null
                 filterName = name; filterParams = r.optJSONObject("params") ?: params; filterMeta = r
                 val pl = r.getJSONObject("placement")
                 setMapOverlay(bmp, pl.getDouble("x0").toFloat(), pl.getDouble("y0").toFloat(),
