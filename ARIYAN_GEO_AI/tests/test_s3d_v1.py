@@ -99,3 +99,16 @@ def test_snapshot_rejects_non_png_and_expired_session(tmp_path):
     with pytest.raises(KeyError):
         s3d.surface_heights("gone")
     ods.clear_tile_cache()
+
+
+def test_cut_state_is_recorded_in_snapshot_provenance(tmp_path):
+    """cut-v1: the cutaway setting reaches the provenance file."""
+    root, d = _open(tmp_path)
+    png = fi.encode_png(np.full((4, 4, 4), 90, np.uint8))
+    state = json.dumps({"ve": 15, "cut": "keep left of A->A'; face = no subsurface measurement",
+                        "profile_line": [1.0, 2.0, 30.0, 40.0]})
+    r = json.loads(s3d.export_snapshot_json(root, d["session_id"], png, state))
+    prov = json.load(open(r["paths"]["provenance"], encoding="utf-8"))
+    assert "no subsurface measurement" in prov["view"]["cut"]
+    assert prov["view"]["profile_line"] == [1.0, 2.0, 30.0, 40.0]
+    ods.clear_tile_cache()
