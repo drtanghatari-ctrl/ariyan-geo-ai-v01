@@ -441,6 +441,10 @@ def _record_investigation_results_impl(
         # debate["steward"]["reasoning_trace"]["confidence"]["band"] /
         # ["clamped_confidence"] / ["reasoning"].
         debate_entry = debates_by_index.get(i)
+        # dbr-v1 (2026-10-31): keep the whole debate (four positions, synthesis,
+        # Steward report) for the Final Image Assessment panel. Never blocks the run.
+        import debate_store
+        debate_store.record_quietly(db_root, candidate_id, debate_entry, investigation_id, "run")
         if debate_entry is not None and not debate_entry.get("steward_error"):
             steward = debate_entry.get("steward") or {}
             trace = steward.get("reasoning_trace") or {}
