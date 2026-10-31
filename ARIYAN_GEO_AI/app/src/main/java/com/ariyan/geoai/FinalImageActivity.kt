@@ -98,6 +98,11 @@ import java.util.Locale
  * orange = DERIVED raised material, purple = HYPOTHESIZED by the user, hatched =
  * UNKNOWN. Plus the raised body's real numbers (area, volume above base, height,
  * extent). No field data placed; display only.
+ * ef-v2 (2026-10-31): "Footprints" in the 3D tab: the user draws a footprint
+ * hypothesis on the map (tap corners, Finish), gives a label and a depth range;
+ * stored append-only (footprint_hypothesis.py), drawn as dashed purple outlines,
+ * filled into the volume; where two or more claim the same block it is CONTESTED
+ * (magenta) and none is chosen. Withdraw needs a reason.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -189,6 +194,10 @@ class FinalImageActivity : AppCompatActivity() {
     // ef-v1: evidence volume; volK = the depth slice shown (null = off)
     private var volSummary: JSONObject? = null
     private var volK: Int? = null
+    // ef-v2: footprint hypotheses
+    private var sketching = false
+    private val sketchPts = mutableListOf<Float>()
+    private lateinit var sketchRow: LinearLayout
 
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
@@ -330,6 +339,7 @@ class FinalImageActivity : AppCompatActivity() {
         threeDRow.addView(cutBtn)
         threeDRow.addView(button("Hypotheses") { chooseHypothesis() })
         threeDRow.addView(button("Volume") { chooseVolume() })
+        threeDRow.addView(button("Footprints") { chooseFootprints() })
         threeDRow.addView(button("Reset view") { glView?.resetView() })
         threeDRow.addView(button("Snapshot") { snapshot3D() })
 
@@ -356,6 +366,11 @@ class FinalImageActivity : AppCompatActivity() {
         assessRow.addView(button("Confidence history") { showAssessment("history") })
 
         tabRows.addAll(listOf(contourRow, threeDRow, profileRow, filtersRow, assessRow))
+        // ef-v2: while a footprint is being drawn, this row replaces the tab's buttons
+        sketchRow = row()
+        sketchRow.addView(button("Finish footprint") { finishSketch() })
+        sketchRow.addView(button("Undo corner") { undoCorner() })
+        sketchRow.addView(button("Cancel") { endSketch() })
         toolRow = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         root.addView(toolRow)
         selectTab(tab)
@@ -859,8 +874,13 @@ class FinalImageActivity : AppCompatActivity() {
                 val hs = v.getJSONArray("hypotheses")
                 append("Your active hypotheses placed: ").append(hs.length())
                 for (i in 0 until hs.length()) { val h = hs.getJSONObject(i)
-                    append(String.format(Locale.US, "\n\u2022 %s, %.1f\u2013%.1f m deep, %d cells",
-                        h.optString("label"), h.optDouble("top_m"), h.optDouble("bottom_m"), h.optInt("cells"))) }
+                    append(String.format(Locale.US, "\n\u2022 %s (%s), %.1f\u2013%.1f m deep, %d cells",
+                        h.optString("label"), if (h.optString("kind") == "footprint") "footprint" else "section line",
+                        h.optDouble("top_m"), h.optDouble("bottom_m"), h.optInt("cells")))
+                    val ov = h.optJSONArray("overlaps")
+                    if (ov != null && ov.length() > 0)
+                        append(" \u00B7 CONTESTED with ").append((0 until ov.length()).joinToString(", ") { ov.optString(it) })
+                }
                 append("\n\nField readings (GPR/ERT) recorded: ").append(v.optInt("field_readings_recorded"))
                 append(" \u00B7 placed in the volume: 0 (not in ef-v1).\n\n").append(v.optString("statement"))
             }
@@ -876,8 +896,8 @@ class FinalImageActivity : AppCompatActivity() {
         val sl = v.getJSONArray("slices")
         val items = (0 until sl.length()).map { i ->
             val s = sl.getJSONObject(i)
-            volDepthText(i) + String.format(Locale.US, "  \u00B7 orange %d \u00B7 purple %d",
-                s.optInt("derived_cells"), s.optInt("hypothesized_cells"))
+            volDepthText(i) + String.format(Locale.US, "  \u00B7 orange %d \u00B7 purple %d \u00B7 magenta %d",
+                s.optInt("derived_cells"), s.optInt("hypothesized_cells"), s.optInt("contested_cells"))
         }
         AlertDialog.Builder(this).setTitle("Depth below the ground")
             .setItems(items.toTypedArray()) { _, i -> openVolumeSlice(i) }
@@ -925,9 +945,11 @@ class FinalImageActivity : AppCompatActivity() {
         val k = volK ?: return
         legendBar.background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
             intArrayOf(android.graphics.Color.rgb(237, 140, 46), android.graphics.Color.rgb(237, 140, 46),
-                android.graphics.Color.rgb(158, 82, 242), android.graphics.Color.rgb(158, 82, 242)))
+                android.graphics.Color.rgb(158, 82, 242), android.graphics.Color.rgb(158, 82, 242),
+                android.graphics.Color.rgb(230, 60, 170), android.graphics.Color.rgb(230, 60, 170)))
         legendText.text = "Depth " + volDepthText(k) + " below ground: orange = DERIVED raised material, " +
-            "purple = HYPOTHESIZED by you, hatched = UNKNOWN (no measurement)"
+            "purple = HYPOTHESIZED by you, magenta = CONTESTED (two or more of your hypotheses; none chosen), " +
+            "hatched = UNKNOWN (no measurement)"
     }
 
     private fun volumeNotes(v: JSONObject): String = buildString {
@@ -935,6 +957,160 @@ class FinalImageActivity : AppCompatActivity() {
         append(volDepthText(volK ?: 0)).append(" below ground\n")
         append(bodyText(v.optJSONObject("body"))).append('\n')
         append(v.optString("statement"))
+    }
+
+    // ------------------------------------------------------------------ footprint hypotheses (ef-v2)
+
+    private fun loadFootprints(then: ((List<JSONObject>) -> Unit)? = null) {
+        val sid = sessionId ?: return
+        lifecycleScope.launch {
+            val r = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("evidence_volume").callAttr("footprints_json", offlineDataRoot, sid).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) }
+            if (r.has("error")) { if (then != null) showError(r.optString("error")); return@launch }
+            val arr = r.getJSONArray("footprints")
+            val all = (0 until arr.length()).map { arr.getJSONObject(it) }
+            val active = all.filter { it.optString("status") == "ACTIVE" }
+            view.footprints = active.map { f ->
+                val p = f.getJSONArray("polygon_grid")
+                FloatArray(p.length() * 2) { i -> p.getJSONArray(i / 2).getDouble(i % 2).toFloat() }
+            }
+            view.footprintLabels = active.map { it.optString("label") }
+            view.invalidate()
+            then?.invoke(all)
+        }
+    }
+
+    private fun chooseFootprints() {
+        loadFootprints { all ->
+            val items = mutableListOf("+ Draw a new footprint on the map\u2026")
+            items += all.map { f ->
+                String.format(Locale.US, "%s \u00B7 %.0f m\u00B2 \u00B7 %.1f\u2013%.1f m deep \u00B7 %s",
+                    f.optString("label"), f.optDouble("area_m2"), f.optDouble("depth_top_m"), f.optDouble("depth_bottom_m"),
+                    if (f.optString("status") == "WITHDRAWN") "withdrawn" else "active")
+            }
+            AlertDialog.Builder(this).setTitle("Footprint hypotheses (yours)")
+                .setItems(items.toTypedArray()) { _, i -> if (i == 0) startSketch() else showFootprint(all[i - 1]) }
+                .setNegativeButton("Close", null).show()
+        }
+    }
+
+    private fun startSketch() {
+        sketching = true
+        sketchPts.clear()
+        view.pickMode = true
+        view.sketch = FloatArray(0)
+        selectTab(0)                               // the 2D map is where corners are tapped
+        toolRow.removeAllViews(); toolRow.addView(sketchRow)
+        info.text = "Footprint: tap its corners on the map (pan and zoom still work), then Finish footprint."
+    }
+
+    private fun addCorner(x: Float, y: Float) {
+        sketchPts.add(x); sketchPts.add(y)
+        view.sketch = sketchPts.toFloatArray(); view.invalidate()
+        info.text = "Footprint: " + (sketchPts.size / 2) + " corner(s). Tap more, or Finish footprint (3 or more)."
+    }
+
+    private fun undoCorner() {
+        if (sketchPts.size >= 2) { sketchPts.removeAt(sketchPts.size - 1); sketchPts.removeAt(sketchPts.size - 1) }
+        view.sketch = sketchPts.toFloatArray(); view.invalidate()
+        info.text = "Footprint: " + (sketchPts.size / 2) + " corner(s)."
+    }
+
+    private fun endSketch() {
+        sketching = false
+        sketchPts.clear()
+        view.pickMode = false
+        view.sketch = null; view.invalidate()
+        selectTab(tab)
+        updateInfo()
+    }
+
+    private fun finishSketch() {
+        if (sketchPts.size < 6) { info.text = "Footprint: at least 3 corners are needed."; return }
+        val pts = JSONArray((0 until sketchPts.size / 2).map { i ->
+            JSONArray(listOf(sketchPts[2 * i].toDouble(), sketchPts[2 * i + 1].toDouble())) })
+        val d = resources.displayMetrics.density
+        val pad = (16 * d).toInt()
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad / 2, pad, 0) }
+        fun field(hint: String, number: Boolean): EditText = EditText(this).apply {
+            this.hint = hint
+            inputType = if (number) InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL else InputType.TYPE_CLASS_TEXT
+            box.addView(this)
+        }
+        val label = field("Label, e.g. kiln?", false)
+        val top = field("Top (m below the ground)", true)
+        val bottom = field("Bottom (m below the ground)", true)
+        val note = field("Note (optional): why you think so", false)
+        box.addView(smallText(R.color.ariyan_text_secondary).apply {
+            text = "This is YOUR hypothesis: drawn purple, labelled HYPOTHESIZED, never evidence, never changes status " +
+                "or confidence. If it overlaps another hypothesis, both are kept and the shared blocks show as CONTESTED."
+            setPadding(0, pad / 2, 0, 0)
+        })
+        AlertDialog.Builder(this).setTitle("Save this footprint (" + (sketchPts.size / 2) + " corners)")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Save") { _, _ ->
+                fun num(e: EditText) = e.text.toString().trim().replace(',', '.').toDoubleOrNull() ?: Double.NaN
+                saveFootprint(pts.toString(), label.text.toString(), num(top), num(bottom), note.text.toString())
+            }
+            .setNegativeButton("Keep drawing", null).show()
+    }
+
+    private fun saveFootprint(pts: String, label: String, top: Double, bottom: Double, note: String) {
+        val sid = sessionId ?: return
+        lifecycleScope.launch {
+            val r = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("evidence_volume").callAttr("add_footprint_json", offlineDataRoot, sid,
+                        pts, label, top, bottom, note).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) }
+            if (r.has("error")) {
+                AlertDialog.Builder(this@FinalImageActivity).setTitle("Not saved")
+                    .setMessage(r.optString("error").removePrefix("ValueError: ") + "\n\nYour corners are kept; fix and Finish again.")
+                    .setPositiveButton("OK", null).show()
+                return@launch
+            }
+            endSketch()
+            loadFootprints()
+            volK?.let { openVolumeSlice(it) }      // a shown slice includes the new footprint at once
+            info.text = "Footprint saved. Open 3D \u2192 Volume to see it in the evidence volume."
+        }
+    }
+
+    private fun showFootprint(f: JSONObject) {
+        val msg = buildString {
+            append("HYPOTHESIZED by you \u00B7 ").append(f.optString("created_at")).append('\n')
+            append(String.format(Locale.US, "Footprint %.0f m\u00B2, %.1f\u2013%.1f m below the ground\n",
+                f.optDouble("area_m2"), f.optDouble("depth_top_m"), f.optDouble("depth_bottom_m")))
+            if (f.optString("note").isNotBlank()) append("Note: ").append(f.optString("note")).append('\n')
+            append("Status: ").append(f.optString("status"))
+            if (f.optString("status_reason").isNotBlank()) append(" (").append(f.optString("status_reason")).append(')')
+            append("\n\nNot a measurement and not evidence.")
+        }
+        val b = AlertDialog.Builder(this).setTitle(f.optString("label")).setMessage(msg).setPositiveButton("Close", null)
+        if (f.optString("status") == "ACTIVE") b.setNegativeButton("Withdraw\u2026") { _, _ ->
+            val reason = EditText(this).apply { hint = "Reason (required)" }
+            AlertDialog.Builder(this).setTitle("Withdraw \u201C" + f.optString("label") + "\u201D")
+                .setMessage("It is kept in the record as withdrawn, with your reason.")
+                .setView(reason)
+                .setPositiveButton("Withdraw") { _, _ ->
+                    lifecycleScope.launch {
+                        val r = try {
+                            withContext(Dispatchers.Default) {
+                                JSONObject(python.getModule("evidence_volume").callAttr("withdraw_footprint_json",
+                                    offlineDataRoot, f.getString("id"), reason.text.toString()).toString())
+                            }
+                        } catch (e: PyException) { JSONObject().put("error", e.message) }
+                        if (r.has("error")) showError(r.optString("error"))
+                        else { loadFootprints(); volK?.let { openVolumeSlice(it) } }
+                    }
+                }
+                .setNegativeButton("Cancel", null).show()
+        }
+        b.show()
     }
 
     // ------------------------------------------------------------------ assessment (asm-v1)
@@ -1053,7 +1229,9 @@ class FinalImageActivity : AppCompatActivity() {
             append(String.format(Locale.US, "3D \u00B7 Height \u00D7%s (%s) \u00B7 view from %.0f\u00B0, tilt %.0f\u00B0\n",
                 trimNum(currentVe().toDouble()), if (veChosen == null) "automatic" else "chosen", cam[0], cam[1]))
             if (veChosen == null) append(m.optString("ve_rule")).append('\n')
-            append("Drape: ").append(drapeLabel()).append(" (each image pixel a sharp square; dark = no data)\n")
+            append("Drape: ").append(drapeLabel()).append(if (volK != null)
+                " (each block a sharp square; dark = UNKNOWN, no measurement)\n"
+                else " (each image pixel a sharp square; dark = no data)\n")
             append(String.format(Locale.US, "DEM %d \u00D7 %d cells, %d without a value (holes, not filled). ",
                 m.optInt("width"), m.optInt("height"), m.optInt("cells_no_data")))
             append("Extra 3D lighting for depth only.\n")
@@ -1192,6 +1370,7 @@ class FinalImageActivity : AppCompatActivity() {
         else refreshProfile(true)
         // s3d-v1: 3D tab restored after rotation/rebuild, or a new window/colour while in 3D
         if (tab == 1 && !is3DShown()) show3D() else if (is3DShown()) refresh3D(resetCamera = !keepView)
+        loadFootprints()   // ef-v2: outlines for this window
     }
 
     private fun parseLevels(c: JSONObject): List<FinalImageView.Level> {
@@ -1311,7 +1490,8 @@ class FinalImageActivity : AppCompatActivity() {
                 beyond -> "\nZoomed past native ($cellKind, $cellSize): colours between cell centres are interpolated, not measured."
                 else -> ""
             })
-        if (view.pickMode) info.append(if (pickA == null) "\nProfile: tap point A on the map." else "\nProfile: now tap point A\u2032.")
+        if (sketching) info.append("\nFootprint: " + (sketchPts.size / 2) + " corner(s); tap more, then Finish footprint.")
+        else if (view.pickMode) info.append(if (pickA == null) "\nProfile: tap point A on the map." else "\nProfile: now tap point A\u2032.")
     }
 
     // ------------------------------------------------------------------ actions
@@ -1751,6 +1931,7 @@ class FinalImageActivity : AppCompatActivity() {
     }
 
     private fun onPick(x: Float, y: Float) {
+        if (sketching) { addCorner(x, y); return }     // ef-v2: drawing a footprint
         val a = pickA
         if (a == null) {
             pickA = floatArrayOf(x, y)
