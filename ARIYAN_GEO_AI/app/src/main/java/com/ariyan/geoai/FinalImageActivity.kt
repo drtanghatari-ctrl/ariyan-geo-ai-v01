@@ -13,6 +13,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.text.InputType
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
@@ -82,6 +84,11 @@ import java.util.Locale
  * cut-v2 (2026-10-31): the cut face shows DERIVED raised material (orange, ground
  * above its local base level) and DERIVED hollows (translucent blue) from the DEM,
  * with UNKNOWN (grey hatched) below. Nothing invented below ground.
+ * cut-v2 part 2 (2026-10-31): "Hypotheses" in the 3D tab lets the USER add their own
+ * HYPOTHESIZED shape on the open line (label, from..to m along A->A', top..bottom m
+ * below ground, note). Stored append-only with the candidate (section_hypothesis.py),
+ * drawn purple on the cut face, withdrawable with a reason. Never evidence; never
+ * changes status, review or confidence. The app never creates one by itself.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -167,6 +174,9 @@ class FinalImageActivity : AppCompatActivity() {
     // cut-v1: 0 = no cut, +1 = keep left of A->A', -1 = keep right
     private var cutSide = 0
     private lateinit var cutBtn: MaterialButton
+    // cut-v2 part 2: the user's hypotheses that lie on the open line (drawn on the face)
+    private var hypsOnLine: List<JSONObject> = emptyList()
+    private var hypLineLength = 0.0
 
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
@@ -306,6 +316,7 @@ class FinalImageActivity : AppCompatActivity() {
         threeDRow.addView(veBtn)
         cutBtn = button("Cut: off") { chooseCut() }
         threeDRow.addView(cutBtn)
+        threeDRow.addView(button("Hypotheses") { chooseHypothesis() })
         threeDRow.addView(button("Reset view") { glView?.resetView() })
         threeDRow.addView(button("Snapshot") { snapshot3D() })
 
@@ -580,6 +591,7 @@ class FinalImageActivity : AppCompatActivity() {
                     currentVe(), drape, pins, line, resetCamera, if (line == null) 0 else cutSide, baseLevels)
                 veBtn.text = "Height: " + (if (veChosen == null) "auto " else "") + "\u00D7" + trimNum(currentVe().toDouble())
                 update3DInfo()
+                loadHypotheses()
             } catch (e: PyException) {
                 showError(e.message ?: "3D surface failed")
             } catch (e: OutOfMemoryError) {
@@ -639,6 +651,150 @@ class FinalImageActivity : AppCompatActivity() {
             .setNegativeButton("Cancel", null).show()
     }
 
+    // ------------------------------------------------------------------ hypotheses (cut-v2 part 2)
+
+    /** read the user's hypotheses for this candidate; draw those on the open line */
+    private fun loadHypotheses(then: ((JSONObject) -> Unit)? = null) {
+        val sid = sessionId ?: return
+        val ln = if (profile != null) lineAsk else null
+        if (ln == null) { hypsOnLine = emptyList(); glView?.setHypotheses(emptyList(), 0f); update3DInfo(); return }
+        lifecycleScope.launch {
+            val r = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("surface3d_mobile").callAttr("hypotheses_json", offlineDataRoot, sid,
+                        ln[0].toDouble(), ln[1].toDouble(), ln[2].toDouble(), ln[3].toDouble(), true).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) }
+            if (r.has("error")) { showError(r.optString("error")); return@launch }
+            hypLineLength = r.getJSONObject("line").getDouble("length_m")
+            val arr = r.getJSONArray("hypotheses")
+            val all = (0 until arr.length()).map { arr.getJSONObject(it) }
+            hypsOnLine = all.filter { it.optBoolean("on_this_line") && it.optString("status") == "ACTIVE" }
+            glView?.setHypotheses(hypsOnLine.map {
+                Surface3DView.Hyp(it.getDouble("along_from_m").toFloat(), it.getDouble("along_to_m").toFloat(),
+                    it.getDouble("depth_top_m").toFloat(), it.getDouble("depth_bottom_m").toFloat())
+            }, hypLineLength.toFloat())
+            update3DInfo()
+            then?.invoke(r)
+        }
+    }
+
+    private fun chooseHypothesis() {
+        if (profile == null || cutSide == 0) {
+            AlertDialog.Builder(this).setTitle("Hypotheses on the cut face")
+                .setMessage("Open a profile (Profile & Section tab) and turn Cut on first. A hypothesis is drawn on the cut face along that line.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        loadHypotheses { r ->
+            val arr = r.getJSONArray("hypotheses")
+            val all = (0 until arr.length()).map { arr.getJSONObject(it) }
+            val items = mutableListOf("+ Add my hypothesis on this line\u2026")
+            items += all.map { h ->
+                String.format(Locale.US, "%s  \u00B7 %.0f\u2013%.0f m along, %.1f\u2013%.1f m deep  \u00B7 %s",
+                    h.optString("label"), h.getDouble("along_from_m"), h.getDouble("along_to_m"),
+                    h.getDouble("depth_top_m"), h.getDouble("depth_bottom_m"),
+                    when {
+                        h.optString("status") == "WITHDRAWN" -> "withdrawn"
+                        h.optBoolean("on_this_line") -> "on this line"
+                        else -> "on another line"
+                    })
+            }
+            AlertDialog.Builder(this@FinalImageActivity)
+                .setTitle(String.format(Locale.US, "HYPOTHESIZED shapes \u00B7 line %.0f m", hypLineLength))
+                .setItems(items.toTypedArray()) { _, i -> if (i == 0) addHypothesisDialog() else showHypothesis(all[i - 1]) }
+                .setNegativeButton("Close", null).show()
+        }
+    }
+
+    private fun addHypothesisDialog() {
+        val d = resources.displayMetrics.density
+        val pad = (16 * d).toInt()
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad / 2, pad, 0) }
+        fun field(hint: String, number: Boolean): EditText = EditText(this).apply {
+            this.hint = hint
+            inputType = if (number) InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL else InputType.TYPE_CLASS_TEXT
+            box.addView(this)
+        }
+        val label = field("Label, e.g. mud-brick wall?", false)
+        val from = field(String.format(Locale.US, "From (m along A\u2192A\u2032, 0\u2013%.0f)", hypLineLength), true)
+        val to = field("To (m along A\u2192A\u2032)", true)
+        val top = field("Top (m below the ground line)", true)
+        val bottom = field("Bottom (m below the ground line)", true)
+        val note = field("Note (optional): why you think so", false)
+        box.addView(smallText(R.color.ariyan_text_secondary).apply {
+            text = "This is YOUR hypothesis. It is drawn purple and labelled HYPOTHESIZED; it is not a measurement, " +
+                "not evidence, and never changes the candidate's status or confidence."
+            setPadding(0, pad / 2, 0, 0)
+        })
+        AlertDialog.Builder(this).setTitle("Add a hypothesis on this line")
+            .setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("Save") { _, _ ->
+                fun num(e: EditText) = e.text.toString().trim().replace(',', '.').toDoubleOrNull() ?: Double.NaN
+                saveHypothesis(label.text.toString(), num(from), num(to), num(top), num(bottom), note.text.toString())
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun saveHypothesis(label: String, from: Double, to: Double, top: Double, bottom: Double, note: String) {
+        val sid = sessionId ?: return
+        val ln = lineAsk ?: return
+        lifecycleScope.launch {
+            val r = try {
+                withContext(Dispatchers.Default) {
+                    JSONObject(python.getModule("surface3d_mobile").callAttr("add_hypothesis_json", offlineDataRoot, sid,
+                        ln[0].toDouble(), ln[1].toDouble(), ln[2].toDouble(), ln[3].toDouble(),
+                        label, from, to, top, bottom, note).toString())
+                }
+            } catch (e: PyException) { JSONObject().put("error", e.message) }
+            if (r.has("error")) {
+                AlertDialog.Builder(this@FinalImageActivity).setTitle("Not saved")
+                    .setMessage(r.optString("error").removePrefix("ValueError: ")).setPositiveButton("OK", null).show()
+            } else loadHypotheses()
+        }
+    }
+
+    private fun showHypothesis(h: JSONObject) {
+        val msg = buildString {
+            append("HYPOTHESIZED by you \u00B7 ").append(h.optString("created_at")).append('\n')
+            append(String.format(Locale.US, "%.0f\u2013%.0f m along A\u2192A\u2032 (line %.0f m)\n",
+                h.getDouble("along_from_m"), h.getDouble("along_to_m"), h.getDouble("line_length_m")))
+            append(String.format(Locale.US, "%.1f\u2013%.1f m below the ground line\n", h.getDouble("depth_top_m"), h.getDouble("depth_bottom_m")))
+            if (h.optString("note").isNotBlank()) append("Note: ").append(h.optString("note")).append('\n')
+            append("Status: ").append(h.optString("status"))
+            if (h.optString("status_reason").isNotBlank()) append(" (").append(h.optString("status_reason")).append(')')
+            append("\n\nNot a measurement and not evidence.")
+        }
+        val b = AlertDialog.Builder(this).setTitle(h.optString("label")).setMessage(msg).setPositiveButton("Close", null)
+        if (h.optString("status") == "ACTIVE") b.setNegativeButton("Withdraw\u2026") { _, _ -> withdrawHypothesis(h) }
+        if (!h.optBoolean("on_this_line") && h.optBoolean("line_in_window")) b.setNeutralButton("Open its line") { _, _ ->
+            val g = h.getJSONArray("line_grid")
+            preset = null
+            lineAsk = floatArrayOf(g.getDouble(0).toFloat(), g.getDouble(1).toFloat(), g.getDouble(2).toFloat(), g.getDouble(3).toFloat())
+            runProfile()
+        }
+        b.show()
+    }
+
+    private fun withdrawHypothesis(h: JSONObject) {
+        val reason = EditText(this).apply { hint = "Reason (required)" }
+        AlertDialog.Builder(this).setTitle("Withdraw \u201C" + h.optString("label") + "\u201D")
+            .setMessage("It is kept in the record as withdrawn, with your reason.")
+            .setView(reason)
+            .setPositiveButton("Withdraw") { _, _ ->
+                lifecycleScope.launch {
+                    val r = try {
+                        withContext(Dispatchers.Default) {
+                            JSONObject(python.getModule("surface3d_mobile").callAttr("withdraw_hypothesis_json",
+                                offlineDataRoot, h.getString("id"), reason.text.toString()).toString())
+                        }
+                    } catch (e: PyException) { JSONObject().put("error", e.message) }
+                    if (r.has("error")) showError(r.optString("error")) else loadHypotheses()
+                }
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
     private fun update3DInfo() {
         val m = s3dMeta ?: return
         if (!is3DShown()) return
@@ -658,6 +814,8 @@ class FinalImageActivity : AppCompatActivity() {
                 append("(mean ground within ${trimNum(m.optDouble("relief_radius_m", 300.0))} m); what it is made of is unknown.\n")
                 append("  BLUE (see-through) = DERIVED hollow: ground below its local base.\n")
                 append("  GREY HATCHED = UNKNOWN: no subsurface measurement (no GPR, no ERT); its drawn depth is a drawing aid.\n")
+                append("  PURPLE = HYPOTHESIZED by you: ").append(hypsOnLine.size)
+                    .append(" on this line (your ideas, not measured, not evidence).\n")
             }
             append(m.optString("statement")).append('\n')
             append("One finger: rotate / tilt \u00B7 two fingers: zoom \u00B7 double tap: reset")
@@ -680,6 +838,11 @@ class FinalImageActivity : AppCompatActivity() {
             put("pins", if (view.showCandidates) view.markers.size else 0)
             if (profile != null) lineAsk?.let { put("profile_line", JSONArray(it.map { v -> v.toDouble() })) }
             put("cut", if (profile != null && cutSide != 0) cutLabel() + "; face = no subsurface measurement" else "off")
+            if (profile != null && cutSide != 0 && hypsOnLine.isNotEmpty()) put("hypotheses", JSONArray(hypsOnLine.map { h ->
+                JSONObject().put("id", h.optString("id")).put("label", h.optString("label")).put("kind", "HYPOTHESIZED")
+                    .put("along_m", JSONArray(listOf(h.optDouble("along_from_m"), h.optDouble("along_to_m"))))
+                    .put("depth_m", JSONArray(listOf(h.optDouble("depth_top_m"), h.optDouble("depth_bottom_m"))))
+            }))
             put("width_px", gv.width); put("height_px", gv.height)
         }.toString()
         setLoading(true)
@@ -1415,6 +1578,7 @@ class FinalImageActivity : AppCompatActivity() {
             if (p.getInt("cells_no_data") > 0) " (${p.getInt("cells_no_data")} no data)" else "")
         readout.text = profileSummary(p)
         profilePanel.visibility = if (is3DShown()) View.GONE else View.VISIBLE
+        if (is3DShown()) refresh3D(resetCamera = false)   // cut-v2 part 2: "Open its line" from the 3D tab
         // frame the map on the whole line (re-applied once the map has shrunk for the panel)
         view.fitLine(lineAsk!![0], lineAsk!![1], lineAsk!![2], lineAsk!![3])
         // vertical exaggeration is known only once the panels are laid out and drawn
@@ -1485,6 +1649,7 @@ class FinalImageActivity : AppCompatActivity() {
     private fun closeProfile() {
         profile = null; lineAsk = null; preset = null; pickA = null
         if (cutSide != 0) { cutSide = 0; if (::cutBtn.isInitialized) cutBtn.text = "Cut: off" }
+        hypsOnLine = emptyList(); glView?.setHypotheses(emptyList(), 0f)
         view.pickMode = false
         view.profileA = null; view.profileB = null; view.profileCursor = null
         view.clearLineFit(); view.invalidate()
