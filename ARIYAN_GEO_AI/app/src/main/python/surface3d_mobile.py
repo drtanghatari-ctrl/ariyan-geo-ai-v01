@@ -10,6 +10,9 @@ hands Android:
     can always say what it did,
   * a snapshot export: PNG (rendered on the phone) + provenance JSON.
 
+cut-v1 (2026-10-31): the snapshot provenance also records the cutaway state
+("cut"); the cut face shows NO subsurface measurement.
+
 The 3D view is a different way of LOOKING at stored cells. It adds no
 measurement and no evidence, and it never writes a candidate, review, status
 or confidence.
@@ -35,7 +38,7 @@ TARGET_FRACTION = 0.10
 STATEMENT = ("3D view of the stored DEM cells, display only. Height is exaggerated as "
              "stated; it adds no new measurement and is not archaeological proof.")
 _STATE_KEYS = ("ve", "ve_mode", "azimuth_deg", "tilt_deg", "distance_m",
-               "drape", "drape_detail", "pins", "profile_line", "width_px", "height_px")
+               "drape", "drape_detail", "pins", "profile_line", "cut", "width_px", "height_px")
 
 
 def _session(session_id: str) -> Dict:
