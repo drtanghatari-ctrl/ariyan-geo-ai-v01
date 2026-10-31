@@ -56,6 +56,11 @@ import kotlin.math.sqrt
  *   blue    = DERIVED hollow: translucent band from the ground up to the base
  *   grey    = UNKNOWN below the lower of ground and base (no measurement)
  * Nothing is drawn that the DEM does not give; no layer, wall or chamber.
+ *
+ * cut-v2 part 2 (2026-10-31): the user's own HYPOTHESIZED shapes (stored by
+ * section_hypothesis.py) are drawn on the face in purple with a bright outline:
+ * from..to metres along A->A', top..bottom metres below the ground line (times
+ * the height exaggeration, like everything else). Only the user creates them.
  */
 class Surface3DView(context: Context) : GLSurfaceView(context) {
 
@@ -97,6 +102,12 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
     }
 
     fun setExaggeration(ve: Float) { queueEvent { r.setVe(ve) }; requestRender() }
+
+    /** cut-v2 part 2: one user hypothesis on the open line (metres along A->A', metres below ground) */
+    class Hyp(val fromM: Float, val toM: Float, val topM: Float, val bottomM: Float)
+
+    /** lengthM = the real length of the open line A-A' in metres */
+    fun setHypotheses(list: List<Hyp>, lengthM: Float) { queueEvent { r.setHyps(list, lengthM) }; requestRender() }
 
     /** cut-v1: 0 = no cut, +1 = keep the left side of A->A', -1 = keep the right side */
     fun setCut(side: Int) { queueEvent { r.setCut(side) }; requestRender() }
@@ -182,6 +193,10 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
         private var raisedStrips: List<FloatBuffer> = emptyList()   // cut-v2 orange
         private var hollowStrips: List<FloatBuffer> = emptyList()   // cut-v2 blue
         private var baseArr: FloatArray? = null
+        private var hyps: List<Hyp> = emptyList()
+        private var hypLenM = 0f
+        private var hypFill: List<FloatBuffer> = emptyList()      // purple fill strips (stride 5)
+        private var hypOutline: List<FloatBuffer> = emptyList()   // outline line strips (stride 3)
         private var wallProg = 0
 
         private var bands: List<Band> = emptyList()
@@ -210,6 +225,8 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
         fun setVe(v: Float) { ve = v; rebuild() }
 
         fun setCut(side: Int) { cut = if (line == null) 0 else side; rebuild() }
+
+        fun setHyps(list: List<Hyp>, lengthM: Float) { hyps = list; hypLenM = lengthM; rebuild() }
 
         /** cut-v1: is a grid point on the side that is kept? */
         private fun kept(gx: Float, gy: Float): Boolean {
@@ -400,6 +417,57 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
             wallStrips = walls
             raisedStrips = raised
             hollowStrips = hollow
+
+            // cut-v2 part 2: user HYPOTHESIZED shapes on the face, only while the face is shown.
+            // Each sample sits on the A->A' segment, nudged a little toward the removed side so
+            // the shape is drawn just in front of the face instead of fighting with it.
+            val fills = ArrayList<FloatBuffer>()
+            val outlines = ArrayList<FloatBuffer>()
+            if (cut != 0 && ln != null && hyps.isNotEmpty() && hypLenM > 0f) {
+                val ldx = ln[2] - ln[0]; val ldy = ln[3] - ln[1]
+                val ll = sqrt(ldx * ldx + ldy * ldy).coerceAtLeast(1e-6f)
+                // right of A->A' (y down) is (-ldy, ldx); the removed side is right when keeping left
+                val side = if (cut > 0) 1f else -1f
+                val nx = -ldy / ll * side * 0.15f
+                val ny = ldx / ll * side * 0.15f
+                for (hp in hyps) {
+                    val f0 = (hp.fromM / hypLenM).coerceIn(0f, 1f)
+                    val f1 = (hp.toM / hypLenM).coerceIn(0f, 1f)
+                    if (f1 <= f0) continue
+                    val n = max(2, ((f1 - f0) * ll * 4).toInt())
+                    var fill = ArrayList<Float>(); val tops = ArrayList<Float>(); val bots = ArrayList<Float>()
+                    fun close() {
+                        if (fill.size >= 20) fills.add(toBuf(fill))
+                        if (tops.size >= 6) {
+                            val o = ArrayList<Float>()
+                            o.addAll(tops)
+                            var i = bots.size - 3
+                            while (i >= 0) { o.add(bots[i]); o.add(bots[i + 1]); o.add(bots[i + 2]); i -= 3 }
+                            o.add(tops[0]); o.add(tops[1]); o.add(tops[2])
+                            outlines.add(toBuf(o))
+                        }
+                        fill = ArrayList(); tops.clear(); bots.clear()
+                    }
+                    for (i in 0..n) {
+                        val f = f0 + (f1 - f0) * i / n
+                        val gx = ln[0] + f * ldx
+                        val gy = ln[1] + f * ldy
+                        val z = cellHeight(gx, gy)
+                        if (z.isNaN()) { close(); continue }
+                        val g = z * ve
+                        val top = g - hp.topM * ve
+                        val bot = g - hp.bottomM * ve
+                        val x = wx(gx + nx); val zz = wz(gy + ny)
+                        fill.add(x); fill.add(top); fill.add(zz); fill.add(0f); fill.add(0f)
+                        fill.add(x); fill.add(bot); fill.add(zz); fill.add(0f); fill.add(0f)
+                        tops.add(x); tops.add(top); tops.add(zz)
+                        bots.add(x); bots.add(bot); bots.add(zz)
+                    }
+                    close()
+                }
+            }
+            hypFill = fills
+            hypOutline = outlines
         }
         private var pinCount = 0
 
@@ -450,6 +518,7 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
                 drawPins()
                 drawLine()
                 drawWall()
+                drawHypOutline()
             }
             shotCallback?.let { cb ->
                 shotCallback = null
@@ -547,6 +616,15 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
             GLES20.glUniform4f(uColour, 0.93f, 0.55f, 0.18f, 1f)
             GLES20.glUniform1f(uHatch, 0f)
             strips(raisedStrips)
+            // cut-v2 part 2: HYPOTHESIZED (user): purple, in front of the face
+            if (hypFill.isNotEmpty()) {
+                GLES20.glEnable(GLES20.GL_BLEND)
+                GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+                GLES20.glUniform4f(uColour, 0.62f, 0.32f, 0.95f, 0.65f)
+                GLES20.glUniform1f(uHatch, 0f)
+                strips(hypFill)
+                GLES20.glDisable(GLES20.GL_BLEND)
+            }
             // DERIVED hollow: translucent blue, drawn last without writing depth
             if (hollowStrips.isNotEmpty()) {
                 GLES20.glEnable(GLES20.GL_BLEND)
@@ -559,6 +637,27 @@ class Surface3DView(context: Context) : GLSurfaceView(context) {
             }
             GLES20.glDisableVertexAttribArray(aPos)
             GLES20.glDisableVertexAttribArray(aW)
+        }
+
+        private fun drawHypOutline() {
+            if (hypOutline.isEmpty()) return
+            GLES20.glUseProgram(flatProg)
+            val uMvp = GLES20.glGetUniformLocation(flatProg, "uMvp")
+            val uSize = GLES20.glGetUniformLocation(flatProg, "uSize")
+            val aPos = GLES20.glGetAttribLocation(flatProg, "aPos")
+            val aCol = GLES20.glGetAttribLocation(flatProg, "aCol")
+            GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
+            GLES20.glUniform1f(uSize, 1f)
+            GLES20.glDisableVertexAttribArray(aCol)
+            GLES20.glVertexAttrib4f(aCol, 0.86f, 0.66f, 1f, 0f)
+            GLES20.glLineWidth(3f)
+            for (s in hypOutline) {
+                s.position(0)
+                GLES20.glVertexAttribPointer(aPos, 3, GLES20.GL_FLOAT, false, 12, s)
+                GLES20.glEnableVertexAttribArray(aPos)
+                GLES20.glDrawArrays(GLES20.GL_LINE_STRIP, 0, s.capacity() / 3)
+            }
+            GLES20.glDisableVertexAttribArray(aPos)
         }
 
         private fun drawLine() {
