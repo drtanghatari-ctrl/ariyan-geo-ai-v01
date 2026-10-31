@@ -73,6 +73,11 @@ import java.util.Locale
  * true colour, or a filter). Height exaggeration is automatic by default, with its
  * rule printed; ×1 ... ×50 can be chosen. Candidate pins and an open profile line
  * are drawn on it. Snapshot = PNG + provenance. Display only.
+ *
+ * cut-v1 (2026-10-31): "Cut" in the 3D tab slices the surface along the open
+ * profile line A-A' (keep the left or right side). The cut face is a grey
+ * hatched wall labelled NO SUBSURFACE MEASUREMENT: nothing below the ground line
+ * is measured, and the wall's depth is a drawing aid only.
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -155,6 +160,9 @@ class FinalImageActivity : AppCompatActivity() {
     private var baseBmp: Bitmap? = null          // the map's terrain image (owned by the 2D view)
     private var ovBmp: Bitmap? = null            // the map's overlay (owned by the 2D view)
     private val ovPlace = floatArrayOf(0f, 0f, 1f, 1f)
+    // cut-v1: 0 = no cut, +1 = keep left of A->A', -1 = keep right
+    private var cutSide = 0
+    private lateinit var cutBtn: MaterialButton
 
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
@@ -176,6 +184,7 @@ class FinalImageActivity : AppCompatActivity() {
             tab = s.getInt("tab", 0).coerceIn(0, 3)
             paramsOpen = s.getBoolean("paramsOpen", false)
             if (s.containsKey("veChosen")) veChosen = s.getFloat("veChosen")
+            cutSide = s.getInt("cutSide", 0)
         }
         buildUi()
         if (s != null) {
@@ -199,6 +208,7 @@ class FinalImageActivity : AppCompatActivity() {
         out.putInt("tab", tab)
         out.putBoolean("paramsOpen", paramsOpen)
         veChosen?.let { out.putFloat("veChosen", it) }
+        out.putInt("cutSide", cutSide)
         if (::view.isInitialized) {
             out.putBoolean("smooth", view.smooth)
             view.groundState()?.let { out.putFloatArray("ground", it) }
@@ -290,6 +300,8 @@ class FinalImageActivity : AppCompatActivity() {
         val threeDRow = row()
         veBtn = button("Height: auto") { chooseVe() }
         threeDRow.addView(veBtn)
+        cutBtn = button("Cut: off") { chooseCut() }
+        threeDRow.addView(cutBtn)
         threeDRow.addView(button("Reset view") { glView?.resetView() })
         threeDRow.addView(button("Snapshot") { snapshot3D() })
 
@@ -552,7 +564,7 @@ class FinalImageActivity : AppCompatActivity() {
                 val line = if (profile != null) lineAsk?.copyOf() else null
                 gv.setSurface(hg, m.getInt("width"), m.getInt("height"),
                     m.getDouble("cell_dx_m").toFloat(), m.getDouble("cell_dy_m").toFloat(),
-                    currentVe(), drape, pins, line, resetCamera)
+                    currentVe(), drape, pins, line, resetCamera, if (line == null) 0 else cutSide)
                 veBtn.text = "Height: " + (if (veChosen == null) "auto " else "") + "\u00D7" + trimNum(currentVe().toDouble())
                 update3DInfo()
             } catch (e: PyException) {
@@ -580,10 +592,45 @@ class FinalImageActivity : AppCompatActivity() {
             .setNegativeButton("Cancel", null).show()
     }
 
+    private fun cutLabel(): String = when (cutSide) {
+        1 -> "keep left of A\u2192A\u2032"
+        -1 -> "keep right of A\u2192A\u2032"
+        else -> "off"
+    }
+
+    private fun chooseCut() {
+        val p = profile
+        if (p == null) {
+            AlertDialog.Builder(this).setTitle("Cut along a profile")
+                .setMessage("Open a profile first: Profile & Section tab \u2192 Draw A\u2013A\u2032, N\u2013S or E\u2013W. " +
+                    "Then come back here; the 3D surface is cut along that line.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        val b = p.optDouble("bearing_deg")
+        fun compass(deg: Double): String {
+            val names = arrayOf("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+            return names[(((deg % 360 + 360) % 360 + 22.5) / 45).toInt() % 8]
+        }
+        val left = compass(b - 90); val right = compass(b + 90)
+        val items = arrayOf("Off (whole surface)",
+            "Keep the left side of A\u2192A\u2032 (towards $left)",
+            "Keep the right side of A\u2192A\u2032 (towards $right)")
+        AlertDialog.Builder(this).setTitle(String.format(Locale.US, "Cut along A\u2013A\u2032 (bearing %.0f\u00B0)", b))
+            .setItems(items) { _, i ->
+                cutSide = when (i) { 1 -> 1; 2 -> -1; else -> 0 }
+                cutBtn.text = "Cut: " + if (cutSide == 0) "off" else if (cutSide > 0) "left" else "right"
+                glView?.setCut(cutSide)
+                update3DInfo()
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
     private fun update3DInfo() {
         val m = s3dMeta ?: return
         if (!is3DShown()) return
         val cam = glView?.camera() ?: return
+        if (profile == null && cutSide != 0) { cutSide = 0; cutBtn.text = "Cut: off" }
         info.text = buildString {
             append(String.format(Locale.US, "3D \u00B7 Height \u00D7%s (%s) \u00B7 view from %.0f\u00B0, tilt %.0f\u00B0\n",
                 trimNum(currentVe().toDouble()), if (veChosen == null) "automatic" else "chosen", cam[0], cam[1]))
@@ -592,6 +639,9 @@ class FinalImageActivity : AppCompatActivity() {
             append(String.format(Locale.US, "DEM %d \u00D7 %d cells, %d without a value (holes, not filled). ",
                 m.optInt("width"), m.optInt("height"), m.optInt("cells_no_data")))
             append("Extra 3D lighting for depth only.\n")
+            if (cutSide != 0) append("CUT along A\u2013A\u2032 (").append(cutLabel()).append("). Grey hatched face = " +
+                "NO SUBSURFACE MEASUREMENT: nothing below the ground line is measured here (no GPR, no ERT); " +
+                "its depth is a drawing aid, not a depth. Its top edge is the stored DEM cells along the line.\n")
             append(m.optString("statement")).append('\n')
             append("One finger: rotate / tilt \u00B7 two fingers: zoom \u00B7 double tap: reset")
         }
@@ -612,6 +662,7 @@ class FinalImageActivity : AppCompatActivity() {
             filterMeta?.let { put("drape_detail", JSONObject().put("filter", filterName).put("params", filterParams ?: JSONObject())) }
             put("pins", if (view.showCandidates) view.markers.size else 0)
             if (profile != null) lineAsk?.let { put("profile_line", JSONArray(it.map { v -> v.toDouble() })) }
+            put("cut", if (profile != null && cutSide != 0) cutLabel() + "; face = no subsurface measurement" else "off")
             put("width_px", gv.width); put("height_px", gv.height)
         }.toString()
         setLoading(true)
@@ -1416,6 +1467,7 @@ class FinalImageActivity : AppCompatActivity() {
 
     private fun closeProfile() {
         profile = null; lineAsk = null; preset = null; pickA = null
+        if (cutSide != 0) { cutSide = 0; if (::cutBtn.isInitialized) cutBtn.text = "Cut: off" }
         view.pickMode = false
         view.profileA = null; view.profileB = null; view.profileCursor = null
         view.clearLineFit(); view.invalidate()
