@@ -216,3 +216,62 @@ def test_settings_reports_backups_guard_and_changes_nothing(tmp_path):
     assert s["backups"]["files"] and s["backups"]["files"][0]["name"].startswith("grand_project_auto_")
     assert s["crash_reports"] == {"count": 1, "newest": "crash_20261102T101010Z.txt"}
     assert _db_md5(root) == before
+
+
+# --- mc-v1.4 backups: safe-to-delete marks and deleting one ------------------------
+
+def _backups(root, spec):
+    d = os.path.join(root, db.BACKUP_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    for old in os.listdir(d):                 # drop the real backup taken today by get_connection()
+        os.remove(os.path.join(d, old))
+    for name, size in spec:
+        with open(os.path.join(d, name), "wb") as f:
+            f.write(b"x" * size)
+    return d
+
+
+def test_backup_rule_three_newest_and_largest_protected(tmp_path):
+    root = str(tmp_path)
+    _project(root)
+    _backups(root, [("grand_project_auto_20261102.db", 30), ("grand_project_auto_20261031.db", 30),
+                    ("grand_project_auto_20261030.db", 30), ("grand_project_auto_20261024.db", 50),
+                    ("grand_project_auto_20261023.db", 10), ("grand_project_auto_20261021.db", 10),
+                    ("my_copy_before_test.db", 5)])
+    marks = {f["name"]: f for f in mc.backup_list(root)}
+    for n in ("grand_project_auto_20261102.db", "grand_project_auto_20261031.db", "grand_project_auto_20261030.db"):
+        assert not marks[n]["deletable"] and "newest" in marks[n]["protected_reason"]
+    assert not marks["grand_project_auto_20261024.db"]["deletable"]                 # the largest
+    assert marks["grand_project_auto_20261023.db"]["deletable"] and marks["grand_project_auto_20261021.db"]["deletable"]
+    assert not marks["my_copy_before_test.db"]["deletable"]
+
+
+def test_delete_only_a_safe_one_and_it_is_logged(tmp_path):
+    root = str(tmp_path)
+    _project(root)
+    d = _backups(root, [("grand_project_auto_20261102.db", 30), ("grand_project_auto_20261031.db", 30),
+                        ("grand_project_auto_20261030.db", 30), ("grand_project_auto_20261021.db", 10)])
+    r = json.loads(mc.delete_backup_json(root, "grand_project_auto_20261021.db"))
+    assert r["deleted"] == "grand_project_auto_20261021.db" and r["logged"]
+    assert not os.path.exists(os.path.join(d, "grand_project_auto_20261021.db"))
+    conn = db.get_connection(root)
+    try:
+        ev = conn.execute("SELECT * FROM timeline_event WHERE event_type = 'BACKUP_DELETED_BY_USER'").fetchall()
+    finally:
+        conn.close()
+    assert len(ev) == 1 and ev[0]["related_entity_id"] == "grand_project_auto_20261021.db"
+
+
+def test_delete_refuses_protected_live_db_paths_and_own_copies(tmp_path):
+    root = str(tmp_path)
+    _project(root)
+    d = _backups(root, [("grand_project_auto_20261102.db", 30), ("grand_project_auto_20261031.db", 30),
+                        ("grand_project_auto_20261030.db", 30), ("my_copy.db", 5)])
+    for bad in ("grand_project_auto_20261102.db",            # newest
+                "grand_project.db",                           # the live database
+                "../grand_project.db", "my_copy.db",          # path trick, own copy
+                "grand_project_auto_20990101.db"):            # does not exist
+        assert "error" in json.loads(mc.delete_backup_json(root, bad))
+    assert os.path.exists(os.path.join(root, db.DB_FILENAME))
+    assert sorted(os.listdir(d)) == sorted(["grand_project_auto_20261102.db", "grand_project_auto_20261031.db",
+                                            "grand_project_auto_20261030.db", "my_copy.db"])
