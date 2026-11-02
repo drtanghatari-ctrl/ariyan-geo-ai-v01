@@ -1,0 +1,6 @@
+# ARIYAN GEO AI for Windows (win-w0). The core itself needs only numpy + requests
+# (the same as on the phone); PySide6 draws the desktop screens. Versions are pinned
+# so the .exe is built the same way every time (PyInstaller must know numpy's layout).
+numpy==2.1.3
+requests==2.32.3
+PySide6==6.8.1
