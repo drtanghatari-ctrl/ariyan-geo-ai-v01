@@ -26,6 +26,14 @@ profile from the database, the debate engine's SHA-256), with what each may and
 may not do. settings_json() reports the storage, database, backups, guard and
 crash reports for the Settings screen. Both are read-only.
 
+mc-v1.4 (user decision 2026-11-02): Settings marks which automatic daily
+backups are safe to delete and delete_backup_json() deletes ONE of them. Rule:
+the 3 newest automatic backups and the largest one(s) are protected; only files
+named grand_project_auto_YYYYMMDD.db inside db_backups can ever be deleted, so
+grand_project.db and the user's own copies are never touched. The rule is
+checked again at the moment of deleting, and every deletion is written to the
+project timeline (BACKUP_DELETED_BY_USER).
+
 dbe-v1, AI Debate Engine. debates_json() lists the debates stored by dbr-v1
 (newest first, filterable by agreement) with a project-wide summary;
 debate_detail_json() returns one stored debate in full. Nothing is re-run or
@@ -39,7 +47,7 @@ from typing import Any, Dict, List, Optional
 
 import grand_project_db as db
 
-VERSION = "mc-v1.3"
+VERSION = "mc-v1.4"
 DEBATE_VERSION = "dbe-v1"
 DEFAULT_PROJECT_ID = "default"          # grand_project_sync.DEFAULT_GRAND_PROJECT_ID
 
@@ -604,17 +612,13 @@ def settings(db_root: str) -> Dict[str, Any]:
         guard = None
     out["guard"] = guard
     out["allow_new_flag"] = os.path.exists(os.path.join(db_root, db.ALLOW_NEW_FILENAME))
-    backups = []
     folder = os.path.join(db_root, db.BACKUP_DIRNAME)
-    try:
-        for n in sorted(os.listdir(folder), reverse=True):
-            p = os.path.join(folder, n)
-            if n.endswith(".db") and os.path.isfile(p):
-                backups.append({"name": n, "bytes": os.path.getsize(p)})
-    except OSError:
-        pass
-    out["backups"] = {"folder": folder, "files": backups, "keep_rule": "the newest %d daily backups plus the largest"
-                      % getattr(db, "AUTO_BACKUP_KEEP", 10)}
+    out["backups"] = {"folder": folder, "files": backup_list(db_root),
+                      "keep_rule": "the newest %d daily backups plus the largest"
+                      % getattr(db, "AUTO_BACKUP_KEEP", 10),
+                      "delete_rule": "Protected: the %d newest automatic backups and the largest. Only automatic "
+                                     "backups (grand_project_auto_YYYYMMDD.db) can be deleted here; grand_project.db "
+                                     "and your own copies never." % KEEP_NEWEST_BACKUPS}
     crash = []
     try:
         cdir = os.path.join(db_root, "crash_reports")
@@ -632,4 +636,82 @@ def settings_json(db_root: str) -> str:
     try:
         return json.dumps(settings(db_root), default=str)
     except Exception as e:
+        return json.dumps({"error": "%s: %s" % (type(e).__name__, e)})
+
+
+# ---------------------------------------------------------------------------
+# mc-v1.4 backups: which are safe to delete, and deleting one
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+KEEP_NEWEST_BACKUPS = 3                       # user decision 2026-11-02
+_AUTO_RE = _re.compile(r"^grand_project_auto_(\d{8})\.db$")
+
+
+def backup_list(db_root: str) -> List[Dict[str, Any]]:
+    """Every *.db in db_backups, newest first, each marked deletable or protected (with the reason)."""
+    folder = os.path.join(db_root, db.BACKUP_DIRNAME)
+    files = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    for n in names:
+        p = os.path.join(folder, n)
+        if n.endswith(".db") and os.path.isfile(p) and not os.path.islink(p):
+            files.append({"name": n, "bytes": os.path.getsize(p), "auto": bool(_AUTO_RE.match(n))})
+    autos = sorted((f for f in files if f["auto"]), key=lambda f: f["name"], reverse=True)   # YYYYMMDD in name
+    newest = {f["name"] for f in autos[:KEEP_NEWEST_BACKUPS]}
+    biggest = max((f["bytes"] for f in autos), default=None)
+    for f in files:
+        if not f["auto"]:
+            f["deletable"], f["protected_reason"] = False, "your own copy (not an automatic backup)"
+        elif f["name"] in newest:
+            f["deletable"], f["protected_reason"] = False, "one of the %d newest" % KEEP_NEWEST_BACKUPS
+        elif f["bytes"] == biggest:
+            f["deletable"], f["protected_reason"] = False, "the largest backup"
+        else:
+            f["deletable"], f["protected_reason"] = True, None
+    files.sort(key=lambda f: (not f["auto"], f["name"]), reverse=False)
+    autos_first = [f for f in files if f["auto"]]
+    autos_first.sort(key=lambda f: f["name"], reverse=True)
+    return autos_first + [f for f in files if not f["auto"]]
+
+
+def delete_backup(db_root: str, name: str) -> Dict[str, Any]:
+    name = str(name or "")
+    if os.path.basename(name) != name or not _AUTO_RE.match(name):
+        raise ValueError("only automatic backups named grand_project_auto_YYYYMMDD.db can be deleted")
+    entry = next((f for f in backup_list(db_root) if f["name"] == name), None)
+    if entry is None:
+        raise FileNotFoundError("%s is not in db_backups (already deleted?)" % name)
+    if not entry["deletable"]:
+        raise PermissionError("%s is protected: %s" % (name, entry["protected_reason"]))
+    path = os.path.join(db_root, db.BACKUP_DIRNAME, name)
+    size = entry["bytes"]
+    os.remove(path)
+    logged = False
+    try:
+        conn = db.get_connection(db_root)
+        try:
+            db.initialize_schema(conn)
+            gp = conn.execute("SELECT id FROM grand_project WHERE id = ?", (DEFAULT_PROJECT_ID,)).fetchone() \
+                or conn.execute("SELECT id FROM grand_project ORDER BY created_at LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        if gp is not None:
+            db.log_timeline_event(db_root, gp[0], "BACKUP_DELETED_BY_USER", "db_backup", name,
+                                  "User deleted automatic backup %s (%d bytes) from Settings; rule: %d newest "
+                                  "and the largest protected (%s)." % (name, size, KEEP_NEWEST_BACKUPS, VERSION))
+            logged = True
+    except Exception:
+        logged = False
+    return {"deleted": name, "bytes": size, "logged": logged, "backups": backup_list(db_root)}
+
+
+def delete_backup_json(db_root: str, name: str) -> str:
+    try:
+        return json.dumps(delete_backup(db_root, name), default=str)
+    except Exception as e:                          # shown, never hidden
         return json.dumps({"error": "%s: %s" % (type(e).__name__, e)})
