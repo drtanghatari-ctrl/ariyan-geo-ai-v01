@@ -73,6 +73,9 @@ import java.util.Locale
  * Control comes back, so a newly saved layer shows without restarting the app.
  * Only the strip is rebuilt; the 3D view is kept.
  *
+ * logo-v1 (2026-11-02): the header shows the ARIYAN emblem (res/drawable-nodpi/
+ * ariyan_emblem.png, the user's own design); the launcher icon uses the same art.
+ *
  * "Last Final Image": the candidate of the last Final Image screen opened in
  * this process is remembered in SharedPreferences through an activity
  * lifecycle callback registered here, so FinalImageActivity needs no change.
@@ -235,16 +238,21 @@ class MissionControlActivity : AppCompatActivity() {
             setPadding(px(16), px(16), px(16), px(16))
         }
         val titleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        titleRow.addView(AriyanDecor.Glyph(this, "target", AriyanDecor.ACCENT), LinearLayout.LayoutParams(px(30), px(30)))
+        // logo-v1 (2026-11-02): the ARIYAN emblem (user's design) instead of the drawn target glyph
+        titleRow.addView(ImageView(this).apply {
+            setImageResource(R.drawable.ariyan_emblem)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            contentDescription = "ARIYAN GEO AI emblem"
+        }, LinearLayout.LayoutParams(px(56), px(56)))
         titleRow.addView(text("ARIYAN GEO AI", 24f, col(R.color.ariyan_text_primary), bold = true).apply {
             setPadding(px(10), 0, 0, 0); letterSpacing = 0.04f
         })
         box.addView(titleRow)
         box.addView(text("Scientific Geospatial Laboratory", 13f, col(R.color.ariyan_text_secondary)).apply {
-            setPadding(px(40), 0, 0, 0)
+            setPadding(px(66), 0, 0, 0)
         })
         box.addView(text("Evidence.  Reasoning.  Confidence.", 14f, AriyanDecor.ACCENT, bold = true).apply {
-            setPadding(px(40), px(8), 0, 0); letterSpacing = 0.05f
+            setPadding(px(66), px(8), 0, 0); letterSpacing = 0.05f
         })
         frame.addView(box)
         content.addView(frame, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,

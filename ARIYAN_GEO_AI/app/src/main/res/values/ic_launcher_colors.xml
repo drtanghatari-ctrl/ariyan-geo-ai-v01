@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- logo-v1 (2026-11-02): the navy behind the emblem, seen in square launcher masks. -->
+<resources>
+    <color name="ariyan_icon_background">#000922</color>
+</resources>
