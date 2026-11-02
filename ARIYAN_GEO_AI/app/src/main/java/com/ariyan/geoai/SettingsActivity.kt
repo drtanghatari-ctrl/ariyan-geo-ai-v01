@@ -11,6 +11,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -29,6 +30,12 @@ import java.util.Locale
  * database with its guard and daily backups (db-safe-v1), crash reports, the
  * offline libraries and the app version. Nothing here deletes, moves or
  * changes a file (mission_control.settings_json).
+ *
+ * mc-v1.4 (2026-11-02, user decision): each daily backup is marked "safe to
+ * delete" or "protected" (the 3 newest automatic backups and the largest; your
+ * own copies and grand_project.db are never deletable). A safe one has a Delete
+ * button; a confirmation shows its name and size, Python checks the rule again
+ * before deleting, and the deletion is written to the project timeline.
  */
 class SettingsActivity : AppCompatActivity() {
 
@@ -85,7 +92,7 @@ class SettingsActivity : AppCompatActivity() {
         row.addView(AriyanDecor.Glyph(this, "steward", AriyanDecor.ACCENT), LinearLayout.LayoutParams(px(28), px(28)))
         row.addView(text("Settings", 22f, col(R.color.ariyan_text_primary), bold = true).apply { setPadding(px(10), 0, 0, 0) })
         box.addView(row)
-        box.addView(text("Storage, keys, database safety and backups. Read-only: nothing here deletes or changes a file.",
+        box.addView(text("Storage, keys, database safety and backups. Read-only, except deleting old backups that are safe to delete.",
             13f, AriyanDecor.ACCENT).apply { setPadding(0, px(6), 0, 0) })
         frame.addView(box)
         content.addView(frame, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
@@ -141,15 +148,65 @@ class SettingsActivity : AppCompatActivity() {
                 else "absent (normal)")
             val n = files?.length() ?: 0
             row(this, n > 0, "Daily backups", String.format(Locale.US, "%d kept in db_backups (%s)", n, b.optString("keep_rule")))
-            if (files != null) for (i in 0 until minOf(n, 12)) {
-                val f = files.getJSONObject(i)
-                line(this, "   " + f.optString("name") + "  \u00B7  " + mb(f.optLong("bytes")))
-            }
-            line(this, "To restore: copy a backup over grand_project.db while the app is closed. The app never deletes your copies.")
+            if (files != null) for (i in 0 until n) addView(backupRow(files.getJSONObject(i)))
+            line(this, b.optString("delete_rule"))
+            line(this, "To restore: copy a backup over grand_project.db while the app is closed.")
             val cn = crash.optInt("count")
             row(this, cn == 0, "Crash reports", if (cn == 0) "none" else
                 String.format(Locale.US, "%d, newest %s (offline_data/crash_reports)", cn, crash.optString("newest")))
         })
+    }
+
+    /** mc-v1.4: one backup with its mark; a Delete button only when the rule allows it. */
+    private fun backupRow(f: JSONObject): LinearLayout {
+        val ok = f.optBoolean("deletable")
+        val c = if (ok) AriyanDecor.ORANGE else AriyanDecor.ACCENT
+        val r = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(px(10), px(6), px(8), px(6))
+            background = AriyanDecor.pill(d, AriyanDecor.withAlpha(c, 14)).apply { cornerRadius = 8 * d }
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = px(5) }
+        }
+        val t = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        t.addView(text(f.optString("name") + "  \u00B7  " + mb(f.optLong("bytes")), 12f, col(R.color.ariyan_text_primary)))
+        t.addView(text(if (ok) "safe to delete" else "protected: " + f.optString("protected_reason"), 11f, c, bold = true))
+        r.addView(t, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        if (ok) r.addView(text("Delete", 13f, col(R.color.ariyan_bg), bold = true).apply {
+            setPadding(px(14), px(7), px(14), px(7))
+            background = AriyanDecor.pill(d, AriyanDecor.ORANGE)
+            isClickable = true
+            setOnClickListener { confirmDelete(f.optString("name"), f.optLong("bytes")) }
+        })
+        return r
+    }
+
+    private fun confirmDelete(name: String, bytes: Long) {
+        AlertDialog.Builder(this)
+            .setTitle("Delete this backup?")
+            .setMessage("$name\n${mb(bytes)}\n\nThis frees space on the phone and cannot be undone. " +
+                "Your newest 3 backups, the largest one and grand_project.db stay untouched. " +
+                "The deletion is recorded in the project timeline.")
+            .setPositiveButton("Delete") { _, _ -> doDelete(name) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun doDelete(name: String) {
+        lifecycleScope.launch {
+            val o = withContext(Dispatchers.Default) {
+                try {
+                    JSONObject(python.getModule("mission_control").callAttr("delete_backup_json", offlineDataRoot, name).toString())
+                } catch (e: PyException) {
+                    JSONObject().put("error", e.message)
+                }
+            }
+            val msg = if (o.has("error")) "Not deleted: " + o.optString("error")
+                else "Deleted " + o.optString("deleted") + " (" + mb(o.optLong("bytes")) + " freed)" +
+                    if (o.optBoolean("logged")) "; recorded in the timeline." else "; the timeline entry could not be written."
+            android.widget.Toast.makeText(this@SettingsActivity, msg, android.widget.Toast.LENGTH_LONG).show()
+            load()
+        }
     }
 
     private fun folders(o: JSONObject) {
