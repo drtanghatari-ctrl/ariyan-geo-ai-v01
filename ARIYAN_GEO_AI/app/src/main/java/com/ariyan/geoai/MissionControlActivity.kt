@@ -68,6 +68,11 @@ import java.util.Locale
  * models in use, read from code and database), Visualization (jumps to the 3D
  * card) and Settings (SettingsActivity).
  *
+ * mc-v1.3.1 (2026-11-02): after a Final Image has been opened (where a missing
+ * layer may have been fetched), the thumbnail strip is re-read when Mission
+ * Control comes back, so a newly saved layer shows without restarting the app.
+ * Only the strip is rebuilt; the 3D view is kept.
+ *
  * "Last Final Image": the candidate of the last Final Image screen opened in
  * this process is remembered in SharedPreferences through an activity
  * lifecycle callback registered here, so FinalImageActivity needs no change.
@@ -78,6 +83,8 @@ class MissionControlActivity : AppCompatActivity() {
         private const val PREFS = "mission_control"
         private const val KEY_LAST_FINAL_IMAGE = "last_final_image"
         private var watcherRegistered = false
+        /** mc-v1.3.1: set when a Final Image opens; the thumbnail strip is re-read once on return. */
+        @Volatile private var thumbsStale = false
 
         /** Remember every Final Image opened, whichever screen opened it. */
         fun registerFinalImageWatcher(app: Application) {
@@ -86,6 +93,7 @@ class MissionControlActivity : AppCompatActivity() {
             app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
                 override fun onActivityCreated(a: Activity, b: Bundle?) {
                     if (a is FinalImageActivity) {
+                        thumbsStale = true
                         val cid = a.intent?.getStringExtra(FinalImageActivity.EXTRA_CANDIDATE_ID) ?: return
                         a.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                             .putString(KEY_LAST_FINAL_IMAGE, cid).apply()
@@ -378,6 +386,10 @@ class MissionControlActivity : AppCompatActivity() {
             if (terrainFor == cid) {
                 (card.parent as? android.view.ViewGroup)?.removeView(card)
                 content.addView(card)
+                if (thumbsStale) {
+                    thumbsStale = false
+                    refreshThumbs(card, cid)
+                }
                 return
             }
         }
@@ -386,6 +398,7 @@ class MissionControlActivity : AppCompatActivity() {
         val card = panel("3D TERRAIN \u00B7 TOP CANDIDATE " + cid.take(8), "mountain", AriyanDecor.ORANGE)
         terrainCard = card
         terrainFor = cid
+        thumbsStale = false                     // this build reads the thumbnails fresh
         val status = text("Loading the stored DEM window\u2026", 13f, col(R.color.ariyan_text_secondary)).apply {
             setPadding(0, px(6), 0, 0)
         }
@@ -421,39 +434,7 @@ class MissionControlActivity : AppCompatActivity() {
                     m.put("candidates", j.optJSONArray("candidates"))
                     m.put("source_label", j.optString("source"))
                     // mc-v1.3: thumbnails of what is already saved for this window (never fetched here)
-                    val thumbs = mutableListOf(Thumb("Terrain (relief, hillshaded)", "SAVED",
-                        "DEM " + j.optString("source"), bmp.copy(Bitmap.Config.ARGB_8888, false)))
-                    try {
-                        val sim = python.getModule("sat_image_mobile")
-                        val th = JSONObject(python.getModule("mission_control").callAttr("thumbs_json", offlineDataRoot, sid).toString())
-                        val layers = th.optJSONArray("layers")
-                        if (layers != null) for (i in 0 until layers.length()) {
-                            val l = layers.getJSONObject(i)
-                            val state = l.optString("state")
-                            var tb: Bitmap? = null
-                            var note = when (state) {
-                                "SAVED" -> listOfNotNull(nz(l, "scene_date"),
-                                    if (l.isNull("clear_fraction")) null
-                                    else String.format(Locale.US, "%.0f%% clear", 100 * l.optDouble("clear_fraction"))).joinToString(" \u00B7 ")
-                                "NOT_SAVED" -> "not saved for this window"
-                                else -> l.optString("reason")
-                            }
-                            if (state == "SAVED") {
-                                try {
-                                    val rb = sim.callAttr("layer_rgba", sid, l.getString("product")).toJava(ByteArray::class.java)
-                                    tb = Bitmap.createBitmap(l.getInt("width"), l.getInt("height"), Bitmap.Config.ARGB_8888)
-                                    tb.copyPixelsFromBuffer(ByteBuffer.wrap(rb))
-                                } catch (e: PyException) {
-                                    note = e.message ?: "could not open"
-                                }
-                            }
-                            thumbs += Thumb(l.optString("label"), if (tb == null && state == "SAVED") "ERROR" else state, note, tb)
-                        }
-                    } catch (e: PyException) {
-                        thumbs += Thumb("Satellite layers", "ERROR", e.message ?: "could not list", null)
-                    } finally {
-                        try { python.getModule("sat_image_mobile").callAttr("close_layers", sid) } catch (_: PyException) {}
-                    }
+                    val thumbs = readThumbs(sid!!, j.optString("source"), bmp)
                     Terrain(m, bmp, hg, thumbs)
                 } catch (e: PyException) {
                     Terrain(JSONObject().put("error", e.message), null, null, emptyList())
@@ -520,9 +501,77 @@ class MissionControlActivity : AppCompatActivity() {
         }
     }
 
+    /** mc-v1.3: terrain + every satellite layer already saved for this window (Python never fetches).
+     * Runs on a background thread with an open Final Image session. */
+    private fun readThumbs(sid: String, source: String, drape: Bitmap): List<Thumb> {
+        val thumbs = mutableListOf(Thumb("Terrain (relief, hillshaded)", "SAVED",
+            "DEM " + source, drape.copy(Bitmap.Config.ARGB_8888, false)))
+        try {
+            val sim = python.getModule("sat_image_mobile")
+            val th = JSONObject(python.getModule("mission_control").callAttr("thumbs_json", offlineDataRoot, sid).toString())
+            val layers = th.optJSONArray("layers")
+            if (layers != null) for (i in 0 until layers.length()) {
+                val l = layers.getJSONObject(i)
+                val state = l.optString("state")
+                var tb: Bitmap? = null
+                var note = when (state) {
+                    "SAVED" -> listOfNotNull(nz(l, "scene_date"),
+                        if (l.isNull("clear_fraction")) null
+                        else String.format(Locale.US, "%.0f%% clear", 100 * l.optDouble("clear_fraction"))).joinToString(" \u00B7 ")
+                    "NOT_SAVED" -> "not saved for this window"
+                    else -> l.optString("reason")
+                }
+                if (state == "SAVED") {
+                    try {
+                        val rb = sim.callAttr("layer_rgba", sid, l.getString("product")).toJava(ByteArray::class.java)
+                        tb = Bitmap.createBitmap(l.getInt("width"), l.getInt("height"), Bitmap.Config.ARGB_8888)
+                        tb.copyPixelsFromBuffer(ByteBuffer.wrap(rb))
+                    } catch (e: PyException) {
+                        note = e.message ?: "could not open"
+                    }
+                }
+                thumbs += Thumb(l.optString("label"), if (tb == null && state == "SAVED") "ERROR" else state, note, tb)
+            }
+        } catch (e: PyException) {
+            thumbs += Thumb("Satellite layers", "ERROR", e.message ?: "could not list", null)
+        } finally {
+            try { python.getModule("sat_image_mobile").callAttr("close_layers", sid) } catch (_: PyException) {}
+        }
+        return thumbs
+    }
+
+    /** mc-v1.3.1: re-read only the thumbnail strip (same window), keeping the 3D view. */
+    private fun refreshThumbs(card: LinearLayout, cid: String) {
+        lifecycleScope.launch {
+            val thumbs = withContext(Dispatchers.Default) {
+                var sid: String? = null
+                val fim = python.getModule("final_image_mobile")
+                try {
+                    val j = JSONObject(fim.callAttr("open_final_image_json", offlineDataRoot, cid, 1000.0, "relief").toString())
+                    if (j.has("error")) return@withContext null
+                    sid = j.getString("session_id")
+                    val bytes = fim.callAttr("image_rgba", sid).toJava(ByteArray::class.java)
+                    val bmp = Bitmap.createBitmap(j.getInt("width"), j.getInt("height"), Bitmap.Config.ARGB_8888)
+                    bmp.copyPixelsFromBuffer(ByteBuffer.wrap(bytes))
+                    readThumbs(sid!!, j.optString("source"), bmp)
+                } catch (e: PyException) {
+                    null
+                } catch (e: OutOfMemoryError) {
+                    null
+                } finally {
+                    sid?.let { try { fim.callAttr("close_session", it) } catch (_: PyException) {} }
+                }
+            } ?: return@launch
+            if (terrainFor != cid) return@launch
+            val old = card.findViewWithTag<View>("thumbStrip")
+            val at = if (old != null) card.indexOfChild(old).also { card.removeView(old) } else card.childCount - 1
+            card.addView(thumbStrip(thumbs, cid), at)
+        }
+    }
+
     /** mc-v1.3: terrain + satellite thumbnails of the 3D window (saved images only). */
     private fun thumbStrip(thumbs: List<Thumb>, cid: String): View {
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(10), 0, 0) }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(10), 0, 0); tag = "thumbStrip" }
         box.addView(text("LAYERS FOR THIS WINDOW (saved on the phone; nothing is fetched here)", 11f,
             col(R.color.ariyan_text_secondary), bold = true).apply { letterSpacing = 0.04f })
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, px(6), 0, 0) }
