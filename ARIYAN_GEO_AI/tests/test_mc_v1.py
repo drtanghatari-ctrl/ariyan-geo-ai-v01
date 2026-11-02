@@ -62,6 +62,7 @@ def test_bands_exclude_rejected_and_report_the_ceiling(tmp_path):
     assert bands["MODERATE"] == 2 and bands["LOW"] == 1 and bands["NOT_RATED"] == 1 and bands["HIGH"] == 0
     c = m["confidence"]
     assert c["rejected"] == 1 and c["highest"] == "MODERATE" and c["highest_ceiling"] == 0.55
+    assert c["highest_numeric"] == 0.55          # mc-v1.1 gauge needle: a stored value, never invented
     assert "GPR/ERT" in c["why"]
     assert c["steward_words"] == ["Environmental confounders not controlled: ceiling held at MODERATE"]
     assert m["project"]["candidates"] == 5 and m["project"]["status_counts"]["Rejected"] == 1
@@ -96,6 +97,22 @@ def test_data_sources_count_real_files(tmp_path):
     assert src["Terrain DEM, bulk COP30 (Pass 1)"]["ok"] and "1 tile" in src["Terrain DEM, bulk COP30 (Pass 1)"]["detail"]
     assert src["DEM library SRTMGL1 (Pass 2)"]["ok"] and not src["DEM library COP30 (Pass 2)"]["ok"]
     assert not src["Field data (GPR/ERT)"]["ok"]
+
+
+def test_gauge_value_ignores_rejected_and_lower_bands(tmp_path):
+    root = str(tmp_path)
+    gid, ids = _project(root)
+    db.update_candidate_confidence(root, ids[3], "MODERATE", 0.70)          # Rejected: must not move the needle
+    db.update_candidate_confidence(root, ids[2], "LOW", 0.34)
+    c = json.loads(mc.mission_json(root))["confidence"]
+    assert c["highest"] == "MODERATE" and c["highest_numeric"] == 0.55
+
+
+def test_empty_project_has_no_needle(tmp_path):
+    root = str(tmp_path)
+    db.create_grand_project(root, "Default Grand Project", project_id="default")
+    c = json.loads(mc.mission_json(root))["confidence"]
+    assert c["highest"] is None and c["highest_numeric"] is None
 
 
 def test_debates_list_summary_filter_and_detail(tmp_path):
