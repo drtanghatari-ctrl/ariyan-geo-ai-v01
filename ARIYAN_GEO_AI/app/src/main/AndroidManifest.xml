@@ -77,6 +77,11 @@
             android:name=".DebateEngineActivity"
             android:exported="false" />
 
+        <!-- mc-v1.3 (2026-11-02): Settings tab of Mission Control, read-only. -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false" />
+
         <activity
             android:name=".OfflineDataActivity"
             android:exported="true"
