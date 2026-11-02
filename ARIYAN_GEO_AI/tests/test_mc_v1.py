@@ -155,3 +155,64 @@ def test_no_debates_and_bad_input_are_reported_not_hidden(tmp_path):
     assert r["rows"] == [] and r["note"]
     assert "error" in json.loads(mc.debates_json(root, "MAYBE"))
     assert "error" in json.loads(mc.debate_detail_json(root, 999))
+
+
+# --- mc-v1.3 layer thumbnails: saved images only, never a fetch ----------------
+
+def test_thumbs_never_fetch_and_report_each_layer(tmp_path, monkeypatch):
+    import sat_image as si
+    import sat_image_mobile as sim
+    import ndvi_source_mobile as ndvi
+    from test_fi_v2 import FakeCDSE, _scenes
+    from test_fi_v2_mobile import _fake_session
+    fake = FakeCDSE(_scenes())
+    monkeypatch.setattr(sim, "_HTTP", fake)
+    monkeypatch.setattr(ndvi, "get_access_token", lambda a, b, *k: "tok")
+    root = str(tmp_path)
+    sid, _ = _fake_session()
+    r = json.loads(mc.thumbs_json(root, sid))
+    assert [x["product"] for x in r["layers"]] == list(si.LAYER_ORDER)
+    assert all(x["state"] == "NOT_SAVED" for x in r["layers"]) and fake.total == 0
+    json.loads(sim.open_layer_json(root, sid, "THERMAL", "id", "sec", True))        # the user fetched it once
+    before = fake.total
+    r = json.loads(mc.thumbs_json(root, sid))
+    states = {x["product"]: x for x in r["layers"]}
+    assert states["THERMAL"]["state"] == "SAVED" and states["THERMAL"]["width"] > 0
+    assert states["NDVI"]["state"] == "NOT_SAVED"
+    assert fake.total == before                                                     # thumbnails fetched nothing
+    assert len(sim.layer_rgba(sid, "THERMAL")) == states["THERMAL"]["width"] * states["THERMAL"]["height"] * 4
+
+
+def test_thumbs_bad_session_is_reported(tmp_path):
+    r = json.loads(mc.thumbs_json(str(tmp_path), "nope"))
+    assert all(x["state"] == "ERROR" for x in r["layers"])
+
+
+# --- mc-v1.3 Analysis & Models + Settings ------------------------------------------
+
+def test_models_read_from_code_and_db(tmp_path):
+    root = str(tmp_path)
+    _project(root)
+    m = json.loads(mc.models_json(root))
+    names = {r["name"]: r for r in m["models"]}
+    assert names["Pass 2 reproduction rule"]["version"] == "pol-v1"
+    assert names["Land cover rule"]["version"] == "lc-v2"
+    assert names["Terrain labels / Hillside"]["version"] == "f3-v2"
+    assert names["calib-v1 score threshold"]["version"] == "not adopted"      # nothing adopted in this store
+    assert all(r["version"] for r in m["models"])
+
+
+def test_settings_reports_backups_guard_and_changes_nothing(tmp_path):
+    root = str(tmp_path)
+    _project(root)
+    os.makedirs(os.path.join(root, "crash_reports"))
+    open(os.path.join(root, "crash_reports", "crash_20261102T101010Z.txt"), "w").write("x")
+    os.makedirs(os.path.join(root, db.BACKUP_DIRNAME), exist_ok=True)
+    open(os.path.join(root, db.BACKUP_DIRNAME, "grand_project_auto_20261102.db"), "wb").write(b"x" * 5)
+    before = _db_md5(root)
+    s = json.loads(mc.settings_json(root))
+    assert s["database"]["exists"] and s["database"]["bytes"] > 0
+    assert s["guard"] is not None and not s["allow_new_flag"]
+    assert s["backups"]["files"] and s["backups"]["files"][0]["name"].startswith("grand_project_auto_")
+    assert s["crash_reports"] == {"count": 1, "newest": "crash_20261102T101010Z.txt"}
+    assert _db_md5(root) == before
