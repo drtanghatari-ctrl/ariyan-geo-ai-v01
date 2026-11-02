@@ -127,6 +127,9 @@ import java.util.Locale
  * Cards (two columns in landscape): candidate details, a map preview, Steward, AI
  * Debate, evidence layers checklist (only what really exists), your hypotheses, other
  * candidates in the window (tap to open theirs), map information. Recorded results only.
+ *
+ * maps-v1 (2026-11-02): tap the title (candidate id and coordinates) to open the
+ * point in Google Maps; long-press copies the coordinates (MapsLink.kt).
  */
 class FinalImageActivity : AppCompatActivity() {
 
@@ -144,6 +147,9 @@ class FinalImageActivity : AppCompatActivity() {
 
     private lateinit var view: FinalImageView
     private lateinit var title: TextView
+    // maps-v1: the candidate's coordinates once the image is built (tap the title -> Google Maps)
+    private var candLat: Double? = null
+    private var candLon: Double? = null
     private lateinit var info: TextView
     private lateinit var legendBar: View
     private lateinit var legendText: TextView
@@ -327,6 +333,16 @@ class FinalImageActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(col(R.color.ariyan_text_primary))
             setPadding(pad, pad, pad, pad / 4)
+            // maps-v1 (2026-11-02): tap = open in Google Maps, long-press = copy the coordinates
+            setOnClickListener {
+                val la = candLat; val lo = candLon
+                if (la != null && lo != null) MapsLink.open(this@FinalImageActivity, la, lo, candidateId.take(8))
+            }
+            setOnLongClickListener {
+                val la = candLat; val lo = candLon
+                if (la != null && lo != null) MapsLink.copy(this@FinalImageActivity, la, lo)
+                true
+            }
         }
         root.addView(title)
 
@@ -2011,7 +2027,8 @@ class FinalImageActivity : AppCompatActivity() {
         view.setImage(bmp, m.optDouble("cell_dx_m", nativeRes), keepView)
         baseBmp = bmp   // s3d-v1: the 2D view owns it; the 3D view takes a copy
         pendingGround?.let { view.restoreGround(it); pendingGround = null }   // fi-v2.2: after a rebuild
-        title.text = String.format(Locale.US, "Final Image \u00B7 %s  (%.5f, %.5f)",
+        candLat = m.getDouble("lat"); candLon = m.getDouble("lon")
+        title.text = String.format(Locale.US, "Final Image \u00B7 %s  (%.5f, %.5f) \u2197",
             candidateId.take(8), m.getDouble("lat"), m.getDouble("lon"))
         updateLegend(m)
         updateNotes(m)

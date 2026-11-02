@@ -29,6 +29,7 @@ import java.util.Locale
  * look at True colour; then record what you saw with one of the verdict chips.
  * A verdict is a note only: it never changes a status, review, confidence or
  * evidence row. The counts at the top are what a later rule decision rests on.
+ * maps-v1: each card also opens its coordinates in Google Maps (MapsLink).
  */
 class SpotCheckActivity : AppCompatActivity() {
 
@@ -164,6 +165,11 @@ class SpotCheckActivity : AppCompatActivity() {
         if (!r.isNull("known_site")) head.addView(text(r.optString("known_site"), 12f, col(R.color.ariyan_text_secondary)))
         head.addView(text("Tap to open its Final Image \u203A", 12f, AriyanDecor.TEAL, bold = true).apply { setPadding(0, px(4), 0, 0) })
         card.addView(head)
+        // maps-v1: a sharper look in Google Maps (10 m Sentinel-2 hides small tanks)
+        card.addView(text("Open in Google Maps \u2197", 12f, AriyanDecor.BLUE, bold = true).apply {
+            setPadding(0, px(6), 0, 0); isClickable = true
+            setOnClickListener { MapsLink.open(this@SpotCheckActivity, r.optDouble("lat"), r.optDouble("lon"), cid.take(8)) }
+        })
         val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, px(8), 0, 0) }
         names.keys().forEach { k ->
             val c = verdictColours[k] ?: AriyanDecor.ACCENT
