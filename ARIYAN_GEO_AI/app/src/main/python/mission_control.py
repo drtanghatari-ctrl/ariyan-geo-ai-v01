@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 
 import grand_project_db as db
 
-VERSION = "mc-v1"
+VERSION = "mc-v1.1"
 DEBATE_VERSION = "dbe-v1"
 DEFAULT_PROJECT_ID = "default"          # grand_project_sync.DEFAULT_GRAND_PROJECT_ID
 
@@ -118,7 +118,7 @@ def _data_sources(db_root: str, conn) -> List[Dict[str, Any]]:
     except OSError:
         pass
     out.append({"name": "Terrain DEM, bulk COP30 (Pass 1)", "ok": bulk["files"] > 0,
-                "detail": "%d tile(s), %.1f GB" % (bulk["files"], bulk["bytes"] / 1e9)})
+                "detail": "{:,} tile(s), {:.1f} GB".format(bulk["files"], bulk["bytes"] / 1e9)})
     for demtype in ("SRTMGL1", "COP30"):
         c = _count_files(os.path.join(db_root, "dem_library", demtype))
         out.append({"name": "DEM library %s (Pass 2)" % demtype, "ok": c["files"] > 0,
@@ -141,7 +141,7 @@ def _data_sources(db_root: str, conn) -> List[Dict[str, Any]]:
     except OSError:
         pass
     out.append({"name": "Satellite answers saved (NDVI/thermal/SAR/optical)", "ok": sat > 0,
-                "detail": "%d saved answer(s); new ones are fetched online" % sat})
+                "detail": "{:,} saved answer(s); new ones are fetched online".format(sat)})
     n_field = 0
     if _has_table(conn, "field_dataset"):
         n_field = conn.execute("SELECT COUNT(*) FROM field_dataset").fetchone()[0]
@@ -210,6 +210,11 @@ def mission(db_root: str, top_n: int = 10) -> Dict[str, Any]:
             band_counts[_band(r["confidence_band"])] += r["n"]
         rated = [b for b in BAND_ORDER if b != "NO_DATA" and band_counts[b] > 0]
         highest = rated[0] if rated else None
+        highest_numeric = None
+        if highest:
+            highest_numeric = conn.execute(
+                "SELECT MAX(confidence_numeric) FROM candidate WHERE grand_project_id = ? AND status != 'REJECTED' "
+                "AND UPPER(confidence_band) = ?", (gid, highest)).fetchone()[0]
 
         rows = [dict(r) for r in conn.execute(
             "SELECT c.id, c.lat, c.lon, c.status, c.score, c.confidence_band, c.confidence_numeric, "
@@ -267,6 +272,7 @@ def mission(db_root: str, top_n: int = 10) -> Dict[str, Any]:
                       for b in BAND_ORDER + [NOT_RATED]],
             "active_candidates": total_active, "rejected": status_counts.get("Rejected", 0),
             "highest": highest, "highest_ceiling": BAND_CEILING.get(highest) if highest else None,
+            "highest_numeric": highest_numeric,
             "why": CEILING_RULES.get(highest, "") if highest else "No candidate has a Steward rating yet.",
             "steward_words": ceiling_lines},
         "top": targets, "debates_stored": n_debates, "sources": sources,
