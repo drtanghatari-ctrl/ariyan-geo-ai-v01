@@ -6,8 +6,6 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
-import android.graphics.Canvas
-import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -15,7 +13,8 @@ import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
-import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -31,16 +30,21 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * mc-v1 (2026-11-02): Mission Control, the screen the app opens on.
+ * Mission Control, the screen the app opens on.
  *
- * A hub and a read-only summary. Every module tile opens a real, existing
- * screen (the single-point Investigation screen is unchanged and is one of the
- * tiles). Everything shown comes from mission_control.mission_json(): the
- * study area, candidates per Steward band with the real ceiling and its reason
- * (no invented percentage), the best candidates (tap -> Final Image), and the
- * data that really exists on the phone. API keys are checked here and only
- * shown as "set" / "not set", never their values. Nothing here changes a
- * status, a review or a confidence.
+ * mc-v1 (2026-11-02): a hub and a read-only summary. Every module tile opens a
+ * real, existing screen (the single-point Investigation screen is unchanged and
+ * is one of the tiles). Everything shown comes from mission_control.mission_json():
+ * the study area, candidates per Steward band with the real ceiling and its
+ * reason, the best candidates (tap -> Final Image), and the data that really
+ * exists on the phone. API keys are only shown as "set" / "not set". Nothing
+ * here changes a status, a review or a confidence.
+ *
+ * mc-v1.1 (2026-11-02): decorated like the mock-up (AriyanDecor.kt): header
+ * banner, tab strip, stat boxes, a round confidence gauge whose needle sits on
+ * the highest STORED confidence, glyph tiles, ranked target cards with
+ * rediscovery / calib-v1 chips, data-source rows, principle chips. Landscape
+ * pairs the cards in two columns.
  *
  * "Last Final Image": the candidate of the last Final Image screen opened in
  * this process is remembered in SharedPreferences through an activity
@@ -74,23 +78,24 @@ class MissionControlActivity : AppCompatActivity() {
             })
         }
 
-        val BAND_COLOURS = mapOf(
-            "SUBSTANTIAL" to 0xFF2E7D32.toInt(), "HIGH" to 0xFF3FB68B.toInt(),
-            "MODERATE" to 0xFFD9A62B.toInt(), "LOW" to 0xFFD9822B.toInt(),
-            "NO_DATA" to 0xFF6E7681.toInt(), "NOT_RATED" to 0xFF3A414A.toInt()
-        )
+        val BAND_COLOURS = AriyanDecor.BAND_COLOURS
         val BAND_NAMES = mapOf(
             "SUBSTANTIAL" to "Substantial", "HIGH" to "High", "MODERATE" to "Moderate", "LOW" to "Low",
             "NO_DATA" to "No data", "NOT_RATED" to "Not rated yet"
         )
+        val STATUS_COLOURS = mapOf(
+            "Supported" to AriyanDecor.ACCENT, "Open" to AriyanDecor.BLUE,
+            "Inconclusive" to AriyanDecor.AMBER, "Rejected" to AriyanDecor.ROSE
+        )
     }
 
-    private class Tile(val title: String, val sub: String, val action: () -> Unit)
+    private class Tile(val title: String, val sub: String, val glyph: String, val colour: Int, val action: () -> Unit)
 
     private lateinit var python: Python
     private val offlineDataRoot: String by lazy { ExternalStorageAccess.offlineDataRoot().absolutePath }
     private lateinit var content: LinearLayout
     private val d by lazy { resources.displayMetrics.density }
+    private val landscape get() = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     private fun px(v: Int) = (v * d).toInt()
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
@@ -100,7 +105,7 @@ class MissionControlActivity : AppCompatActivity() {
         python = Python.getInstance()
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(px(12), px(12), px(12), px(20))
+            setPadding(px(12), px(10), px(12), px(24))
         }
         setContentView(ScrollView(this).apply {
             setBackgroundColor(col(R.color.ariyan_bg))
@@ -118,9 +123,12 @@ class MissionControlActivity : AppCompatActivity() {
     private fun load() {
         content.removeAllViews()
         header()
+        tabStrip()
         if (!ExternalStorageAccess.isGranted(this)) permissionCard()
         tiles(null)
-        val loading = text("Loading recorded results\u2026", 13f, R.color.ariyan_text_secondary)
+        val loading = text("Loading recorded results\u2026", 13f, col(R.color.ariyan_text_secondary)).apply {
+            setPadding(px(4), px(8), 0, 0)
+        }
         content.addView(loading)
         lifecycleScope.launch {
             val o = withContext(Dispatchers.Default) {
@@ -132,7 +140,7 @@ class MissionControlActivity : AppCompatActivity() {
             }
             content.removeView(loading)
             if (o.has("error")) {
-                content.addView(card("COULD NOT READ THE PROJECT").apply {
+                content.addView(panel("COULD NOT READ THE PROJECT", "steward", AriyanDecor.ROSE).apply {
                     line(this, o.optString("error"), true)
                     line(this, "The module tiles above still work. If this mentions the database guard, " +
                         "restore from offline_data/db_backups/ before running anything.")
@@ -145,32 +153,90 @@ class MissionControlActivity : AppCompatActivity() {
     }
 
     private fun render(o: JSONObject) {
-        // replace the placeholder tiles with ones that know the debate count
         content.removeAllViews()
         header()
+        tabStrip()
         if (!ExternalStorageAccess.isGranted(this)) permissionCard()
-        studyArea(o)
+        pair(studyArea(o), assessment(o))
         tiles(o)
-        confidence(o)
-        targets(o)
-        sources(o)
+        pair(targets(o), sources(o))
         footer(o)
+    }
+
+    /** Two panels side by side in landscape, stacked in portrait. */
+    private fun pair(a: View?, b: View?) {
+        val views = listOfNotNull(a, b)
+        if (!landscape || views.size < 2) {
+            views.forEach { content.addView(it) }
+            return
+        }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        views.forEachIndexed { i, v ->
+            row.addView(v, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(if (i == 0) 0 else px(5), px(6), if (i == 0) px(5) else 0, px(6))
+            })
+        }
+        content.addView(row)
     }
 
     // ---------------------------------------------------------------- blocks
 
     private fun header() {
-        content.addView(text("ARIYAN GEO AI", 24f, R.color.ariyan_text_primary, bold = true))
-        content.addView(text("Evidence. Reasoning. Confidence.", 13f, R.color.ariyan_accent).apply {
-            setPadding(0, 0, 0, px(10))
+        val frame = FrameLayout(this)
+        frame.addView(AriyanDecor.HeaderBanner(this), FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(px(16), px(16), px(16), px(16))
+        }
+        val titleRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        titleRow.addView(AriyanDecor.Glyph(this, "target", AriyanDecor.ACCENT), LinearLayout.LayoutParams(px(30), px(30)))
+        titleRow.addView(text("ARIYAN GEO AI", 24f, col(R.color.ariyan_text_primary), bold = true).apply {
+            setPadding(px(10), 0, 0, 0); letterSpacing = 0.04f
         })
+        box.addView(titleRow)
+        box.addView(text("Scientific Geospatial Laboratory", 13f, col(R.color.ariyan_text_secondary)).apply {
+            setPadding(px(40), 0, 0, 0)
+        })
+        box.addView(text("Evidence.  Reasoning.  Confidence.", 14f, AriyanDecor.ACCENT, bold = true).apply {
+            setPadding(px(40), px(8), 0, 0); letterSpacing = 0.05f
+        })
+        frame.addView(box)
+        content.addView(frame, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = px(8) })
+    }
+
+    private fun tabStrip() {
+        val last = lastFinalImage()
+        val tabs = listOf<Pair<String, (() -> Unit)?>>(
+            "Mission Control" to null,
+            "Investigation" to { go(MainActivity::class.java) },
+            "Data & Evidence" to { go(OfflineDataActivity::class.java) },
+            "AI Debate Engine" to { go(DebateEngineActivity::class.java) },
+            "Image Processing" to { openLastFinalImage(last) },
+            "Report & Archive" to { go(GrandProjectActivity::class.java) },
+            "Wide-area search" to { go(WideAreaSearchActivity::class.java) },
+            "Historical research" to { go(HistoricalResearchActivity::class.java) }
+        )
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 0, 0, px(4)) }
+        tabs.forEach { (name, action) ->
+            val active = action == null
+            row.addView(text(name, 13f, if (active) col(R.color.ariyan_bg) else col(R.color.ariyan_text_primary), bold = active).apply {
+                setPadding(px(14), px(8), px(14), px(8))
+                background = AriyanDecor.pill(d, if (active) AriyanDecor.ACCENT else AriyanDecor.SURFACE,
+                    if (active) null else AriyanDecor.LINE)
+                if (action != null) { isClickable = true; setOnClickListener { action() } }
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = px(6) })
+        }
+        content.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(row) })
     }
 
     private fun permissionCard() {
-        content.addView(card("STORAGE ACCESS NEEDED").apply {
+        content.addView(panel("STORAGE ACCESS NEEDED", "data", AriyanDecor.ROSE).apply {
             line(this, "ARIYAN keeps its database and offline data in ARIYAN_GEO_AI/offline_data. " +
                 "Without \u201CAll files access\u201D nothing can be read.", true)
-            addView(button("Grant access") {
+            addView(actionPill("Grant access", AriyanDecor.ROSE) {
                 try {
                     startActivity(
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
@@ -184,50 +250,105 @@ class MissionControlActivity : AppCompatActivity() {
         })
     }
 
-    private fun studyArea(o: JSONObject) {
+    private fun studyArea(o: JSONObject): View {
         val p = o.optJSONObject("project")
-        content.addView(card("STUDY AREA").apply {
+        return panel("STUDY AREA", "layers", AriyanDecor.TEAL).apply {
             if (p == null) {
                 line(this, o.optString("empty_note"), true)
+                addView(actionPill("Open Investigation", AriyanDecor.ACCENT) { go(MainActivity::class.java) })
                 return@apply
             }
-            line(this, p.optString("name"), true)
-            line(this, String.format(Locale.US, "%,d wide-area jobs%s  \u00B7  %,d investigations",
-                p.optInt("jobs"),
-                if (p.optInt("jobs_unfinished") > 0) " (${p.optInt("jobs_unfinished")} not finished)" else "",
-                p.optInt("investigations")))
+            addView(text(p.optString("name"), 17f, col(R.color.ariyan_text_primary), bold = true).apply {
+                setPadding(0, px(6), 0, px(6))
+            })
+            val stats = LinearLayout(this@MissionControlActivity).apply { orientation = LinearLayout.HORIZONTAL }
+            listOf(
+                Triple(p.optInt("jobs"), plural(p.optInt("jobs"), "Job", "Jobs"), AriyanDecor.TEAL),
+                Triple(p.optInt("investigations"), plural(p.optInt("investigations"), "Investigation", "Investigations"), AriyanDecor.BLUE),
+                Triple(p.optInt("candidates"), plural(p.optInt("candidates"), "Candidate", "Candidates"), AriyanDecor.AMBER)
+            ).forEachIndexed { i, (n, label, c) ->
+                stats.addView(statBox(n, label, c), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    if (i > 0) leftMargin = px(6)
+                })
+            }
+            addView(stats)
+            if (p.optInt("jobs_unfinished") > 0) {
+                line(this, String.format(Locale.US, "%d %s not finished", p.optInt("jobs_unfinished"),
+                    plural(p.optInt("jobs_unfinished"), "job", "jobs")))
+            }
             val sc = p.optJSONObject("status_counts") ?: JSONObject()
-            val parts = listOf("Supported", "Open", "Inconclusive", "Rejected")
-                .filter { sc.has(it) }.joinToString("  \u00B7  ") { String.format(Locale.US, "%s %,d", it, sc.optInt(it)) }
-            line(this, String.format(Locale.US, "%,d candidates: %s", p.optInt("candidates"), parts))
+            val chips = listOf("Supported", "Open", "Inconclusive", "Rejected").filter { sc.has(it) }
+                .map { chip(String.format(Locale.US, "%s %,d", it, sc.optInt(it)), STATUS_COLOURS[it] ?: AriyanDecor.ACCENT) }
+            chipRows(this, chips, 2)
             nz(p, "last_activity")?.let { line(this, "Last activity: " + it.take(16).replace("T", " ") + " UTC") }
-        })
+            addView(actionPill("Open Investigation", AriyanDecor.ACCENT) { go(MainActivity::class.java) })
+        }
+    }
+
+    private fun assessment(o: JSONObject): View? {
+        val c = o.optJSONObject("confidence") ?: return null
+        val bands = c.optJSONArray("bands") ?: return null
+        return panel("FINAL SCIENTIFIC ASSESSMENT", "steward", AriyanDecor.AMBER).apply {
+            val highest = nz(c, "highest")
+            val value = if (c.isNull("highest_numeric")) null else c.optDouble("highest_numeric")
+            addView(AriyanDecor.Gauge(this@MissionControlActivity, value, highest),
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = px(6)
+                })
+            addView(text(if (highest != null) "Highest stored confidence \u00B7 band ceiling " +
+                String.format(Locale.US, "%.2f", c.optDouble("highest_ceiling")) else "No candidate has a Steward rating yet.",
+                12f, col(R.color.ariyan_text_secondary)).apply { gravity = Gravity.CENTER })
+            val segs = (0 until bands.length()).map { bands.getJSONObject(it) }.map { it.optString("band") to it.optInt("count") }
+            addView(AriyanDecor.CountBar(this@MissionControlActivity, segs.map { (BAND_COLOURS[it.first] ?: AriyanDecor.LINE) to it.second }),
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, px(12)).apply { topMargin = px(10) })
+            chipRows(this, segs.filter { it.second > 0 }.map { (b, n) ->
+                chip(String.format(Locale.US, "%s %,d", BAND_NAMES[b] ?: b, n), BAND_COLOURS[b] ?: AriyanDecor.LINE)
+            }, 2)
+            line(this, String.format(Locale.US, "%,d active %s; %,d Rejected not counted.", c.optInt("active_candidates"),
+                plural(c.optInt("active_candidates"), "candidate", "candidates"), c.optInt("rejected")))
+            nz(c, "why")?.let { line(this, "Why not higher: $it", true) }
+            val words = c.optJSONArray("steward_words")
+            if (words != null && words.length() > 0) {
+                val quote = LinearLayout(this@MissionControlActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(px(10), px(6), px(8), px(6))
+                    background = GradientDrawable().apply {
+                        cornerRadius = 8 * d; setColor(AriyanDecor.withAlpha(AriyanDecor.AMBER, 22))
+                    }
+                }
+                quote.addView(text("THE STEWARD (top candidate)", 11f, AriyanDecor.AMBER, bold = true))
+                for (i in 0 until words.length()) {
+                    quote.addView(text("\u201C" + words.optString(i) + "\u201D", 13f, col(R.color.ariyan_text_primary)).apply {
+                        setTypeface(typeface, Typeface.ITALIC); setPadding(0, px(3), 0, 0)
+                    })
+                }
+                addView(quote, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = px(8) })
+            }
+        }
     }
 
     private fun tiles(o: JSONObject?) {
-        val last = getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LAST_FINAL_IMAGE, null)
+        val last = lastFinalImage()
         val debates = o?.optInt("debates_stored", -1) ?: -1
         val items = listOf(
-            Tile("Investigation", "Single point + AI debate") { go(MainActivity::class.java) },
-            Tile("Wide-area search", "Jobs, Auto run, DEM library") { go(WideAreaSearchActivity::class.java) },
-            Tile("Grand Project", "Candidates, reviews, reports") { go(GrandProjectActivity::class.java) },
-            Tile("Data & Evidence", "Offline country data") { go(OfflineDataActivity::class.java) },
-            Tile("Historical research", "Texts and place names") { go(HistoricalResearchActivity::class.java) },
+            Tile("Investigation", "Single point + AI debate", "target", AriyanDecor.ACCENT) { go(MainActivity::class.java) },
+            Tile("Wide-area search", "Jobs, Auto run, DEM library", "grid", AriyanDecor.TEAL) { go(WideAreaSearchActivity::class.java) },
+            Tile("Grand Project", "Candidates, reviews, reports", "stack", AriyanDecor.BLUE) { go(GrandProjectActivity::class.java) },
+            Tile("Data & Evidence", "Offline country data", "data", AriyanDecor.VIOLET) { go(OfflineDataActivity::class.java) },
+            Tile("Historical research", "Texts and place names", "book", AriyanDecor.AMBER) { go(HistoricalResearchActivity::class.java) },
             Tile("AI Debate Engine",
-                if (debates >= 0) String.format(Locale.US, "%,d stored debates", debates) else "Stored debates") {
-                go(DebateEngineActivity::class.java)
-            },
-            Tile("Last Final Image",
-                if (last != null) "Candidate " + last.take(8) else "None opened yet") {
-                if (last != null) startActivity(FinalImageActivity.newIntent(this, last))
-            }
+                if (debates >= 0) String.format(Locale.US, "%,d stored %s", debates, plural(debates, "debate", "debates"))
+                else "Stored debates", "debate", AriyanDecor.ROSE) { go(DebateEngineActivity::class.java) },
+            Tile("Last Final Image", if (last != null) "Candidate " + last.take(8) else "None opened yet",
+                "mountain", AriyanDecor.ORANGE) { openLastFinalImage(last) }
         )
-        val cols = if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) 4 else 2
+        val cols = if (landscape) 4 else 2
         content.addView(sectionTitle("MODULES"))
         items.chunked(cols).forEach { chunk ->
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             chunk.forEach { t ->
-                row.addView(tile(t.title, t.sub, t.action), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply {
+                row.addView(tile(t), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f).apply {
                     setMargins(px(3), px(3), px(3), px(3))
                 })
             }
@@ -236,109 +357,88 @@ class MissionControlActivity : AppCompatActivity() {
             }
             content.addView(row)
         }
-        content.addView(View(this), LinearLayout.LayoutParams(1, px(8)))
+        content.addView(View(this), LinearLayout.LayoutParams(1, px(6)))
     }
 
-    private fun confidence(o: JSONObject) {
-        val c = o.optJSONObject("confidence") ?: return
-        val bands = c.optJSONArray("bands") ?: return
-        content.addView(card("FINAL SCIENTIFIC ASSESSMENT").apply {
-            val highest = nz(c, "highest")
-            if (highest != null) {
-                addView(text("Highest band reached: " + (BAND_NAMES[highest] ?: highest), 17f,
-                    R.color.ariyan_text_primary, bold = true).apply {
-                    setTextColor(BAND_COLOURS[highest] ?: col(R.color.ariyan_text_primary))
-                })
-                line(this, String.format(Locale.US, "Ceiling for this band: %.2f", c.optDouble("highest_ceiling")), true)
-            } else {
-                line(this, "No candidate has a Steward rating yet.", true)
-            }
-            val segs = (0 until bands.length()).map { bands.getJSONObject(it) }
-                .map { it.optString("band") to it.optInt("count") }
-            addView(BandBar(this@MissionControlActivity, segs),
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, px(18)).apply { topMargin = px(8) })
-            segs.filter { it.second > 0 }.forEach { (b, n) ->
-                addView(text(String.format(Locale.US, "\u25A0 %s  %,d", BAND_NAMES[b] ?: b, n), 13f,
-                    R.color.ariyan_text_secondary).apply {
-                    setTextColor(BAND_COLOURS[b] ?: col(R.color.ariyan_text_secondary)); setPadding(0, px(3), 0, 0)
-                })
-            }
-            line(this, String.format(Locale.US, "%,d active candidates; %,d Rejected not counted.",
-                c.optInt("active_candidates"), c.optInt("rejected")))
-            nz(c, "why")?.let { line(this, "Why not higher: $it", true) }
-            val words = c.optJSONArray("steward_words")
-            if (words != null && words.length() > 0) {
-                line(this, "The Steward's own words (top candidate):")
-                for (i in 0 until words.length()) line(this, "\u201C" + words.optString(i) + "\u201D")
-            }
-        })
-    }
-
-    private fun targets(o: JSONObject) {
-        val top = o.optJSONArray("top") ?: return
-        content.addView(card("CANDIDATE TARGETS").apply {
+    private fun targets(o: JSONObject): View? {
+        val top = o.optJSONArray("top") ?: return null
+        return panel("CANDIDATE TARGETS", "target", AriyanDecor.ACCENT).apply {
             if (top.length() == 0) {
                 line(this, "No candidates yet (Rejected ones are left out).", true)
                 return@apply
             }
             line(this, "Best by Steward band, confidence, Supported first, then |z|. Tap one to open its Final Image.")
-            for (i in 0 until top.length()) {
-                val t = top.getJSONObject(i)
-                val band = t.optString("band")
-                val row = LinearLayout(this@MissionControlActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(px(8), px(7), px(8), px(7))
-                    background = GradientDrawable().apply {
-                        setCornerRadius(8 * d); setColor(col(R.color.ariyan_surface))
-                    }
-                    isClickable = true
-                    setOnClickListener {
-                        startActivity(FinalImageActivity.newIntent(this@MissionControlActivity, t.getString("id")))
-                    }
-                }
-                val conf = if (t.isNull("numeric")) BAND_NAMES[band] ?: band
-                    else String.format(Locale.US, "%s %.2f", BAND_NAMES[band] ?: band, t.optDouble("numeric"))
-                row.addView(text(String.format(Locale.US, "%d. %s  \u00B7  %s  \u00B7  %s", i + 1,
-                    t.getString("id").take(8), conf, t.optString("status")), 14f, R.color.ariyan_text_primary, bold = true).apply {
-                    setTextColor(BAND_COLOURS[band] ?: col(R.color.ariyan_text_primary))
-                })
-                val z = if (t.isNull("z")) "" else String.format(Locale.US, "  \u00B7  |z| %.1f", Math.abs(t.optDouble("z")))
-                row.addView(text(String.format(Locale.US, "%.5f, %.5f%s%s", t.optDouble("lat"), t.optDouble("lon"), z,
-                    if (t.optBoolean("calib_strong")) "  \u00B7  calib-v1 strong" else ""), 12f, R.color.ariyan_text_secondary))
-                (nz(t, "job_title") ?: if (nz(t, "job_id") == null) "single investigation" else null)?.let {
-                    row.addView(text("Job: $it", 12f, R.color.ariyan_text_secondary))
-                }
-                nz(t, "known_site")?.let { row.addView(text(it, 12f, R.color.ariyan_text_secondary)) }
-                addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = px(6) })
-            }
-        })
+            for (i in 0 until top.length()) addView(targetCard(i + 1, top.getJSONObject(i)),
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = px(8) })
+        }
     }
 
-    private fun sources(o: JSONObject) {
-        val src = o.optJSONArray("sources") ?: return
+    private fun targetCard(rank: Int, t: JSONObject): View {
+        val band = t.optString("band")
+        val bc = BAND_COLOURS[band] ?: AriyanDecor.LINE
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(AriyanDecor.withAlpha(bc, 34), AriyanDecor.SURFACE)).apply {
+                cornerRadius = 10 * d; setStroke(maxOf(1, d.toInt()), AriyanDecor.withAlpha(bc, 90))
+            }
+            isClickable = true
+            setOnClickListener { startActivity(FinalImageActivity.newIntent(this@MissionControlActivity, t.getString("id"))) }
+        }
+        card.addView(View(this).apply { setBackgroundColor(bc) }, LinearLayout.LayoutParams(px(4), LinearLayout.LayoutParams.MATCH_PARENT))
+        card.addView(text(rank.toString(), 14f, col(R.color.ariyan_bg), bold = true).apply {
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(bc) }
+        }, LinearLayout.LayoutParams(px(28), px(28)).apply { setMargins(px(10), px(10), px(4), 0) })
+        val body = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(px(6), px(8), px(10), px(9)) }
+        val conf = if (t.isNull("numeric")) BAND_NAMES[band] ?: band
+            else String.format(Locale.US, "%s %.2f", BAND_NAMES[band] ?: band, t.optDouble("numeric"))
+        body.addView(text(t.getString("id").take(8) + "  \u00B7  " + conf, 15f, bc, bold = true))
+        val z = if (t.isNull("z")) "" else String.format(Locale.US, "  \u00B7  |z| %.1f", Math.abs(t.optDouble("z")))
+        body.addView(text(String.format(Locale.US, "%.5f, %.5f%s", t.optDouble("lat"), t.optDouble("lon"), z), 12f,
+            col(R.color.ariyan_text_secondary)))
+        (nz(t, "job_title") ?: if (nz(t, "job_id") == null) "single investigation" else null)?.let {
+            body.addView(text("Job: $it", 12f, col(R.color.ariyan_text_secondary)))
+        }
+        val ks = nz(t, "known_site")
+        val chips = mutableListOf(chip(t.optString("status"), STATUS_COLOURS[t.optString("status")] ?: AriyanDecor.ACCENT, small = true))
+        if (t.optBoolean("calib_strong")) chips += chip("calib-v1 strong", AriyanDecor.TEAL, small = true)
+        if (ks != null && ks.contains("likely rediscovery")) chips += chip("likely rediscovery", AriyanDecor.VIOLET, small = true)
+        chipRows(body, chips, 3)
+        ks?.let { body.addView(text(it, 12f, col(R.color.ariyan_text_secondary)).apply { setPadding(0, px(4), 0, 0) }) }
+        card.addView(body, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        return card
+    }
+
+    private fun sources(o: JSONObject): View? {
+        val src = o.optJSONArray("sources") ?: return null
         val creds = SecureCredentialStore(this)
-        content.addView(card("DATA SOURCES (on this phone)").apply {
+        val glyphs = listOf("mountain", "mountain", "mountain", "layers", "grid", "target", "steward", "data")
+        return panel("DATA SOURCES (on this phone)", "data", AriyanDecor.VIOLET).apply {
             for (i in 0 until src.length()) {
                 val s = src.getJSONObject(i)
-                status(this, s.optBoolean("ok"), s.optString("name"), s.optString("detail"))
+                sourceRow(this, s.optBoolean("ok"), s.optString("name"), s.optString("detail"), glyphs.getOrElse(i) { "data" })
             }
-            status(this, creds.activeOpenTopographyApiKey().isNotEmpty(), "OpenTopography key",
-                if (creds.activeOpenTopographyApiKey().isNotEmpty()) "set" else "not set (live DEM unavailable)")
-            status(this, creds.activeCopernicusClientId().isNotEmpty(), "Copernicus key",
-                if (creds.activeCopernicusClientId().isNotEmpty()) "set" else "not set (satellite evidence unavailable)")
-        })
+            val ot = creds.activeOpenTopographyApiKey().isNotEmpty()
+            val cp = creds.activeCopernicusClientId().isNotEmpty()
+            sourceRow(this, ot, "OpenTopography key", if (ot) "set" else "not set (live DEM unavailable)", "steward")
+            sourceRow(this, cp, "Copernicus key", if (cp) "set" else "not set (satellite evidence unavailable)", "steward")
+        }
     }
 
     private fun footer(o: JSONObject?) {
         val principles = o?.optJSONArray("principles")
         val names = if (principles != null) (0 until principles.length()).map { principles.optString(it) }
             else listOf("Real Data Only", "Scientific Integrity", "No Synthetic Data", "Uncertainty Quantified", "Human Oversight")
-        content.addView(text(names.joinToString("  \u00B7  "), 12f, R.color.ariyan_accent, bold = true).apply {
-            gravity = Gravity.CENTER; setPadding(0, px(14), 0, px(4))
-        })
+        content.addView(sectionTitle("PRINCIPLES").apply { setPadding(px(3), px(16), 0, px(2)) })
+        val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        chipRows(holder, names.map { chip("\u2713 $it", AriyanDecor.ACCENT) }, if (landscape) 5 else 2)
+        content.addView(holder)
         o?.let { nz(it, "statement") }?.let {
-            content.addView(text(it, 11f, R.color.ariyan_text_secondary).apply { gravity = Gravity.CENTER })
+            content.addView(text(it, 11f, col(R.color.ariyan_text_secondary)).apply {
+                gravity = Gravity.CENTER; setPadding(px(8), px(10), px(8), 0)
+            })
         }
     }
 
@@ -346,75 +446,117 @@ class MissionControlActivity : AppCompatActivity() {
 
     private fun go(cls: Class<*>) = startActivity(Intent(this, cls))
 
+    private fun lastFinalImage(): String? =
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LAST_FINAL_IMAGE, null)
+
+    private fun openLastFinalImage(last: String?) {
+        if (last != null) startActivity(FinalImageActivity.newIntent(this, last))
+        else android.widget.Toast.makeText(this, "Open a candidate's Final Image once; it will appear here.",
+            android.widget.Toast.LENGTH_LONG).show()
+    }
+
+    private fun plural(n: Int, one: String, many: String) = if (n == 1) one else many
+
     private fun nz(o: JSONObject, k: String): String? = o.optString(k).takeIf { !o.isNull(k) && it.isNotBlank() && it != "null" }
 
     private fun text(s: String, size: Float, colour: Int, bold: Boolean = false) = TextView(this).apply {
-        text = s; textSize = size; setTextColor(col(colour))
+        text = s; textSize = size; setTextColor(colour)
         if (bold) typeface = Typeface.DEFAULT_BOLD
     }
 
-    private fun sectionTitle(s: String) = text(s, 12f, R.color.ariyan_text_secondary, bold = true).apply {
-        setPadding(px(3), px(6), 0, px(2))
+    private fun sectionTitle(s: String) = text(s, 12f, col(R.color.ariyan_text_secondary), bold = true).apply {
+        setPadding(px(3), px(8), 0, px(2)); letterSpacing = 0.08f
     }
 
-    private fun card(title: String): LinearLayout = LinearLayout(this).apply {
+    private fun panel(title: String, glyph: String, tint: Int): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(px(12), px(10), px(12), px(12))
-        background = GradientDrawable().apply {
-            setCornerRadius(10 * d); setColor(col(R.color.ariyan_surface))
-            setStroke(maxOf(1, d.toInt()), 0xFF30363D.toInt())
-        }
+        setPadding(px(14), px(12), px(14), px(14))
+        background = AriyanDecor.panel(d, tint)
         layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, px(6), 0, px(6)) }
-        addView(text(title, 13f, R.color.ariyan_accent, bold = true))
+        val head = LinearLayout(this@MissionControlActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        head.addView(AriyanDecor.Glyph(this@MissionControlActivity, glyph, tint), LinearLayout.LayoutParams(px(20), px(20)))
+        head.addView(text(title, 13f, tint, bold = true).apply { setPadding(px(8), 0, 0, 0); letterSpacing = 0.06f })
+        addView(head)
     }
 
     private fun line(box: LinearLayout, s: String, primary: Boolean = false) {
-        box.addView(text(s, 13f, if (primary) R.color.ariyan_text_primary else R.color.ariyan_text_secondary).apply {
-            setPadding(0, px(4), 0, 0)
+        box.addView(text(s, 13f, col(if (primary) R.color.ariyan_text_primary else R.color.ariyan_text_secondary)).apply {
+            setPadding(0, px(6), 0, 0)
         })
     }
 
-    private fun status(box: LinearLayout, ok: Boolean, name: String, detail: String) {
-        box.addView(text((if (ok) "\u2713  " else "\u2717  ") + name, 13f, R.color.ariyan_text_primary).apply {
-            setTextColor(if (ok) col(R.color.ariyan_accent) else col(R.color.ariyan_warn)); setPadding(0, px(6), 0, 0)
-        })
-        box.addView(text("     $detail", 12f, R.color.ariyan_text_secondary))
-    }
-
-    private fun tile(title: String, sub: String, action: () -> Unit) = LinearLayout(this).apply {
+    private fun statBox(n: Int, label: String, c: Int) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(px(10), px(12), px(10), px(12))
-        background = GradientDrawable().apply {
-            setCornerRadius(10 * d); setColor(col(R.color.ariyan_surface))
-            setStroke(maxOf(1, d.toInt()), 0xFF30363D.toInt())
+        gravity = Gravity.CENTER_HORIZONTAL
+        setPadding(px(4), px(8), px(4), px(8))
+        background = GradientDrawable().apply { cornerRadius = 10 * d; setColor(AriyanDecor.withAlpha(c, 30)) }
+        addView(text(String.format(Locale.US, "%,d", n), 18f, c, bold = true).apply { gravity = Gravity.CENTER })
+        addView(text(label, 11f, col(R.color.ariyan_text_secondary)).apply { gravity = Gravity.CENTER })
+    }
+
+    private fun chip(s: String, c: Int, small: Boolean = false) = text(s, if (small) 11f else 12f, c, bold = true).apply {
+        setPadding(px(10), px(if (small) 3 else 5), px(10), px(if (small) 3 else 5))
+        background = AriyanDecor.pill(d, AriyanDecor.withAlpha(c, 34), AriyanDecor.withAlpha(c, 110))
+        gravity = Gravity.CENTER
+    }
+
+    /** Lays chips out in rows of up to perRow (no flow layout on the platform). */
+    private fun chipRows(box: LinearLayout, chips: List<View>, perRow: Int) {
+        chips.chunked(perRow).forEach { chunk ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            chunk.forEach { v ->
+                row.addView(v, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, px(6), px(6), 0) })
+            }
+            box.addView(row)
         }
+    }
+
+    private fun actionPill(label: String, c: Int, action: () -> Unit) = text(label, 14f, col(R.color.ariyan_bg), bold = true).apply {
+        gravity = Gravity.CENTER
+        setPadding(px(16), px(10), px(16), px(10))
+        background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+            intArrayOf(c, AriyanDecor.withAlpha(c, 200))).apply { cornerRadius = 40 * d }
         isClickable = true
         setOnClickListener { action() }
-        addView(text(title, 14f, R.color.ariyan_text_primary, bold = true))
-        addView(text(sub, 11f, R.color.ariyan_text_secondary).apply { setPadding(0, px(3), 0, 0) })
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = px(12) }
     }
 
-    private fun button(label: String, action: () -> Unit) = Button(this).apply {
-        text = label; isAllCaps = false; setOnClickListener { action() }
-    }
-
-    /** Candidates per band as one proportional bar (real counts, no percentage claim). */
-    private class BandBar(ctx: Context, val segs: List<Pair<String, Int>>) : View(ctx) {
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        override fun onDraw(canvas: Canvas) {
-            val total = segs.sumOf { it.second }
-            paint.color = 0xFF30363D.toInt()
-            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
-            if (total <= 0) return
-            var x = 0f
-            for ((b, n) in segs) {
-                if (n <= 0) continue
-                val w = maxOf(2f, width * n.toFloat() / total)
-                paint.color = BAND_COLOURS[b] ?: 0xFF6E7681.toInt()
-                canvas.drawRect(x, 0f, minOf(width.toFloat(), x + w), height.toFloat(), paint)
-                x += w
-            }
+    private fun sourceRow(box: LinearLayout, ok: Boolean, name: String, detail: String, glyph: String) {
+        val c = if (ok) AriyanDecor.ACCENT else AriyanDecor.ORANGE
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(px(8), px(7), px(8), px(7))
+            background = GradientDrawable().apply { cornerRadius = 8 * d; setColor(AriyanDecor.withAlpha(c, 16)) }
         }
+        row.addView(AriyanDecor.Glyph(this, glyph, c), LinearLayout.LayoutParams(px(22), px(22)))
+        val texts = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(px(10), 0, px(6), 0) }
+        texts.addView(text(name, 13f, col(R.color.ariyan_text_primary), bold = true))
+        texts.addView(text(detail, 12f, col(R.color.ariyan_text_secondary)))
+        row.addView(texts, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(text(if (ok) "\u2713" else "\u2717", 16f, c, bold = true))
+        box.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = px(6) })
+    }
+
+    private fun tile(t: Tile) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(px(12), px(12), px(10), px(12))
+        background = AriyanDecor.panel(d, t.colour, 12f)
+        isClickable = true
+        setOnClickListener { t.action() }
+        addView(View(this@MissionControlActivity).apply {
+            background = GradientDrawable().apply { cornerRadius = 10 * d; setColor(AriyanDecor.withAlpha(t.colour, 40)) }
+        }.let { bg ->
+            FrameLayout(this@MissionControlActivity).apply {
+                addView(bg, FrameLayout.LayoutParams(px(36), px(36)))
+                addView(AriyanDecor.Glyph(this@MissionControlActivity, t.glyph, t.colour),
+                    FrameLayout.LayoutParams(px(24), px(24)).apply { leftMargin = px(6); topMargin = px(6) })
+            }
+        }, LinearLayout.LayoutParams(px(36), px(36)))
+        addView(text(t.title, 14f, col(R.color.ariyan_text_primary), bold = true).apply { setPadding(0, px(8), 0, 0) })
+        addView(text(t.sub, 11f, col(R.color.ariyan_text_secondary)).apply { setPadding(0, px(2), 0, 0) })
     }
 }
