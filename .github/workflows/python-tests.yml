@@ -8,6 +8,8 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# ci-v2 (2026-11-02): actions moved to their Node.js 24 versions (GitHub forces
+# Node 24 and removes Node 20); no change to what is built or tested.
 concurrency:
   group: python-tests-${{ github.ref }}
   cancel-in-progress: true
@@ -20,9 +22,9 @@ jobs:
       run:
         working-directory: ARIYAN_GEO_AI
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Set up Python 3.10
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.10'
       - name: Install test dependencies
