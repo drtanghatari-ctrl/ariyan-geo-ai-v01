@@ -15,6 +15,17 @@ mc-v1, Mission Control (the app's new start page). mission_json() returns:
     calibration, latest database backup). Keys are checked by the Kotlin
     screen and never pass through here.
 
+mc-v1.3: thumbs_json() lists, for an open Final Image session (the 3D card's
+window), which satellite layers are already SAVED on the phone for that window,
+and opens only those (never fetches, never uses Copernicus quota; a layer
+whose one-time self-check has not passed stays hidden with its reason).
+
+mc-v1.3: models_json() lists the analysis rules and models the app really
+uses, each read from its own module (version names, the adopted calib-v1
+profile from the database, the debate engine's SHA-256), with what each may and
+may not do. settings_json() reports the storage, database, backups, guard and
+crash reports for the Settings screen. Both are read-only.
+
 dbe-v1, AI Debate Engine. debates_json() lists the debates stored by dbr-v1
 (newest first, filterable by agreement) with a project-wide summary;
 debate_detail_json() returns one stored debate in full. Nothing is re-run or
@@ -28,7 +39,7 @@ from typing import Any, Dict, List, Optional
 
 import grand_project_db as db
 
-VERSION = "mc-v1.1"
+VERSION = "mc-v1.3"
 DEBATE_VERSION = "dbe-v1"
 DEFAULT_PROJECT_ID = "default"          # grand_project_sync.DEFAULT_GRAND_PROJECT_ID
 
@@ -442,5 +453,183 @@ def debate_detail(db_root: str, record_id: int) -> Dict[str, Any]:
 def debate_detail_json(db_root: str, record_id: int) -> str:
     try:
         return json.dumps(debate_detail(db_root, int(record_id)), default=str)
+    except Exception as e:
+        return json.dumps({"error": "%s: %s" % (type(e).__name__, e)})
+
+
+# ---------------------------------------------------------------------------
+# mc-v1.3 layer thumbnails (saved images only)
+# ---------------------------------------------------------------------------
+
+def thumbs(db_root: str, session_id: str) -> Dict[str, Any]:
+    import sat_image as si
+    import sat_image_mobile as sim
+    out: List[Dict[str, Any]] = []
+    for p in si.LAYER_ORDER:
+        label = si.PRODUCTS[p]["label"]
+        try:
+            r = json.loads(sim.open_layer_json(db_root, session_id, p, "", "", False))
+        except Exception as e:                        # shown, never hidden
+            r = {"error": "%s: %s" % (type(e).__name__, e)}
+        if r.get("needs_fetch"):
+            out.append({"product": p, "label": label, "state": "NOT_SAVED"})
+        elif "error" in r:
+            out.append({"product": p, "label": label, "state": "ERROR", "reason": r["error"]})
+        elif not r.get("allowed"):
+            out.append({"product": p, "label": label, "state": "HIDDEN",
+                        "reason": r.get("hidden_reason") or r.get("check")})
+        else:
+            g = r.get("grid") or {}
+            out.append({"product": p, "label": label, "state": "SAVED", "scene_date": r.get("scene_date"),
+                        "clear_fraction": r.get("clear_fraction_window"),
+                        "width": g.get("width"), "height": g.get("height")})
+    return {"version": VERSION, "layers": out,
+            "note": "Saved images only; nothing is fetched here. Open the Final Image to fetch a missing layer."}
+
+
+def thumbs_json(db_root: str, session_id: str) -> str:
+    try:
+        return json.dumps(thumbs(db_root, session_id), default=str)
+    except Exception as e:
+        return json.dumps({"error": "%s: %s" % (type(e).__name__, e)})
+
+
+# ---------------------------------------------------------------------------
+# mc-v1.3 Analysis & Models (read from the modules themselves)
+# ---------------------------------------------------------------------------
+
+def _const(module: str, name: str) -> Optional[str]:
+    try:
+        return str(getattr(__import__(module), name))
+    except Exception:
+        return None
+
+
+def models(db_root: str) -> Dict[str, Any]:
+    calib = None
+    try:
+        import calib_profile
+        calib = calib_profile.active_profile(db_root)
+    except Exception:
+        calib = None
+    debate_sha = None
+    n_debates = 0
+    try:
+        import debate_store
+        debate_sha = debate_store.engine_sha256()
+        conn = db.get_connection(db_root)
+        try:
+            db.initialize_schema(conn)
+            if _has_table(conn, "debate_record"):
+                n_debates = conn.execute("SELECT COUNT(*) FROM debate_record").fetchone()[0]
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    rows = [
+        {"name": "Scientific Steward (confidence ceiling)", "version": "Stage 1",
+         "role": "Rates every candidate LOW / MODERATE / HIGH / SUBSTANTIAL and only ever lowers a score.",
+         "limits": "HIGH needs environmental confounders controlled; SUBSTANTIAL needs field data (GPR/ERT). "
+                   "Today the ceiling is MODERATE 0.55."},
+        {"name": "AI Debate Engine", "version": "dbr-v1 store; engine SHA-256 " + (debate_sha or "unknown")[:12],
+         "role": "Four perspectives argue each candidate; the synthesis never declares a winner.",
+         "limits": "A ranked rule-based opinion, not proof. %d debate(s) stored." % n_debates},
+        {"name": "calib-v1 score threshold", "version": "calib-v1" if calib else "not adopted",
+         "role": ("Labels candidates with |z| >= %s as strong (bench pass, user-approved)." % calib.get("threshold_abs_z"))
+                 if calib else "Not adopted on this phone.",
+         "limits": "A label and a sort order only; never changes status, confidence or reviews."},
+        {"name": "Pass 2 reproduction rule", "version": _const("grand_project_refinement", "POLARITY_RULE_VERSION"),
+         "role": "Live SRTM re-detects the anomaly with the same polarity within tolerance -> Supported (auto).",
+         "limits": "Frozen tests T3/T4 passed (site 26%/37% vs control 8%/6%); supporting evidence, not proof."},
+        {"name": "Land cover rule", "version": _const("land_cover_flags", "LC2_METHOD"),
+         "role": "Rejects only when the centre (~15 m) is mostly trees, buildings or water (ESA WorldCover).",
+         "limits": "The ring around the centre is a label only (test T1 passed)."},
+        {"name": "Terrain labels / Hillside", "version": _const("terrain_context_labels", "METHOD_VERSION"),
+         "role": "Mound, Depression, Linear, Ring labels; Hillside rejects only in Mound/tell jobs.",
+         "limits": "Shape labels never reject."},
+        {"name": "Mapped industry", "version": _const("industrial_label", "LABEL_VERSION"),
+         "role": "Labels candidates within 300 m of mapped industry and moves them to the back of Pass 2.",
+         "limits": "Never rejects."},
+        {"name": "Known sites (ANE gazetteer)", "version": "F1",
+         "role": "Nearest recorded site and distance: likely rediscovery or not in gazetteer.",
+         "limits": "Context only, never evidence."},
+        {"name": "Provenance ledger", "version": _const("provenance_ledger", "LEDGER_VERSION"),
+         "role": "Hash chain over every evidence row, its sources and the code that made it.",
+         "limits": "Makes rows traceable; does not raise confidence."},
+        {"name": "Automatic run", "version": _const("auto_pipeline", "VERSION"),
+         "role": "Library fill, sweep, land cover, labels, review, Pass 2, provenance, trust, report.",
+         "limits": "Never marks a job CORRUPTED; user trust marks are never overwritten."},
+        {"name": "Final Image", "version": _const("final_image", "FI_VERSION"),
+         "role": "Terrain image, satellite layers, profile, 3D surface, evidence volume.",
+         "limits": "No interpolation: native cells only."},
+    ]
+    return {"version": VERSION, "models": rows,
+            "statement": "Rules and models in use on this phone, read from the app's own code and database. "
+                         "Nothing here is run or changed."}
+
+
+def models_json(db_root: str) -> str:
+    try:
+        return json.dumps(models(db_root), default=str)
+    except Exception as e:
+        return json.dumps({"error": "%s: %s" % (type(e).__name__, e)})
+
+
+# ---------------------------------------------------------------------------
+# mc-v1.3 Settings (storage, database, backups) -- read-only
+# ---------------------------------------------------------------------------
+
+def _folder_stats(path: str) -> Dict[str, Any]:
+    n, size = 0, 0
+    for base, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                size += os.path.getsize(os.path.join(base, f))
+                n += 1
+            except OSError:
+                pass
+    return {"files": n, "bytes": size}
+
+
+def settings(db_root: str) -> Dict[str, Any]:
+    dbp = os.path.join(db_root, db.DB_FILENAME)
+    out: Dict[str, Any] = {"version": VERSION, "root": db_root,
+                           "database": {"path": dbp, "exists": os.path.isfile(dbp),
+                                        "bytes": os.path.getsize(dbp) if os.path.isfile(dbp) else 0}}
+    guard = None
+    try:
+        with open(os.path.join(db_root, db.GUARD_FILENAME)) as f:
+            guard = json.load(f)
+    except (OSError, ValueError):
+        guard = None
+    out["guard"] = guard
+    out["allow_new_flag"] = os.path.exists(os.path.join(db_root, db.ALLOW_NEW_FILENAME))
+    backups = []
+    folder = os.path.join(db_root, db.BACKUP_DIRNAME)
+    try:
+        for n in sorted(os.listdir(folder), reverse=True):
+            p = os.path.join(folder, n)
+            if n.endswith(".db") and os.path.isfile(p):
+                backups.append({"name": n, "bytes": os.path.getsize(p)})
+    except OSError:
+        pass
+    out["backups"] = {"folder": folder, "files": backups, "keep_rule": "the newest %d daily backups plus the largest"
+                      % getattr(db, "AUTO_BACKUP_KEEP", 10)}
+    crash = []
+    try:
+        cdir = os.path.join(db_root, "crash_reports")
+        crash = sorted((n for n in os.listdir(cdir) if n.endswith(".txt")), reverse=True)
+    except OSError:
+        pass
+    out["crash_reports"] = {"count": len(crash), "newest": crash[0] if crash else None}
+    out["folders"] = [dict(name=n, **_folder_stats(os.path.join(db_root, n)))
+                      for n in ("dem_library", "worldcover_library", "sat_library", "field_data", "exports", "reports")
+                      if os.path.isdir(os.path.join(db_root, n))]
+    return out
+
+
+def settings_json(db_root: str) -> str:
+    try:
+        return json.dumps(settings(db_root), default=str)
     except Exception as e:
         return json.dumps({"error": "%s: %s" % (type(e).__name__, e)})
