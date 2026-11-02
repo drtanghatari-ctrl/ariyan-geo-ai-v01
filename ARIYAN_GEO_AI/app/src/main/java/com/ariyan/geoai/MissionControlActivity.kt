@@ -7,6 +7,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
+import android.widget.ImageView
+import androidx.appcompat.app.AlertDialog
 import android.view.MotionEvent
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -57,6 +60,14 @@ import java.util.Locale
  * Mission Control is open; drag to rotate, pinch to zoom, double-tap to reset.
  * Nothing is computed into a result and nothing is written.
  *
+ * mc-v1.3 (2026-11-02): (1) the 3D card states the real height range of the
+ * window, so the exaggerated view is not misread; (2) a strip of layer
+ * thumbnails for the same window: terrain plus every satellite layer, shown
+ * only when it is already SAVED on the phone (mission_control.thumbs_json never
+ * fetches); (3) the remaining mock-up tabs: Analysis & Models (the rules and
+ * models in use, read from code and database), Visualization (jumps to the 3D
+ * card) and Settings (SettingsActivity).
+ *
  * "Last Final Image": the candidate of the last Final Image screen opened in
  * this process is remembered in SharedPreferences through an activity
  * lifecycle callback registered here, so FinalImageActivity needs no change.
@@ -99,6 +110,9 @@ class MissionControlActivity : AppCompatActivity() {
             "Inconclusive" to AriyanDecor.AMBER, "Rejected" to AriyanDecor.ROSE
         )
     }
+
+    private class Thumb(val label: String, val state: String, val note: String, val bitmap: Bitmap?)
+    private class Terrain(val meta: JSONObject, val drape: Bitmap?, val heights: FloatArray?, val thumbs: List<Thumb>)
 
     private class Tile(val title: String, val sub: String, val glyph: String, val colour: Int, val action: () -> Unit)
 
@@ -236,10 +250,13 @@ class MissionControlActivity : AppCompatActivity() {
             "Investigation" to { go(MainActivity::class.java) },
             "Data & Evidence" to { go(OfflineDataActivity::class.java) },
             "AI Debate Engine" to { go(DebateEngineActivity::class.java) },
+            "Analysis & Models" to { showModels() },
             "Image Processing" to { openLastFinalImage(last) },
+            "Visualization" to { scrollToTerrain() },
             "Report & Archive" to { go(GrandProjectActivity::class.java) },
             "Wide-area search" to { go(WideAreaSearchActivity::class.java) },
-            "Historical research" to { go(HistoricalResearchActivity::class.java) }
+            "Historical research" to { go(HistoricalResearchActivity::class.java) },
+            "Settings" to { go(SettingsActivity::class.java) }
         )
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 0, 0, px(4)) }
         tabs.forEach { (name, action) ->
@@ -390,30 +407,66 @@ class MissionControlActivity : AppCompatActivity() {
                 val fim = python.getModule("final_image_mobile")
                 try {
                     val j = JSONObject(fim.callAttr("open_final_image_json", offlineDataRoot, cid, 1000.0, "relief").toString())
-                    if (j.has("error")) return@withContext Triple(j, null, null)
+                    if (j.has("error")) return@withContext Terrain(j, null, null, emptyList())
                     sid = j.getString("session_id")
                     val bytes = fim.callAttr("image_rgba", sid).toJava(ByteArray::class.java)
                     val bmp = Bitmap.createBitmap(j.getInt("width"), j.getInt("height"), Bitmap.Config.ARGB_8888)
                     bmp.copyPixelsFromBuffer(ByteBuffer.wrap(bytes))
                     val s3d = python.getModule("surface3d_mobile")
                     val m = JSONObject(s3d.callAttr("open_surface_json", sid).toString())
-                    if (m.has("error")) return@withContext Triple(m, null, null)
+                    if (m.has("error")) return@withContext Terrain(m, null, null, emptyList())
                     val hb = s3d.callAttr("surface_heights", sid).toJava(ByteArray::class.java)
                     val fb = ByteBuffer.wrap(hb).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
                     val hg = FloatArray(fb.remaining()).also { fb.get(it) }
                     m.put("candidates", j.optJSONArray("candidates"))
                     m.put("source_label", j.optString("source"))
-                    Triple(m, bmp, hg)
+                    // mc-v1.3: thumbnails of what is already saved for this window (never fetched here)
+                    val thumbs = mutableListOf(Thumb("Terrain (relief, hillshaded)", "SAVED",
+                        "DEM " + j.optString("source"), bmp.copy(Bitmap.Config.ARGB_8888, false)))
+                    try {
+                        val sim = python.getModule("sat_image_mobile")
+                        val th = JSONObject(python.getModule("mission_control").callAttr("thumbs_json", offlineDataRoot, sid).toString())
+                        val layers = th.optJSONArray("layers")
+                        if (layers != null) for (i in 0 until layers.length()) {
+                            val l = layers.getJSONObject(i)
+                            val state = l.optString("state")
+                            var tb: Bitmap? = null
+                            var note = when (state) {
+                                "SAVED" -> listOfNotNull(nz(l, "scene_date"),
+                                    if (l.isNull("clear_fraction")) null
+                                    else String.format(Locale.US, "%.0f%% clear", 100 * l.optDouble("clear_fraction"))).joinToString(" \u00B7 ")
+                                "NOT_SAVED" -> "not saved for this window"
+                                else -> l.optString("reason")
+                            }
+                            if (state == "SAVED") {
+                                try {
+                                    val rb = sim.callAttr("layer_rgba", sid, l.getString("product")).toJava(ByteArray::class.java)
+                                    tb = Bitmap.createBitmap(l.getInt("width"), l.getInt("height"), Bitmap.Config.ARGB_8888)
+                                    tb.copyPixelsFromBuffer(ByteBuffer.wrap(rb))
+                                } catch (e: PyException) {
+                                    note = e.message ?: "could not open"
+                                }
+                            }
+                            thumbs += Thumb(l.optString("label"), if (tb == null && state == "SAVED") "ERROR" else state, note, tb)
+                        }
+                    } catch (e: PyException) {
+                        thumbs += Thumb("Satellite layers", "ERROR", e.message ?: "could not list", null)
+                    } finally {
+                        try { python.getModule("sat_image_mobile").callAttr("close_layers", sid) } catch (_: PyException) {}
+                    }
+                    Terrain(m, bmp, hg, thumbs)
                 } catch (e: PyException) {
-                    Triple(JSONObject().put("error", e.message), null, null)
+                    Terrain(JSONObject().put("error", e.message), null, null, emptyList())
                 } catch (e: OutOfMemoryError) {
-                    Triple(JSONObject().put("error", "not enough memory for the 3D preview"), null, null)
+                    Terrain(JSONObject().put("error", "not enough memory for the 3D preview"), null, null, emptyList())
                 } finally {
                     sid?.let { try { fim.callAttr("close_session", it) } catch (_: PyException) {} }
                 }
             }
             if (terrainFor != cid) return@launch
-            val (m, bmp, hg) = result
+            val m = result.meta
+            val bmp = result.drape
+            val hg = result.heights
             if (bmp == null || hg == null) {
                 status.text = "3D preview unavailable: " + m.optString("error", "unknown error") +
                     ". The Final Image button still opens the full view."
@@ -453,6 +506,116 @@ class MissionControlActivity : AppCompatActivity() {
                 m.optString("source_label").ifBlank { m.optString("source") },
                 if (ve % 1f == 0f) ve.toInt().toString() else ve.toString(),
                 pins.size, if (pins.size == 1) "pin" else "pins")
+            if (!m.isNull("z_min_m") && !m.isNull("z_max_m")) {
+                val lo = m.optDouble("z_min_m"); val hi = m.optDouble("z_max_m")
+                card.addView(text(String.format(Locale.US, "Real ground heights in this window: %,.1f to %,.1f m (span %.1f m). " +
+                    "The view is stretched \u00D7%s, so small rises look tall.", lo, hi, hi - lo,
+                    if (ve % 1f == 0f) ve.toInt().toString() else ve.toString()), 12f, AriyanDecor.AMBER).apply {
+                    setPadding(0, px(6), 0, 0)
+                }, card.indexOfChild(caption) + 1)
+            }
+            if (result.thumbs.isNotEmpty()) {
+                card.addView(thumbStrip(result.thumbs, cid), card.childCount - 1)   // above the button
+            }
+        }
+    }
+
+    /** mc-v1.3: terrain + satellite thumbnails of the 3D window (saved images only). */
+    private fun thumbStrip(thumbs: List<Thumb>, cid: String): View {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, px(10), 0, 0) }
+        box.addView(text("LAYERS FOR THIS WINDOW (saved on the phone; nothing is fetched here)", 11f,
+            col(R.color.ariyan_text_secondary), bold = true).apply { letterSpacing = 0.04f })
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, px(6), 0, 0) }
+        thumbs.forEach { t ->
+            val c = when (t.state) {
+                "SAVED" -> AriyanDecor.ACCENT
+                "NOT_SAVED" -> AriyanDecor.LINE
+                else -> AriyanDecor.ORANGE
+            }
+            val cell = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(px(6), px(6), px(6), px(6))
+                background = AriyanDecor.panel(d, c, 10f)
+                isClickable = true
+                setOnClickListener { startActivity(FinalImageActivity.newIntent(this@MissionControlActivity, cid)) }
+            }
+            val img = FrameLayout(this).apply {
+                background = GradientDrawable().apply { cornerRadius = 6 * d; setColor(0xFF0B0E13.toInt()) }
+            }
+            if (t.bitmap != null) {
+                img.addView(ImageView(this).apply {
+                    // exact cells: no smoothing when the small image is enlarged
+                    setImageDrawable(BitmapDrawable(resources, t.bitmap).apply { isFilterBitmap = false })
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            } else {
+                img.addView(text(if (t.state == "NOT_SAVED") "not saved" else "hidden", 11f,
+                    col(R.color.ariyan_text_secondary)).apply { gravity = Gravity.CENTER },
+                    FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            }
+            cell.addView(img, LinearLayout.LayoutParams(px(104), px(104)))
+            cell.addView(text(t.label, 11f, col(R.color.ariyan_text_primary), bold = true).apply {
+                setPadding(0, px(4), 0, 0); maxLines = 2
+            }, LinearLayout.LayoutParams(px(104), LinearLayout.LayoutParams.WRAP_CONTENT))
+            cell.addView(text(t.note, 10f, col(R.color.ariyan_text_secondary)).apply { maxLines = 3 },
+                LinearLayout.LayoutParams(px(104), LinearLayout.LayoutParams.WRAP_CONTENT))
+            row.addView(cell, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply { rightMargin = px(8) })
+        }
+        box.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(row) })
+        box.addView(text("Missing layers: open the Final Image and choose them from Satellite (uses Copernicus quota once; saved after).",
+            11f, col(R.color.ariyan_text_secondary)).apply { setPadding(0, px(6), 0, 0) })
+        return box
+    }
+
+    private fun scrollToTerrain() {
+        val card = terrainCard
+        val sv = content.parent as? ScrollView
+        if (card == null || sv == null || card.parent == null) {
+            android.widget.Toast.makeText(this, "The 3D terrain appears once there is a candidate target.",
+                android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        sv.smoothScrollTo(0, card.top)
+    }
+
+    /** mc-v1.3: Analysis & Models, read from the app's own code and database. */
+    private fun showModels() {
+        lifecycleScope.launch {
+            val o = withContext(Dispatchers.Default) {
+                try {
+                    JSONObject(python.getModule("mission_control").callAttr("models_json", offlineDataRoot).toString())
+                } catch (e: PyException) {
+                    JSONObject().put("error", e.message)
+                }
+            }
+            val box = LinearLayout(this@MissionControlActivity).apply {
+                orientation = LinearLayout.VERTICAL; setPadding(px(18), px(6), px(18), px(8))
+            }
+            if (o.has("error")) line(box, o.optString("error"), true)
+            val rows = o.optJSONArray("models")
+            if (rows != null) for (i in 0 until rows.length()) {
+                val r = rows.getJSONObject(i)
+                val c = AriyanDecor.PERSPECTIVE_COLOURS[i % AriyanDecor.PERSPECTIVE_COLOURS.size]
+                val card = LinearLayout(this@MissionControlActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(px(10), px(8), px(10), px(10))
+                    background = AriyanDecor.panel(d, c, 10f)
+                }
+                card.addView(text(r.optString("name"), 14f, c, bold = true))
+                card.addView(chip(r.optString("version"), c, small = true), LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = px(4) })
+                line(card, r.optString("role"), true)
+                line(card, r.optString("limits"))
+                box.addView(card, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = px(10) })
+            }
+            nz(o, "statement")?.let { line(box, it) }
+            AlertDialog.Builder(this@MissionControlActivity)
+                .setTitle("Analysis & Models")
+                .setView(ScrollView(this@MissionControlActivity).apply { addView(box) })
+                .setPositiveButton("Close", null)
+                .show()
         }
     }
 
