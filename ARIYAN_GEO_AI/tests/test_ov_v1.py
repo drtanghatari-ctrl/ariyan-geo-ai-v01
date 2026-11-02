@@ -24,11 +24,12 @@ def test_overview_reports_only_what_exists(tmp_path):
     before = _db_snapshot(root)
     o = json.loads(ov.overview_json(root, d["session_id"]))
     assert "error" not in o, o
-    assert o["candidate_id"] == cid and o["version"] == "ov-v1"
+    assert o["candidate_id"] == cid and o["version"] == "ov-v1.1"
     names = {l["name"]: l for l in o["layers"]}
     assert names["DEM (terrain)"]["state"] == "USED"
     assert names["GPR (field)"]["state"] == "NONE" and names["ERT (field)"]["state"] == "NONE"
     assert names["Magnetometry"]["detail"] == "not supported yet"
+    assert names["Optical soil-mark (Sentinel-2)"]["state"] == "NONE"
     # no satellite layer saved or linked in the fixture: none may claim more than NONE
     sat = [l for l in o["layers"] if "Sentinel" in l["name"] or "Landsat" in l["name"]]
     assert sat and all(l["state"] == "NONE" for l in sat)
@@ -56,3 +57,19 @@ def test_overview_counts_user_hypotheses_and_neighbours(tmp_path):
 
 def test_expired_session():
     assert "expired" in json.loads(ov.overview_json("/nowhere", "gone"))["error"]
+
+
+def test_optical_and_any_other_linked_evidence_appear_in_the_checklist(tmp_path):
+    """ov-v1.1: every linked evidence type has a row, so the checklist matches 'Evidence linked'."""
+    root, cid, d = _open(tmp_path)
+    db.add_evidence_link(root, cid, "OPTICAL", "corroborates", {"note": "test"})
+    db.add_evidence_link(root, cid, "HISTORICAL_ACCOUNT", "context", {"note": "test"})
+    o = json.loads(ov.overview_json(root, d["session_id"]))
+    names = {l["name"]: l for l in o["layers"]}
+    assert names["Optical soil-mark (Sentinel-2)"]["state"] == "EVIDENCE"
+    assert "corroborates" in names["Optical soil-mark (Sentinel-2)"]["detail"]
+    assert names["Historical Account"]["state"] == "EVIDENCE"
+    linked = set(o["candidate"]["evidence_types"])
+    covered = {"DEM", "NDVI", "THERMAL", "SAR", "OPTICAL", "GPR", "ERT", "HISTORICAL_ACCOUNT"}
+    assert linked <= covered
+    ods.clear_tile_cache()
