@@ -6,6 +6,8 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.view.MotionEvent
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -27,6 +29,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 
 /**
@@ -45,6 +49,13 @@ import java.util.Locale
  * the highest STORED confidence, glyph tiles, ranked target cards with
  * rediscovery / calib-v1 chips, data-source rows, principle chips. Landscape
  * pairs the cards in two columns.
+ *
+ * mc-v1.2 (2026-11-02): the mock-up's centre piece, a real 3D terrain of the
+ * top Candidate Target: its stored DEM window (+/-1 km, the same data the Final
+ * Image uses) drawn by Surface3DView with the hillshaded relief drape and the
+ * candidate pins of that window. Built once per top candidate and kept while
+ * Mission Control is open; drag to rotate, pinch to zoom, double-tap to reset.
+ * Nothing is computed into a result and nothing is written.
  *
  * "Last Final Image": the candidate of the last Final Image screen opened in
  * this process is remembered in SharedPreferences through an activity
@@ -99,6 +110,11 @@ class MissionControlActivity : AppCompatActivity() {
     private fun px(v: Int) = (v * d).toInt()
     private fun col(id: Int) = ContextCompat.getColor(this, id)
 
+    // mc-v1.2: the 3D terrain card, kept across reloads while the top candidate is unchanged
+    private var terrainCard: LinearLayout? = null
+    private var terrainFor: String? = null
+    private var glView: Surface3DView? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         registerFinalImageWatcher(application)
@@ -115,7 +131,13 @@ class MissionControlActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        glView?.onResume()
         load()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        glView?.onPause()
     }
 
     // ------------------------------------------------------------------ load
@@ -158,6 +180,7 @@ class MissionControlActivity : AppCompatActivity() {
         tabStrip()
         if (!ExternalStorageAccess.isGranted(this)) permissionCard()
         pair(studyArea(o), assessment(o))
+        terrainHero(o)
         tiles(o)
         pair(targets(o), sources(o))
         footer(o)
@@ -325,6 +348,111 @@ class MissionControlActivity : AppCompatActivity() {
                 addView(quote, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = px(8) })
             }
+        }
+    }
+
+    /** mc-v1.2: real 3D terrain of the top Candidate Target (the mock-up's centre). */
+    private fun terrainHero(o: JSONObject) {
+        val top = o.optJSONArray("top")
+        if (top == null || top.length() == 0) return
+        val t = top.getJSONObject(0)
+        val cid = t.getString("id")
+        terrainCard?.let { card ->
+            if (terrainFor == cid) {
+                (card.parent as? android.view.ViewGroup)?.removeView(card)
+                content.addView(card)
+                return
+            }
+        }
+        glView?.onPause()
+        glView = null
+        val card = panel("3D TERRAIN \u00B7 TOP CANDIDATE " + cid.take(8), "mountain", AriyanDecor.ORANGE)
+        terrainCard = card
+        terrainFor = cid
+        val status = text("Loading the stored DEM window\u2026", 13f, col(R.color.ariyan_text_secondary)).apply {
+            setPadding(0, px(6), 0, 0)
+        }
+        card.addView(status)
+        val frame = FrameLayout(this).apply {
+            background = GradientDrawable().apply { cornerRadius = 10 * d; setColor(0xFF0B0E13.toInt()) }
+        }
+        card.addView(frame, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+            px(if (landscape) 300 else 280)).apply { topMargin = px(8) })
+        val caption = text("", 12f, col(R.color.ariyan_text_secondary)).apply { setPadding(0, px(6), 0, 0) }
+        card.addView(caption)
+        card.addView(actionPill("Open its Final Image", AriyanDecor.ORANGE) {
+            startActivity(FinalImageActivity.newIntent(this, cid))
+        })
+        content.addView(card)
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.Default) {
+                var sid: String? = null
+                val fim = python.getModule("final_image_mobile")
+                try {
+                    val j = JSONObject(fim.callAttr("open_final_image_json", offlineDataRoot, cid, 1000.0, "relief").toString())
+                    if (j.has("error")) return@withContext Triple(j, null, null)
+                    sid = j.getString("session_id")
+                    val bytes = fim.callAttr("image_rgba", sid).toJava(ByteArray::class.java)
+                    val bmp = Bitmap.createBitmap(j.getInt("width"), j.getInt("height"), Bitmap.Config.ARGB_8888)
+                    bmp.copyPixelsFromBuffer(ByteBuffer.wrap(bytes))
+                    val s3d = python.getModule("surface3d_mobile")
+                    val m = JSONObject(s3d.callAttr("open_surface_json", sid).toString())
+                    if (m.has("error")) return@withContext Triple(m, null, null)
+                    val hb = s3d.callAttr("surface_heights", sid).toJava(ByteArray::class.java)
+                    val fb = ByteBuffer.wrap(hb).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
+                    val hg = FloatArray(fb.remaining()).also { fb.get(it) }
+                    m.put("candidates", j.optJSONArray("candidates"))
+                    m.put("source_label", j.optString("source"))
+                    Triple(m, bmp, hg)
+                } catch (e: PyException) {
+                    Triple(JSONObject().put("error", e.message), null, null)
+                } catch (e: OutOfMemoryError) {
+                    Triple(JSONObject().put("error", "not enough memory for the 3D preview"), null, null)
+                } finally {
+                    sid?.let { try { fim.callAttr("close_session", it) } catch (_: PyException) {} }
+                }
+            }
+            if (terrainFor != cid) return@launch
+            val (m, bmp, hg) = result
+            if (bmp == null || hg == null) {
+                status.text = "3D preview unavailable: " + m.optString("error", "unknown error") +
+                    ". The Final Image button still opens the full view."
+                frame.visibility = View.GONE
+                return@launch
+            }
+            card.removeView(status)
+            val pins = mutableListOf<Surface3DView.Pin>()
+            val cands = m.optJSONArray("candidates")
+            if (cands != null) for (i in 0 until cands.length()) {
+                val c = cands.getJSONObject(i)
+                pins += Surface3DView.Pin(c.optDouble("x").toFloat(), c.optDouble("y").toFloat(),
+                    FinalImageView.styleColour(c.optString("style")), c.optBoolean("focus"))
+            }
+            val ve = m.optDouble("ve_auto", 1.0).toFloat()
+            val gv = Surface3DView(this@MissionControlActivity).apply {
+                onGlError = { msg -> caption.text = "3D error: $msg" }
+                // let the 3D view rotate without the page scrolling
+                setOnTouchListener { v, e ->
+                    if (e.actionMasked == MotionEvent.ACTION_DOWN) v.parent?.requestDisallowInterceptTouchEvent(true)
+                    false
+                }
+            }
+            glView = gv
+            frame.addView(gv, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            frame.addView(text("Drag to rotate \u00B7 pinch to zoom \u00B7 double-tap to reset", 11f, 0xFFE6EDF3.toInt()).apply {
+                setPadding(px(8), px(4), px(8), px(4))
+                background = AriyanDecor.pill(d, 0x99000000.toInt())
+            }, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = px(8) })
+            gv.setSurface(hg, m.getInt("width"), m.getInt("height"),
+                m.getDouble("cell_dx_m").toFloat(), m.getDouble("cell_dy_m").toFloat(),
+                ve, Surface3DView.Drape(bmp, 0f, 0f, 1f, 1f), pins, null, true)
+            caption.text = String.format(Locale.US,
+                "Real DEM window \u00B11 km (%s), relief colours hillshaded. Height \u00D7%s (automatic). " +
+                    "%d candidate %s in view; the top candidate is the large pin.",
+                m.optString("source_label").ifBlank { m.optString("source") },
+                if (ve % 1f == 0f) ve.toInt().toString() else ve.toString(),
+                pins.size, if (pins.size == 1) "pin" else "pins")
         }
     }
 
