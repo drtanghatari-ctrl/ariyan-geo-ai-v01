@@ -78,6 +78,11 @@
             android:name=".DebateEngineActivity"
             android:exported="false" />
 
+        <!-- d4-v1 (2026-11-02): tank / silo spot-check list, read-only + verdict notes. -->
+        <activity
+            android:name=".SpotCheckActivity"
+            android:exported="false" />
+
         <!-- mc-v1.3 (2026-11-02): Settings tab of Mission Control, read-only. -->
         <activity
             android:name=".SettingsActivity"

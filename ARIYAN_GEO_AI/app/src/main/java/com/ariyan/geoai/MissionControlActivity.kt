@@ -73,6 +73,9 @@ import java.util.Locale
  * Control comes back, so a newly saved layer shows without restarting the app.
  * Only the strip is rebuilt; the 3D view is kept.
  *
+ * d4-v1 (2026-11-02): Analysis & Models has a "Tank/silo spot-check" button
+ * (SpotCheckActivity, read-only list + verdict notes).
+ *
  * logo-v1 (2026-11-02): the header shows the ARIYAN emblem (res/drawable-nodpi/
  * ariyan_emblem.png, the user's own design); the launcher icon uses the same art.
  *
@@ -672,6 +675,8 @@ class MissionControlActivity : AppCompatActivity() {
                 .setTitle("Analysis & Models")
                 .setView(ScrollView(this@MissionControlActivity).apply { addView(box) })
                 .setPositiveButton("Close", null)
+                // d4-v1: the tank / silo spot-check list lives with the rules it may later inform
+                .setNeutralButton("Tank/silo spot-check") { _, _ -> go(SpotCheckActivity::class.java) }
                 .show()
         }
     }
