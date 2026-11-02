@@ -15,6 +15,12 @@ nothing is recomputed into a new result and nothing is written:
   * the user's hypotheses (section + footprint) counts;
   * the other candidates in the window with distance and confidence;
   * map information: UTM zone, cell size, DEM source and SHA-256, window.
+
+ov-v1.1 (2026-11-02): the checklist gains its own "Optical soil-mark
+(Sentinel-2)" row (OPTICAL evidence is statistics only, so it has no image
+layer and was missing from the list while "Evidence linked" showed it), and
+any other linked evidence type without a row of its own is listed too, so the
+checklist and the linked list always match.
 """
 from __future__ import annotations
 
@@ -25,7 +31,7 @@ from typing import Any, Dict, List
 import grand_project_db as db
 import utm_projection as up
 
-VERSION = "ov-v1"
+VERSION = "ov-v1.1"
 STATEMENT = ("Overview of recorded results only. Nothing here is recomputed or changes a status, a review "
              "or a confidence. Confidence stays capped by the Steward until field data exists.")
 SAT_EVIDENCE_TYPES = {"NDVI": "NDVI", "THERMAL": "THERMAL", "SAR_VV": "SAR", "SAR_VH": "SAR", "TRUE_COLOR": None}
@@ -133,6 +139,14 @@ def overview_json(db_root: str, session_id: str) -> str:
             else:
                 state, detail = "NONE", "not fetched for this window"
             layers.append({"name": lab, "state": state, "detail": detail})
+        # ov-v1.1: optical soil-mark evidence (core vs halo statistics; no picture layer)
+        if "OPTICAL" in ev:
+            layers.append({"name": "Optical soil-mark (Sentinel-2)", "state": "EVIDENCE",
+                           "detail": "linked to this candidate (%s); statistics only, no image layer"
+                                     % ", ".join(sorted(ev["OPTICAL"]))})
+        else:
+            layers.append({"name": "Optical soil-mark (Sentinel-2)", "state": "NONE",
+                           "detail": "no soil-mark evidence recorded for this candidate"})
         layers.append({"name": "GPR (field)", "state": "MEASURED" if n_gpr else "NONE",
                        "detail": ("%d dataset(s) imported" % n_gpr) if n_gpr else "no survey imported"})
         ert_manual = sum(ev.get("ERT", {}).values())
@@ -140,6 +154,10 @@ def overview_json(db_root: str, session_id: str) -> str:
                        "detail": ("%d section(s) imported" % n_ert if n_ert else "no section imported")
                                  + ("; %d manual reading(s)" % ert_manual if ert_manual else "")})
         layers.append({"name": "Magnetometry", "state": "NONE", "detail": "not supported yet"})
+        shown = {"DEM", "NDVI", "THERMAL", "SAR", "OPTICAL", "GPR", "ERT"}
+        for et in sorted(set(ev) - shown):            # ov-v1.1: nothing linked may be left off the list
+            layers.append({"name": et.replace("_", " ").title(), "state": "EVIDENCE",
+                           "detail": "linked to this candidate (%s)" % ", ".join(sorted(ev[et]))})
 
         import section_hypothesis as sh
         import footprint_hypothesis as fph
