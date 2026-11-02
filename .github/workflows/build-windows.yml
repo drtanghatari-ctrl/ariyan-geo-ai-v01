@@ -1,0 +1,85 @@
+name: Build Windows app
+
+# win-w0 (2026-11-02): ARIYAN GEO AI for Windows. Two jobs on a real Windows
+# machine:
+#   1. core-tests-windows -- the same core test suite the phone build uses
+#      (shows any Windows-only difference in the science; does not block job 2)
+#   2. build-exe -- self-test from source, PyInstaller build, self-test of the
+#      built program itself, then the folder is uploaded as an artifact.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'ARIYAN_GEO_AI/windows/**'
+      - 'ARIYAN_GEO_AI/app/src/main/python/**'
+      - 'ARIYAN_GEO_AI/tests/**'
+      - '.github/workflows/build-windows.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ARIYAN_GEO_AI
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip numpy scipy requests pytest
+      - name: Run the core test suite on Windows
+        env:
+          PYTHONPATH: app/src/main/python;tests
+        run: python -m pytest -q tests
+
+  build-exe:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: ARIYAN_GEO_AI/windows
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+      - name: Install app and build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller==6.11.1 pytest
+      - name: Self-test from source (headless)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q tests
+      - name: List what the core imports (for PyInstaller)
+        run: python tools/gen_core_deps.py
+      - name: Build the program
+        run: >
+          pyinstaller --noconfirm --windowed --name "ARIYAN GEO AI"
+          --icon ariyan_win/assets/ariyan.ico
+          --add-data "../app/src/main/python:ariyan_core"
+          --add-data "ariyan_win/assets:ariyan_win/assets"
+          --hidden-import ariyan_win._core_deps
+          --exclude-module tkinter
+          ariyan_launcher.py
+      - name: Self-test of the built program
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $p = Start-Process -FilePath "dist\ARIYAN GEO AI\ARIYAN GEO AI.exe" -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content (Join-Path $env:TEMP "ariyan_selftest.txt")
+          if ($p.ExitCode -ne 0) { throw "self-test of the built program failed (exit $($p.ExitCode))" }
+      - name: Upload the program
+        uses: actions/upload-artifact@v6
+        with:
+          name: ARIYAN-GEO-AI-windows
+          path: ARIYAN_GEO_AI/windows/dist/ARIYAN GEO AI
+          retention-days: 30
