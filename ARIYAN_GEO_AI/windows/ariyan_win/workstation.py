@@ -7,6 +7,7 @@ of the project. Nothing here changes a status, review, confidence or evidence ro
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -78,7 +79,8 @@ def candidate_detail(root: str, cid: str) -> Dict[str, Any]:
     return {"id": cid, "lat": c["lat"], "lon": c["lon"], "status": c.get("status"), "band": c.get("confidence_band"),
             "numeric": c.get("confidence_numeric"), "z": c.get("score"), "job_title": c.get("job_title"),
             "evidence": ev, "debate": debate if debate and "error" not in debate else None,
-            "steward_lines": steward_lines, "known_site": ks, "calib_strong": strong}
+            "steward_lines": steward_lines, "known_site": ks, "calib_strong": strong,
+            "same_place": same_place(root, cid)}
 
 
 def terrain(root: str, cid: str) -> Dict[str, Any]:
@@ -160,3 +162,98 @@ def drape_on_dem(rgba: bytes, w: int, h: int, placement: Optional[Dict[str, floa
     mask = oky[:, None] & okx[None, :] & (img[vv, uu, 3] > 0)
     out[mask] = vals[mask]
     return out
+
+
+SAME_PLACE_M = 30.0                     # one 1-arc-second DEM cell
+
+
+def same_place(root: str, cid: str, conn=None) -> List[Dict[str, Any]]:
+    """Earlier candidates within one DEM cell (30 m) of this one: a repeat run of the
+    same place, a note only -- nothing is merged or changed (win-w4c)."""
+    import math
+    own = conn is None
+    if own:
+        conn = _conn(root)
+    try:
+        c = conn.execute("SELECT lat, lon, created_at FROM candidate WHERE id = ?", (cid,)).fetchone()
+        if c is None:
+            return []
+        lat, lon, created = c[0], c[1], c[2]
+        dlat = SAME_PLACE_M / 111320.0
+        dlon = SAME_PLACE_M / (111320.0 * max(0.1, math.cos(math.radians(lat))))
+        out = []
+        for r in conn.execute("SELECT id, lat, lon, status, confidence_band, created_at FROM candidate WHERE id != ? "
+                              "AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ? AND created_at < ?",
+                              (cid, lat - dlat, lat + dlat, lon - dlon, lon + dlon, created)):
+            d = math.hypot((r["lat"] - lat) * 111320.0, (r["lon"] - lon) * 111320.0 * math.cos(math.radians(lat)))
+            if d <= SAME_PLACE_M:
+                out.append({"id": r["id"], "distance_m": round(d, 1), "status": r["status"],
+                            "band": r["confidence_band"], "created_at": r["created_at"]})
+        return sorted(out, key=lambda x: x["created_at"])
+    finally:
+        if own:
+            conn.close()
+
+
+def candidate_page(root: str, job_id: Optional[str], status: str, band: str, text: str, offset: int,
+                   limit: int = 100) -> Dict[str, Any]:
+    """One page of candidates for the review list (newest first), with the same-place note."""
+    conn = _conn(root)
+    try:
+        where, args = ["1=1"], []
+        if job_id:
+            where.append("c.investigation_id IN (SELECT investigation_id FROM wide_area_search_tile WHERE job_id = ?)")
+            args.append(job_id)
+        if status:
+            where.append("c.status = ?")
+            args.append(status)
+        if band:
+            where.append("COALESCE(c.confidence_band, 'NOT_RATED') = ?")
+            args.append(band)
+        if text:
+            where.append("c.id LIKE ?")
+            args.append(text.strip().lower() + "%")
+        sql = " AND ".join(where)
+        total = conn.execute("SELECT COUNT(*) FROM candidate c WHERE " + sql, args).fetchone()[0]
+        rows = [dict(r) for r in conn.execute(
+            "SELECT c.id, c.lat, c.lon, c.status, c.score, c.confidence_band, c.confidence_numeric, c.created_at "
+            "FROM candidate c WHERE " + sql + " ORDER BY c.confidence_numeric IS NULL, c.confidence_numeric DESC, "
+            "ABS(COALESCE(c.score, 0)) DESC LIMIT ? OFFSET ?", args + [int(limit), int(offset)])]
+        for r in rows:
+            r["same_place"] = same_place(root, r["id"], conn)
+        return {"total": total, "rows": rows, "offset": offset}
+    finally:
+        conn.close()
+
+
+def export_results(root: str) -> Dict[str, Any]:
+    """Every candidate of the project as CSV and GeoJSON in offline_data/exports (read-only)."""
+    import csv
+    import hashlib
+    from datetime import datetime, timezone
+    conn = _conn(root)
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT c.id, c.lat, c.lon, c.status, c.confidence_band, c.confidence_numeric, c.score, c.created_at, "
+            "j.title AS job FROM candidate c LEFT JOIN wide_area_search_tile t ON t.investigation_id = c.investigation_id "
+            "LEFT JOIN wide_area_search_job j ON j.id = t.job_id ORDER BY c.created_at")]
+    finally:
+        conn.close()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    out = os.path.join(root, "exports", "results")
+    os.makedirs(out, exist_ok=True)
+    csv_path = os.path.join(out, "ariyan_candidates_%s.csv" % stamp)
+    cols = ["id", "lat", "lon", "status", "confidence_band", "confidence_numeric", "score", "job", "created_at"]
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(cols)
+        for r in rows:
+            w.writerow([r.get(k) for k in cols])
+    gj_path = os.path.join(out, "ariyan_candidates_%s.geojson" % stamp)
+    feats = [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [r["lon"], r["lat"]]},
+              "properties": {k: r.get(k) for k in cols if k not in ("lat", "lon")}} for r in rows]
+    with open(gj_path, "w", encoding="utf-8") as f:
+        json.dump({"type": "FeatureCollection", "name": "ARIYAN candidates %s" % stamp, "features": feats}, f)
+    md5 = {p: hashlib.md5(open(p, "rb").read()).hexdigest() for p in (csv_path, gj_path)}
+    return {"rows": len(rows), "csv": csv_path, "geojson": gj_path, "md5": md5,
+            "note": "Coordinates are exact. Statuses and bands are as stored; nothing was changed."}

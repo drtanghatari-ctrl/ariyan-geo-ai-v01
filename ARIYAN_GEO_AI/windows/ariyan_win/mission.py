@@ -315,6 +315,9 @@ class Workstation(QtWidgets.QScrollArea):
             vit("Job", d["job_title"])
         if d.get("known_site"):
             self.vital.addWidget(lab(d["known_site"], colour=MUTED))
+        if d.get("same_place"):                       # win-w4c: a repeat run of the same spot (note only)
+            self.vital.addWidget(lab("Same place as earlier candidate(s): " + ", ".join(
+                "%s (%.0f m)" % (x["id"][:8], x["distance_m"]) for x in d["same_place"][:3]), colour=GOLD))
         ev = d.get("evidence") or {}
         if not ev:
             self.evid.addWidget(lab("No evidence linked to this candidate yet.", colour=MUTED))

@@ -274,8 +274,7 @@ class InvestigationTab(QtWidgets.QWidget):
         ev = rec.get("evidence") or []
         html = ["<h3>Investigation at %.5f, %.5f</h3>" % (self.lat.value(), self.lon.value()),
                 "<p><b>%s</b></p>" % (rec.get("confidence_statement") or ""),
-                "<p>Evidence: %s</p>" % ", ".join("%s (%s)" % (e.get("source", "?"), e.get("kind") or e.get("type") or "")
-                                                 for e in ev),
+                "<p>Evidence:</p><ul>%s</ul>" % "".join("<li>%s</li>" % e.get("source", "?") for e in ev),
                 "<p>Anomalies found: %d</p>" % len(rec.get("anomalies") or [])]
         for d in (deb.get("debates") or [])[:5]:
             syn = d.get("synthesis") or {}

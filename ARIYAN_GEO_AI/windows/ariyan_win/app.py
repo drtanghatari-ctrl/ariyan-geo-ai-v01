@@ -179,12 +179,11 @@ def build_window(root: str):
             vl.addWidget(vb)
             vl.addStretch(1)
             self.tabs.addTab(vis, "VISUALIZATION")
-            for name, step in (("ANALYSIS & MODELS", "W4"), ("REPORT & ARCHIVE", "W4")):
-                w = QtWidgets.QWidget()
-                QtWidgets.QVBoxLayout(w).addWidget(label("%s arrives in step %s." % (name.title(), step), "muted"))
-                i = self.tabs.addTab(w, name.replace("&", "&&"))   # a single & would become a shortcut mark
-                self.tabs.setTabEnabled(i, False)
-                self.tabs.setTabToolTip(i, "Arrives in step " + step)
+            from ariyan_win.review import AnalysisModels, ReportArchive
+            self.models = AnalysisModels(root)
+            self.tabs.addTab(self.models, "ANALYSIS && MODELS")
+            self.report = ReportArchive(root, self.mission.open_final_image)
+            self.report_index = self.tabs.addTab(self.report, "REPORT && ARCHIVE")
             v.addWidget(self.tabs, 1)
             v.addLayout(self._bottom())
             self.status = label("", "muted")
@@ -226,12 +225,12 @@ def build_window(root: str):
             newinv = QtWidgets.QPushButton("New Investigation")
             newinv.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
             h.addWidget(newinv)
-            later = (("Generate Report", "W4c"), ("Export Results", "W4c"))
-            for name, step in later:
-                b = QtWidgets.QPushButton(name)
-                b.setEnabled(False)
-                b.setToolTip("Arrives in step " + step)
-                h.addWidget(b)
+            gen = QtWidgets.QPushButton("Generate Report")
+            gen.clicked.connect(lambda: (self.tabs.setCurrentIndex(self.report_index), self.report.generate_report()))
+            exr = QtWidgets.QPushButton("Export Results")
+            exr.clicked.connect(lambda: self.report.export_results())
+            h.addWidget(gen)
+            h.addWidget(exr)
             h.addStretch(1)
             sett = QtWidgets.QPushButton("Settings")
             sett.clicked.connect(self.open_settings)
@@ -336,6 +335,8 @@ def build_window(root: str):
                 self.dataev.root = d
                 self.investigation.root = d
                 self.jobs.root = d
+                self.report.root = d
+                self.models.root = d
                 self.reload()
 
         # ---------------------------------------------------------------- data
@@ -350,6 +351,9 @@ def build_window(root: str):
                 self.dataev.load()
             if hasattr(self, "jobs"):
                 self.jobs.load()
+            if hasattr(self, "report"):
+                self.report._jobs_loaded = False
+                self.report.load(0)
             while self.pills.count():
                 it = self.pills.takeAt(0)
                 if it.widget():
