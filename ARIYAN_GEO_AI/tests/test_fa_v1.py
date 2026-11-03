@@ -287,7 +287,8 @@ def test_bridge_satellite_only_if_already_open_never_downloads():
 def test_bridge_export_and_errors(tmp_path):
     sid = _session(np.ones((20, 20)))
     r = json.loads(psm.export_profile_json(str(tmp_path), sid, 0, 3, 20, 17))
-    assert r["ok"] and r["paths"]["png"].endswith(".png") and "/exports/profile/" in r["paths"]["csv"]
+    # win-w0.1: compare with forward slashes, so the check also holds for Windows paths (C:\\...\\exports\\profile\\)
+    assert r["ok"] and r["paths"]["png"].endswith(".png") and "/exports/profile/" in r["paths"]["csv"].replace("\\", "/")
     assert "expired" in json.loads(psm.profile_json("nope", 0, 0, 1, 1))["error"]
     assert "error" in json.loads(psm.profile_json(sid, -9, -9, -8, -8))
 
