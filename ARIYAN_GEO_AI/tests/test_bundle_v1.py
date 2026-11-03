@@ -142,3 +142,22 @@ def test_work_after_receiving_needs_confirmation(tmp_path):
     b_again = pb.make_bundle(phone, drive, "phone")         # phone sends again by mistake
     r = pb.receive(laptop, b_again["path"], "laptop")
     assert not r["received"] and "after receiving" in r["warnings"][0]
+
+
+def test_receive_refreshes_todays_backup(tmp_path):
+    """bundle-v1.1: after receiving, today's automatic backup holds the received project."""
+    import glob
+    import sqlite3
+    phone, laptop, drive = str(tmp_path / "phone"), str(tmp_path / "laptop"), str(tmp_path / "drive")
+    os.makedirs(phone)
+    _project(phone, 4)
+    os.makedirs(laptop)
+    db.create_grand_project(laptop, "Empty laptop project", project_id="default")   # laptop opened once, empty
+    b = pb.make_bundle(phone, drive, "phone")
+    r = pb.receive(laptop, b["path"], "laptop", confirm=True)
+    assert r["received"]
+    autos = glob.glob(os.path.join(laptop, db.BACKUP_DIRNAME, db.AUTO_BACKUP_PREFIX + "*.db"))
+    assert len(autos) == 1
+    c = sqlite3.connect(autos[0])
+    assert c.execute("SELECT COUNT(*) FROM candidate").fetchone()[0] == 4
+    c.close()
