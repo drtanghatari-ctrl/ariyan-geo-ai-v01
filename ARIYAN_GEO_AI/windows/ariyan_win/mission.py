@@ -120,6 +120,9 @@ class Workstation(QtWidgets.QScrollArea):
         self.tile_button.clicked.connect(self._download_tile)
         self.tile_button.hide()
         ctrl.addWidget(self.tile_button)
+        self.fi_button = QtWidgets.QPushButton("Open its Final Image \u2197")
+        self.fi_button.clicked.connect(lambda: self.open_final_image(self.selected))
+        ctrl.addWidget(self.fi_button)
         tl.addLayout(ctrl)
         self.terrain = widgets.TerrainView()
         self.terrain.setMinimumWidth(300)
@@ -171,6 +174,7 @@ class Workstation(QtWidgets.QScrollArea):
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         self.table.itemSelectionChanged.connect(self._row_selected)
+        self.table.itemDoubleClicked.connect(lambda it: self.open_final_image(it.data(QtCore.Qt.UserRole)))
         self.table.setMinimumHeight(220)
         trl.addWidget(self.table)
         self.map_box, ml = panel("CANDIDATE MAP (this window)", TEAL)
@@ -238,6 +242,7 @@ class Workstation(QtWidgets.QScrollArea):
                 self.table.setItem(i, j, it)
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(5, max(self.table.columnWidth(5), 90))    # Status fully visible
         self.table.blockSignals(False)
         top = o.get("top", [])
         if top:
@@ -365,14 +370,18 @@ class Workstation(QtWidgets.QScrollArea):
         self.terrain.set_surface(h, s["cell_dx_m"], s["cell_dy_m"], s.get("ve_auto", 1.0), t["pins"])
         relief = widgets.image_from_rgba(t["drape"], t["width"], t["height"])
         self._layer_images = {"Relief (hillshaded DEM)": relief}
+        self._layer_arrays = {"Relief (hillshaded DEM)": workstation.drape_on_dem(
+            t["drape"], t["width"], t["height"], None, h.shape[1], h.shape[0])}
         for l in t["layers"]:
             if l.get("state") == "SAVED" and l.get("rgba"):
                 self._layer_images[l["label"]] = widgets.image_from_rgba(l["rgba"], l["width"], l["height"])
+                self._layer_arrays[l["label"]] = workstation.drape_on_dem(
+                    l["rgba"], l["width"], l["height"], l.get("placement"), h.shape[1], h.shape[0])
         self.drape_combo.blockSignals(True)
         self.drape_combo.clear()
         self.drape_combo.addItems(list(self._layer_images))
         self.drape_combo.blockSignals(False)
-        self.terrain.set_drape(relief)
+        self.terrain.set_drape_array(self._layer_arrays["Relief (hillshaded DEM)"])
         ve = s.get("ve_auto", 1.0)
         self.terrain_caption.setText("Real DEM window \u00b11 km (%s). Height \u00d7%s (automatic). %d candidate pins; "
                                      "the selected candidate is the large white pin." % (m.get("source"),
@@ -403,6 +412,13 @@ class Workstation(QtWidgets.QScrollArea):
             self.thermal_note.setText("Not saved for this window. Open the Final Image to fetch it (W3).")
         self._tile_chips(t["layers"])
 
+    def open_final_image(self, cid: Optional[str]):
+        if not cid:
+            return
+        from ariyan_win.finalimage import FinalImageWindow
+        w = FinalImageWindow(self.root, cid, self.window())
+        w.show()
+
     def _tile_chips(self, layers: List[Dict[str, Any]]):
         clear(self.tiles_row)
         dem_ok = "meta" in self.terrain_data
@@ -424,11 +440,13 @@ class Workstation(QtWidgets.QScrollArea):
 
     def _drape_changed(self, _i: int):
         name = self.drape_combo.currentText()
-        img = self._layer_images.get(name)
-        if img is not None:
-            self.terrain.set_drape(img)
+        arr = getattr(self, "_layer_arrays", {}).get(name)
+        if arr is not None:
+            self.terrain.set_drape_array(arr)              # each layer sits where its own cells are
             if "meta" in self.terrain_data:
                 h = self.terrain_data["heights"]
+                a = np.ascontiguousarray(arr)
+                img = QtGui.QImage(a.data, a.shape[1], a.shape[0], 3 * a.shape[1], QtGui.QImage.Format_RGB888).copy()
                 self.map.set(img, self.terrain_data["pins"], h.shape[1], h.shape[0])
 
     def _download_tile(self):

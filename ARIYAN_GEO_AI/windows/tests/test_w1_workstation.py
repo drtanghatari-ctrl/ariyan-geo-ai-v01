@@ -61,3 +61,34 @@ def test_workstation_window_builds_on_a_project(tmp_path):
     qa.processEvents()
     assert w.mission.table.rowCount() == 1
     w.close()
+
+
+def test_debate_studio_lists_each_debate_once(tmp_path):
+    import debate_store
+    from PySide6 import QtWidgets
+    from ariyan_win import app, qtwork
+    root = str(tmp_path)
+    cid = _project(root)
+    debate_store.record(root, cid, {"positions": [], "synthesis": {"agreement_level": "WEAK_SIGNAL"}}, None, "run")
+    qa = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["t"])
+    w = app.build_window(root)
+    for _ in range(4):
+        qtwork.wait_all(30000)
+        qa.processEvents()
+    assert w.debates.list.count() == 1
+    w.close()
+
+
+def test_final_image_window_reports_a_missing_tile(tmp_path):
+    from PySide6 import QtWidgets
+    from ariyan_win import qtwork
+    from ariyan_win.finalimage import FinalImageWindow
+    root = str(tmp_path)
+    cid = _project(root)
+    qa = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["t"])
+    w = FinalImageWindow(root, cid)
+    for _ in range(3):
+        qtwork.wait_all(30000)
+        qa.processEvents()
+    assert "terrain tile" in w.layer_note.text()
+    w.close()

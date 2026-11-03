@@ -113,6 +113,8 @@ def terrain(root: str, cid: str) -> Dict[str, Any]:
             if l.get("state") == "SAVED":
                 try:
                     item["rgba"] = bytes(sim.layer_rgba(sid, l["product"]))
+                    # w3: where the layer's own cells sit on the DEM window (DEM pixel units)
+                    item["placement"] = sim._LAYERS[sid][l["product"]]["payload"]["placement"]
                 except Exception as e:
                     item["state"], item["reason"] = "ERROR", str(e)
             layers.append(item)
@@ -137,3 +139,24 @@ def candidate_detail_light(root: str, cid: str) -> Dict[str, Any]:
         return {"lat": r[0], "lon": r[1]}
     finally:
         conn.close()
+
+
+def drape_on_dem(rgba: bytes, w: int, h: int, placement: Optional[Dict[str, float]], dem_w: int,
+                 dem_h: int) -> np.ndarray:
+    """(dem_h, dem_w, 3) colours: for each DEM cell centre, the satellite cell it falls in
+    (nearest; no smoothing). Cells outside the layer stay dark. placement = {x0, y0, sx, sy}:
+    layer cell (u, v) covers DEM pixels x0 + u*sx ... (sat_image_mobile.placement)."""
+    img = np.frombuffer(rgba, dtype=np.uint8).reshape(h, w, 4)
+    if not placement:
+        placement = {"x0": 0.0, "y0": 0.0, "sx": dem_w / float(w), "sy": dem_h / float(h)}
+    cx = np.arange(dem_w) + 0.5
+    cy = np.arange(dem_h) + 0.5
+    u = np.floor((cx - placement["x0"]) / placement["sx"]).astype(int)
+    v = np.floor((cy - placement["y0"]) / placement["sy"]).astype(int)
+    out = np.full((dem_h, dem_w, 3), 20, dtype=np.uint8)
+    okx, oky = (u >= 0) & (u < w), (v >= 0) & (v < h)
+    vv, uu = np.meshgrid(np.clip(v, 0, h - 1), np.clip(u, 0, w - 1), indexing="ij")
+    vals = img[vv, uu, :3]
+    mask = oky[:, None] & okx[None, :] & (img[vv, uu, 3] > 0)
+    out[mask] = vals[mask]
+    return out

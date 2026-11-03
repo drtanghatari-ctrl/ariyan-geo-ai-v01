@@ -135,6 +135,12 @@ class TerrainView(QtWidgets.QWidget):
         self.drape = arr[:, : w * 3].reshape(h, w, 3).copy()
         self.update()
 
+    def set_drape_array(self, arr: np.ndarray):
+        """arr: (h, w, 3) uint8 on the DEM's own lattice (see workstation.drape_on_dem)."""
+        if self.heights is not None and arr.shape[:2] == self.heights.shape:
+            self.drape = arr
+            self.update()
+
     # -- interaction
     def mousePressEvent(self, e):
         self._last = e.position()

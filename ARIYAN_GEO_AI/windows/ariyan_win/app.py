@@ -148,10 +148,28 @@ def build_window(root: str):
             v.addLayout(self._header())
             self.tabs = QtWidgets.QTabWidget()
             from ariyan_win.mission import Workstation
+            from ariyan_win.debates import DebateStudio
             self.mission = Workstation(root)
             self.tabs.addTab(self.mission, "MISSION CONTROL")
-            for name, step in (("INVESTIGATION", "W4"), ("DATA & EVIDENCE", "W4"), ("AI DEBATE STUDIO", "W3"),
-                               ("ANALYSIS & MODELS", "W4"), ("VISUALIZATION", "W3"), ("REPORT & ARCHIVE", "W4")):
+            for name, step in (("INVESTIGATION", "W4"), ("DATA & EVIDENCE", "W4")):
+                w = QtWidgets.QWidget()
+                QtWidgets.QVBoxLayout(w).addWidget(label("%s arrives in step %s." % (name.title(), step), "muted"))
+                i = self.tabs.addTab(w, name.replace("&", "&&"))
+                self.tabs.setTabEnabled(i, False)
+                self.tabs.setTabToolTip(i, "Arrives in step " + step)
+            self.debates = DebateStudio(root, self.mission.open_final_image)
+            self.tabs.addTab(self.debates, "AI DEBATE STUDIO")
+            vis = QtWidgets.QWidget()
+            vl = QtWidgets.QVBoxLayout(vis)
+            vl.addWidget(label("VISUALIZATION opens the Final Image of the candidate selected on Mission Control: "
+                               "map with exact cells, contours, UTM grid and saved satellite layers; profile and "
+                               "section; 3D surface.", "muted", wrap=True))
+            vb = QtWidgets.QPushButton("Open the Final Image of the selected candidate \u2197")
+            vb.clicked.connect(lambda: self.mission.open_final_image(self.mission.selected))
+            vl.addWidget(vb)
+            vl.addStretch(1)
+            self.tabs.addTab(vis, "VISUALIZATION")
+            for name, step in (("ANALYSIS & MODELS", "W4"), ("REPORT & ARCHIVE", "W4")):
                 w = QtWidgets.QWidget()
                 QtWidgets.QVBoxLayout(w).addWidget(label("%s arrives in step %s." % (name.title(), step), "muted"))
                 i = self.tabs.addTab(w, name.replace("&", "&&"))   # a single & would become a shortcut mark
@@ -293,6 +311,7 @@ def build_window(root: str):
                 self.root = d
                 self.mission.root = d
                 self.mission.selected = None
+                self.debates.root = d
                 self.reload()
 
         # ---------------------------------------------------------------- data
@@ -301,6 +320,8 @@ def build_window(root: str):
                 return
             self._busy = True
             self.mission.terrain_data = {}             # re-read the selected candidate too
+            if hasattr(self, "debates"):
+                self.debates.load(append=False)
             while self.pills.count():
                 it = self.pills.takeAt(0)
                 if it.widget():
