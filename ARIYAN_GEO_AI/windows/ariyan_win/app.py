@@ -140,7 +140,9 @@ def build_window(root: str):
             self.root = root
             self.setWindowTitle("ARIYAN GEO AI \u2014 Scientific Geospatial Laboratory")
             self.setWindowIcon(QtGui.QIcon(asset("ariyan.ico")))
-            self.resize(1440, 900)
+            scr = QtGui.QGuiApplication.primaryScreen()
+            avail = scr.availableGeometry() if scr else QtCore.QRect(0, 0, 1440, 900)
+            self.resize(min(1440, avail.width()), min(900, avail.height()))   # never larger than the screen
             central = QtWidgets.QWidget()
             self.setCentralWidget(central)
             v = QtWidgets.QVBoxLayout(central)
@@ -447,5 +449,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     app.setWindowIcon(QtGui.QIcon(asset("ariyan.ico")))
     app.setStyleSheet(STYLE)
     w = build_window(config.data_root())
-    w.show()
+    # win-w4a.1: open filling the screen, so the bottom bar (Settings, Receive/Send, ...) is always visible
+    w.showMaximized()
     return app.exec()
