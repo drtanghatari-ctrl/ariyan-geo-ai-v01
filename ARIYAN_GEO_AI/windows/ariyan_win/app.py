@@ -147,10 +147,11 @@ def build_window(root: str):
             v.setContentsMargins(12, 10, 12, 10)
             v.addLayout(self._header())
             self.tabs = QtWidgets.QTabWidget()
-            self.mission = QtWidgets.QWidget()
+            from ariyan_win.mission import Workstation
+            self.mission = Workstation(root)
             self.tabs.addTab(self.mission, "MISSION CONTROL")
-            for name, step in (("INVESTIGATION", "W4"), ("DATA & EVIDENCE", "W4"), ("AI DEBATE STUDIO", "W1"),
-                               ("ANALYSIS & MODELS", "W1"), ("VISUALIZATION", "W3"), ("REPORT & ARCHIVE", "W4")):
+            for name, step in (("INVESTIGATION", "W4"), ("DATA & EVIDENCE", "W4"), ("AI DEBATE STUDIO", "W3"),
+                               ("ANALYSIS & MODELS", "W4"), ("VISUALIZATION", "W3"), ("REPORT & ARCHIVE", "W4")):
                 w = QtWidgets.QWidget()
                 QtWidgets.QVBoxLayout(w).addWidget(label("%s arrives in step %s." % (name.title(), step), "muted"))
                 i = self.tabs.addTab(w, name.replace("&", "&&"))   # a single & would become a shortcut mark
@@ -158,8 +159,6 @@ def build_window(root: str):
                 self.tabs.setTabToolTip(i, "Arrives in step " + step)
             v.addWidget(self.tabs, 1)
             v.addLayout(self._bottom())
-            self.mission_layout = QtWidgets.QGridLayout(self.mission)
-            self.mission_layout.setSpacing(10)
             self.status = label("", "muted")
             self.statusBar().addWidget(self.status)
             self.reload()
@@ -292,6 +291,8 @@ def build_window(root: str):
             if d:
                 config.set_data_root(d)
                 self.root = d
+                self.mission.root = d
+                self.mission.selected = None
                 self.reload()
 
         # ---------------------------------------------------------------- data
@@ -299,10 +300,7 @@ def build_window(root: str):
             if getattr(self, "_busy", False):        # one read at a time (never two first-time opens at once)
                 return
             self._busy = True
-            while self.mission_layout.count():
-                it = self.mission_layout.takeAt(0)
-                if it.widget():
-                    it.widget().deleteLater()
+            self.mission.terrain_data = {}             # re-read the selected candidate too
             while self.pills.count():
                 it = self.pills.takeAt(0)
                 if it.widget():
@@ -333,73 +331,10 @@ def build_window(root: str):
             elif h.get("state") == "RECEIVED":
                 self._pill("Received from the " + str(h.get("from")), True)
             self.status.setText("Data folder: " + self.root)
-            g = self.mission_layout
-            if "error" in o:
-                f, lay = panel("COULD NOT READ THE PROJECT")
-                lay.addWidget(label(o["error"], wrap=True))
-                g.addWidget(f, 0, 0)
-                return
-            # study area
-            f, lay = panel("STUDY AREA")
-            p = o.get("project")
-            if p is None:
-                lay.addWidget(label(o.get("empty_note", ""), wrap=True))
-                lay.addWidget(label("Use \u201cReceive from phone\u201d below to load your phone's project here.",
-                                    "muted", wrap=True))
-            else:
-                lay.addWidget(label(p["name"]))
-                lay.addWidget(label("{:,} wide-area jobs \u00b7 {:,} investigations \u00b7 {:,} candidates".format(
-                    p["jobs"], p["investigations"], p["candidates"]), "muted"))
-                sc = p.get("status_counts", {})
-                lay.addWidget(label("  \u00b7  ".join("%s %s" % (k, "{:,}".format(v)) for k, v in sc.items()), "muted"))
-            lay.addStretch(1)
-            g.addWidget(f, 0, 0)
-            # assessment
-            f, lay = panel("FINAL SCIENTIFIC ASSESSMENT")
-            c = o.get("confidence") or {}
-            hi = c.get("highest")
-            big = label((hi or "Not rated") + ("   %.2f" % c["highest_numeric"] if c.get("highest_numeric") is not None else ""))
-            big.setStyleSheet("font-size: 22pt; font-weight: 700; color: %s; background: transparent;" % BAND_COLOURS.get(hi or "", TEXT))
-            lay.addWidget(big)
-            if c.get("why"):
-                lay.addWidget(label("Why not higher: " + c["why"], wrap=True))
-            for b in c.get("bands", []):
-                if b["count"]:
-                    lay.addWidget(label("\u25a0 %s  %s" % (b["band"].title(), "{:,}".format(b["count"])), "muted"))
-            lay.addWidget(label("The round gauge and the 3D terrain arrive in step W1.", "muted", wrap=True))
-            lay.addStretch(1)
-            g.addWidget(f, 0, 1)
-            # targets
-            f, lay = panel("CANDIDATE TARGETS")
-            t = QtWidgets.QTableWidget(0, 6)
-            t.setHorizontalHeaderLabels(["ID", "Latitude", "Longitude", "Band", "Status", "Recorded site"])
-            t.verticalHeader().setVisible(False)
-            t.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-            for r in o.get("top", []):
-                i = t.rowCount()
-                t.insertRow(i)
-                vals = [r["id"][:8], "%.5f" % r["lat"], "%.5f" % r["lon"],
-                        "%s%s" % (r["band"].title(), "" if r.get("numeric") is None else " %.2f" % r["numeric"]),
-                        r.get("status") or "", r.get("known_site") or ""]
-                for j, s in enumerate(vals):
-                    t.setItem(i, j, QtWidgets.QTableWidgetItem(s))
-            t.horizontalHeader().setStretchLastSection(True)
-            t.resizeColumnsToContents()
-            lay.addWidget(t)
-            g.addWidget(f, 1, 0, 1, 2)
-            # sources
-            f, lay = panel("DATA SOURCES (on this computer)")
-            for s in o.get("sources", []):
-                x = label(("\u2713  " if s["ok"] else "\u2717  ") + s["name"] + " \u2014 " + s["detail"], wrap=True)
-                x.setStyleSheet("color: %s; background: transparent;" % (ACCENT if s["ok"] else ORANGE))
-                lay.addWidget(x)
-            lay.addStretch(1)
-            g.addWidget(f, 0, 2, 2, 1)
-            foot = label("Real Data Only \u00b7 Scientific Integrity \u00b7 No Synthetic Data \u00b7 "
-                         "Uncertainty Quantified \u00b7 Human Oversight", "tag")
-            foot.setAlignment(QtCore.Qt.AlignCenter)
-            g.addWidget(foot, 2, 0, 1, 3)
-            g.setColumnStretch(0, 3); g.setColumnStretch(1, 3); g.setColumnStretch(2, 2)
+            if o.get("project") is None and "error" not in o:
+                self.mission.terrain.set_message((o.get("empty_note") or "") + "\n\nUse \u201cReceive from phone\u201d "
+                                                 "below to load your phone's project here.")
+            self.mission.show_mission(o)
 
     return Main()
 
