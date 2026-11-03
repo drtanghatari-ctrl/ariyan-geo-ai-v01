@@ -40,3 +40,15 @@ def test_no_public_tile_and_outside_coverage(tmp_path):
     assert r["status"] == "not_available" and not r["present"]
     out = json.loads(tt.tile_status_json(root, -45.0, 170.0))
     assert out["covered"] is False
+
+
+def test_study_area_tiles_cover_every_job(tmp_path):
+    import grand_project_db as db
+    root = str(tmp_path)
+    gid = db.create_grand_project(root, "Default Grand Project", project_id="default")
+    db.create_wide_area_search_job(root, gid, "U2 Solduz", "bbox", 36.9, 37.1, 45.3, 45.6, 1000.0,
+                                   [{"tile_index": 0, "center_lat": 37.0, "center_lon": 45.45}])
+    r = tt.study_area_tiles(root)
+    assert r["jobs"] == 1
+    assert [(t["lat"], t["lon"]) for t in r["tiles"]] == [(36, 45), (37, 45)]
+    assert r["missing"] == 2 and all(t["tile"] and t["jobs"] == ["U2 Solduz"] for t in r["tiles"])

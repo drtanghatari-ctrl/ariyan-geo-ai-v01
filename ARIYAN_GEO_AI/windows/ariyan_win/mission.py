@@ -144,8 +144,10 @@ class Workstation(QtWidgets.QScrollArea):
         self.profile = widgets.ProfileView()
         sl.addWidget(self.profile, 1)
         self.sub_box, subl = panel("3D SUBSURFACE BLOCK \u00b7 SURFER 3D", "#9A7BFF")
-        subl.addWidget(lab("Evidence volume, GPR depth slices, ERT cut faces and your hypotheses open in the "
-                           "Final Image (step W3).", colour=MUTED))
+        subl.addWidget(lab("Evidence volume, GPR depth slices, ERT cut faces and your hypotheses.", colour=MUTED))
+        sb = QtWidgets.QPushButton("Open the Evidence Volume \u2197")
+        sb.clicked.connect(lambda: self.open_final_image(self.selected, start_tab=4))
+        subl.addWidget(sb)
         subl.addStretch(1)
         for b, s in ((self.thermal_box, 1), (self.section_box, 2), (self.sub_box, 1)):
             small.addWidget(b, s)
@@ -412,11 +414,11 @@ class Workstation(QtWidgets.QScrollArea):
             self.thermal_note.setText("Not saved for this window. Open the Final Image to fetch it (W3).")
         self._tile_chips(t["layers"])
 
-    def open_final_image(self, cid: Optional[str]):
+    def open_final_image(self, cid: Optional[str], start_tab: int = 0):
         if not cid:
             return
         from ariyan_win.finalimage import FinalImageWindow
-        w = FinalImageWindow(self.root, cid, self.window())
+        w = FinalImageWindow(self.root, cid, self.window(), start_tab=start_tab)
         w.show()
 
     def _tile_chips(self, layers: List[Dict[str, Any]]):

@@ -151,12 +151,14 @@ def build_window(root: str):
             from ariyan_win.debates import DebateStudio
             self.mission = Workstation(root)
             self.tabs.addTab(self.mission, "MISSION CONTROL")
-            for name, step in (("INVESTIGATION", "W4"), ("DATA & EVIDENCE", "W4")):
-                w = QtWidgets.QWidget()
-                QtWidgets.QVBoxLayout(w).addWidget(label("%s arrives in step %s." % (name.title(), step), "muted"))
-                i = self.tabs.addTab(w, name.replace("&", "&&"))
-                self.tabs.setTabEnabled(i, False)
-                self.tabs.setTabToolTip(i, "Arrives in step " + step)
+            from ariyan_win.dataev import DataEvidence
+            w = QtWidgets.QWidget()
+            QtWidgets.QVBoxLayout(w).addWidget(label("Investigation arrives in step W4b.", "muted"))
+            i = self.tabs.addTab(w, "INVESTIGATION")
+            self.tabs.setTabEnabled(i, False)
+            self.tabs.setTabToolTip(i, "Arrives in step W4b")
+            self.dataev = DataEvidence(root)
+            self.tabs.addTab(self.dataev, "DATA && EVIDENCE")
             self.debates = DebateStudio(root, self.mission.open_final_image)
             self.tabs.addTab(self.debates, "AI DEBATE STUDIO")
             vis = QtWidgets.QWidget()
@@ -220,6 +222,9 @@ def build_window(root: str):
                 b.setToolTip("Arrives in step " + step)
                 h.addWidget(b)
             h.addStretch(1)
+            sett = QtWidgets.QPushButton("Settings")
+            sett.clicked.connect(self.open_settings)
+            h.addWidget(sett)
             choose = QtWidgets.QPushButton("Data folder\u2026")
             choose.clicked.connect(self.choose_root)
             opendir = QtWidgets.QPushButton("Open data folder")
@@ -304,6 +309,11 @@ def build_window(root: str):
                 % (r["name"], r["bytes"] / 1e6, out))
             self.reload()
 
+        def open_settings(self):
+            from ariyan_win.settingsdlg import SettingsDialog
+            SettingsDialog(self.root, self).exec()
+            self.reload()
+
         def choose_root(self):
             d = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose the ARIYAN data folder (offline_data)", self.root)
             if d:
@@ -312,6 +322,7 @@ def build_window(root: str):
                 self.mission.root = d
                 self.mission.selected = None
                 self.debates.root = d
+                self.dataev.root = d
                 self.reload()
 
         # ---------------------------------------------------------------- data
@@ -322,6 +333,8 @@ def build_window(root: str):
             self.mission.terrain_data = {}             # re-read the selected candidate too
             if hasattr(self, "debates"):
                 self.debates.load(append=False)
+            if hasattr(self, "dataev"):
+                self.dataev.load()
             while self.pills.count():
                 it = self.pills.takeAt(0)
                 if it.widget():

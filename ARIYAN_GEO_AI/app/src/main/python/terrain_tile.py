@@ -9,6 +9,10 @@ source and into the same place the phone's country download uses
 (<offline_data>/<country>/dem/<tile>.tif), with the same downloader
 (offline_data_manager._download_one_tile: atomic write, retries, a 404 means
 "no public tile here"). No key is needed. Nothing else is changed.
+
+tt-v1.1 (W4a): study_area_tiles() lists the 1-degree tiles that cover every
+wide-area job of the project (their stored bounding boxes), each with
+present / missing, so the laptop can fetch its whole study area once.
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ import math
 import os
 from typing import Any, Dict
 
-VERSION = "tt-v1"
+VERSION = "tt-v1.1"
 
 
 def tile_status(db_root: str, lat: float, lon: float) -> Dict[str, Any]:
@@ -54,5 +58,40 @@ def tile_status_json(db_root: str, lat: float, lon: float) -> str:
 def ensure_tile_json(db_root: str, lat: float, lon: float) -> str:
     try:
         return json.dumps(ensure_tile(db_root, lat, lon))
+    except Exception as e:
+        return json.dumps({"error": "%s: %s" % (type(e).__name__, e)})
+
+
+def study_area_tiles(db_root: str) -> Dict[str, Any]:
+    import grand_project_db as db
+    import offline_data_manager as odm
+    conn = db.get_connection(db_root)
+    try:
+        db.initialize_schema(conn)
+        jobs = [dict(r) for r in conn.execute("SELECT id, title, min_lat, max_lat, min_lon, max_lon FROM "
+                                              "wide_area_search_job")]
+    finally:
+        conn.close()
+    seen: Dict[tuple, Dict[str, Any]] = {}
+    for j in jobs:
+        try:
+            cells = odm.tiles_covering_bbox(float(j["min_lat"]), float(j["max_lat"]), float(j["min_lon"]),
+                                            float(j["max_lon"]))
+        except (TypeError, ValueError):
+            continue
+        for la, lo in cells:
+            e = seen.setdefault((la, lo), {"lat": la, "lon": lo, "jobs": []})
+            e["jobs"].append(j.get("title") or j["id"][:8])
+    tiles = []
+    for (la, lo), e in sorted(seen.items()):
+        st = tile_status(db_root, la + 0.5, lo + 0.5)
+        tiles.append(dict(e, **{k: st.get(k) for k in ("covered", "present", "tile")}))
+    return {"version": VERSION, "jobs": len(jobs), "tiles": tiles,
+            "missing": sum(1 for t in tiles if t["covered"] and not t["present"])}
+
+
+def study_area_tiles_json(db_root: str) -> str:
+    try:
+        return json.dumps(study_area_tiles(db_root))
     except Exception as e:
         return json.dumps({"error": "%s: %s" % (type(e).__name__, e)})

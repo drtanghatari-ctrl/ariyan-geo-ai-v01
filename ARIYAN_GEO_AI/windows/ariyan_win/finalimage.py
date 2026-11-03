@@ -23,11 +23,18 @@ section hypotheses on the profile line, ERT cut faces under the profile, and
 exports (Final Image PNG/GeoTIFF + provenance, profile PNG/CSV). Hypotheses are
 the user's own and never evidence; adding or withdrawing one changes no status,
 review or confidence (the phone's own footprint_hypothesis / section_hypothesis).
+
+win-w4a (2026-11-03): a layer that is not saved can be FETCHED from Copernicus
+with the login saved in Settings (once; saved after, so it then travels in the
+project bundle); GPR surveys are imported from the Evidence Volume tab and ERT
+surveys on the open profile line (field_data, the phone's own import: the file
+is copied unchanged, with its SHA-256).
 """
 from __future__ import annotations
 
 import json
 import math
+import os
 import webbrowser
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -84,9 +91,11 @@ def _open(root: str, cid: str, half: float, colour_by: str) -> Dict[str, Any]:
     return {"meta": j, "image": img, "surface": m, "heights": heights, "overview": o}
 
 
-def _layer(root: str, sid: str, product: str) -> Dict[str, Any]:
+def _layer(root: str, sid: str, product: str, fetch: bool = False) -> Dict[str, Any]:
     import sat_image_mobile as sim
-    r = json.loads(sim.open_layer_json(root, sid, product, "", "", False))
+    from ariyan_win import keys
+    cid, sec = keys.copernicus()
+    r = json.loads(sim.open_layer_json(root, sid, product, cid, sec, bool(fetch)))
     if r.get("needs_fetch") or "error" in r or not r.get("allowed", True):
         return r
     r["rgba"] = bytes(sim.layer_rgba(sid, product))
@@ -433,9 +442,10 @@ class ProfilePlot(QtWidgets.QWidget):
 # ---------------------------------------------------------------------------
 
 class FinalImageWindow(QtWidgets.QMainWindow):
-    def __init__(self, root: str, cid: str, parent=None):
+    def __init__(self, root: str, cid: str, parent=None, start_tab: int = 0):
         super().__init__(parent)
         self.root, self.cid = root, cid
+        self._start_tab = start_tab
         self.sid: Optional[str] = None
         self.data: Dict[str, Any] = {}
         self.layer_payload: Optional[Dict[str, Any]] = None
@@ -472,8 +482,14 @@ class FinalImageWindow(QtWidgets.QMainWindow):
             bar.addWidget(wdg)
         bar.addStretch(1)
         v.addLayout(bar)
+        nrow = QtWidgets.QHBoxLayout()
         self.layer_note = _lab("", colour=MUTED)
-        v.addWidget(self.layer_note)
+        nrow.addWidget(self.layer_note, 1)
+        self.fetch_btn = QtWidgets.QPushButton("Fetch from Copernicus")
+        self.fetch_btn.hide()
+        self.fetch_btn.clicked.connect(self._fetch_layer)
+        nrow.addWidget(self.fetch_btn)
+        v.addLayout(nrow)
         self.tabs = QtWidgets.QTabWidget()
         v.addWidget(self.tabs, 1)
         # overview
@@ -520,6 +536,9 @@ class FinalImageWindow(QtWidgets.QMainWindow):
         addh = QtWidgets.QPushButton("Add section hypothesis on this line")
         addh.clicked.connect(self._add_section)
         pb.addWidget(addh)
+        ei = QtWidgets.QPushButton("Import ERT on this line\u2026")
+        ei.clicked.connect(self._import_ert)
+        pb.addWidget(ei)
         exp = QtWidgets.QPushButton("Export profile (PNG + CSV)")
         exp.clicked.connect(self._export_profile)
         pb.addWidget(exp)
@@ -588,9 +607,14 @@ class FinalImageWindow(QtWidgets.QMainWindow):
                              "(yours) \u00b7 \u25a0 magenta = CONTESTED (two of yours claim it; the app never picks one) "
                              "\u00b7 grey = real GPR at its own resolution (small surveys: zoom in with the wheel) \u00b7 empty = UNKNOWN \u00b7 "
                              "cyan outline = your footprint", colour=MUTED))
+        rbr = QtWidgets.QHBoxLayout()
         rb = QtWidgets.QPushButton("Rebuild the volume")
         rb.clicked.connect(self._build_volume)
-        right.addWidget(rb)
+        gi = QtWidgets.QPushButton("Import GPR survey\u2026")
+        gi.clicked.connect(self._import_gpr)
+        rbr.addWidget(rb)
+        rbr.addWidget(gi)
+        right.addLayout(rbr)
         vh.addLayout(right, 3)
         self.tabs.addTab(vw, "Evidence Volume")
         self.tabs.currentChanged.connect(lambda i: self._build_volume() if i == 4 and not getattr(self, "_vol", None) else None)
@@ -672,6 +696,9 @@ class FinalImageWindow(QtWidgets.QMainWindow):
         self._overview(d.get("overview") or {})
         self._layer_changed()
         self._preset("EW")
+        if self._start_tab:
+            self.tabs.setCurrentIndex(self._start_tab)
+            self._start_tab = 0
 
     # ------------------------------------------------------------------ layers
     def _layer_changed(self, *_):
@@ -692,9 +719,16 @@ class FinalImageWindow(QtWidgets.QMainWindow):
     def _layer_opened(self, prod: str, r: Dict[str, Any]):
         if prod != self.layer_combo.currentData():
             return
+        self.fetch_btn.hide()
         if r.get("needs_fetch"):
-            self.layer_note.setText("%s is not saved for this window. Fetching it needs the Copernicus login on this "
-                                    "computer (step W4); or fetch it on the phone and send the project." % r.get("label"))
+            from ariyan_win import keys
+            if keys.status()["copernicus"]:
+                self.layer_note.setText("%s is not saved for this window. Fetching uses your Copernicus quota once; "
+                                        "it is then saved and travels with the project." % r.get("label"))
+                self.fetch_btn.show()
+            else:
+                self.layer_note.setText("%s is not saved for this window. Add your Copernicus login in Settings to "
+                                        "fetch it here, or fetch it on the phone and send the project." % r.get("label"))
             self.canvas.set_layer(None, None)
             return
         if "error" in r:
@@ -715,6 +749,14 @@ class FinalImageWindow(QtWidgets.QMainWindow):
             r["label"], r.get("scene_date"), 100 * (r.get("clear_fraction_window") or 0), r.get("pixel_m"),
             r.get("caption") or ""))
         self._preset(getattr(self, "_last_preset", "EW"))
+
+    def _fetch_layer(self):
+        prod = self.layer_combo.currentData()
+        if not prod or not self.sid:
+            return
+        self.fetch_btn.hide()
+        self.layer_note.setText("Fetching from Copernicus (one request; cloud, shadow and snow cells stay empty)\u2026")
+        qtwork.run_async(_layer, lambda r, p=prod: self._layer_opened(p, r), self.root, self.sid, prod, True)
 
     def _toggles(self, *_):
         self.canvas.show_contours = self.cb_contours.isChecked()
@@ -1068,6 +1110,69 @@ def _w3b(cls):
         r = json.loads(psm.export_profile_json(self.root, self.sid, pr["a"]["x"], pr["a"]["y"], pr["b"]["x"],
                                                pr["b"]["y"], self._product()))
         self._exported(r)
+
+    def _pick_into_inbox(self, title):
+        import shutil
+        import field_data as fd
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, title, os.path.expanduser("~"),
+                                                        "Survey files (*.txt *.csv *.dat *.xyz);;All files (*)")
+        if not path:
+            return None
+        inbox = fd.inbox_dir(self.root)
+        os.makedirs(inbox, exist_ok=True)
+        name = os.path.basename(path)
+        dest = os.path.join(inbox, name)
+        if os.path.abspath(path) != os.path.abspath(dest):
+            if os.path.exists(dest):
+                QtWidgets.QMessageBox.warning(self, "Already in the inbox",
+                                              "%s is already in the field-data inbox; rename the file first." % name)
+                return None
+            shutil.copy2(path, dest)                      # unchanged copy; the import records its SHA-256
+        return name
+
+    def _import_gpr(self):
+        if not self.sid:
+            return
+        name = self._pick_into_inbox("Choose a GPR survey (easting/northing or lon/lat, depth, value per line)")
+        if not name:
+            return
+        v = self._ask("Import GPR survey %s" % name, [("label", "Label", "GPR grid 1", "text"),
+                                                      ("coords", "Coordinates: UTM or LATLON", "UTM", "text"),
+                                                      ("units", "Value units", "amplitude", "text")])
+        if not v:
+            return
+        import field_data as fd
+        r = json.loads(fd.import_json(self.root, self.sid, name, v["coords"].strip().upper(), v["label"], v["units"]))
+        if "error" in r:
+            QtWidgets.QMessageBox.warning(self, "Not imported", r["error"])
+            return
+        m = r["meta"]
+        QtWidgets.QMessageBox.information(self, "GPR imported", "%s readings \u00b7 %.2f \u00d7 %.2f m spacing \u00b7 %d depth "
+                                          "slice(s). Stored unchanged with its SHA-256." % (
+                                              "{:,}".format(m["points"]), m["dx_m"], m["dy_m"], len(m["depth_edges_m"]) - 1))
+        self._build_volume()
+
+    def _import_ert(self):
+        pr = getattr(self, "_prof", None)
+        if not self.sid or not pr or "error" in pr:
+            QtWidgets.QMessageBox.information(self, "No line", "Choose or draw the ERT line first (it must be the survey line).")
+            return
+        name = self._pick_into_inbox("Choose an ERT section (distance along the line, depth, resistivity per line)")
+        if not name:
+            return
+        v = self._ask("Import ERT %s on A\u2013A\u2032 (%.0f m)" % (name, pr["length_m"]),
+                      [("label", "Label", "ERT line 1", "text"), ("units", "Value units", "ohm m", "text")])
+        if not v:
+            return
+        import field_data as fd
+        r = json.loads(fd.import_ert_json(self.root, self.sid, name, json.dumps(
+            {"grid": [pr["a"]["x"], pr["a"]["y"], pr["b"]["x"], pr["b"]["y"]]}), v["label"], v["units"]))
+        if "error" in r:
+            QtWidgets.QMessageBox.warning(self, "Not imported", r["error"])
+            return
+        QtWidgets.QMessageBox.information(self, "ERT imported", "Stored unchanged with its SHA-256; it now shows under "
+                                          "this profile.")
+        self._profiled(pr)
 
     def _exported(self, r):
         if "error" in r:
