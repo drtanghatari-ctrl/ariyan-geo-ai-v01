@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional
 
 import grand_project_db as db
 
-VERSION = "bundle-v1"
+VERSION = "bundle-v1.1"
 FORMAT = "ariyan-bundle-v1"
 SUFFIX = ".ariyan"
 HANDOFF_FILENAME = "handoff.json"
@@ -357,6 +357,13 @@ def receive(root: str, bundle_path: str, device: str, confirm: bool = False) -> 
                     os.remove(live + sfx)
             os.replace(incoming, live)
             db._write_guard(root, os.path.getsize(live))  # db-safe-v1: the new size is the expected size
+            # bundle-v1.1: today's automatic backup must be of the project just received, not of the
+            # one it replaced (that one is kept as grand_project_before_receive_*.db above)
+            bdir = os.path.join(root, db.BACKUP_DIRNAME)
+            os.makedirs(bdir, exist_ok=True)
+            today = os.path.join(bdir, "%s%s.db" % (db.AUTO_BACKUP_PREFIX, _now().astimezone().strftime("%Y%m%d")))
+            _snapshot(root, today + ".part")
+            os.replace(today + ".part", today)
             files = _merge_files(z, root)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
