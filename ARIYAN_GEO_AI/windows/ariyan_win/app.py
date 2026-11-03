@@ -154,11 +154,17 @@ def build_window(root: str):
             self.mission = Workstation(root)
             self.tabs.addTab(self.mission, "MISSION CONTROL")
             from ariyan_win.dataev import DataEvidence
-            w = QtWidgets.QWidget()
-            QtWidgets.QVBoxLayout(w).addWidget(label("Investigation arrives in step W4b.", "muted"))
-            i = self.tabs.addTab(w, "INVESTIGATION")
-            self.tabs.setTabEnabled(i, False)
-            self.tabs.setTabToolTip(i, "Arrives in step W4b")
+            from ariyan_win.runs import InvestigationTab, JobsTab
+
+            def selected_coords():
+                t = self.mission.terrain_data.get("meta") if self.mission.terrain_data else None
+                return (t["lat"], t["lon"]) if t else None
+            inv = QtWidgets.QTabWidget()
+            self.investigation = InvestigationTab(root, self.mission.open_final_image, selected_coords)
+            self.jobs = JobsTab(root)
+            inv.addTab(self.investigation, "Single point")
+            inv.addTab(self.jobs, "Wide-area jobs")
+            self.tabs.addTab(inv, "INVESTIGATION")
             self.dataev = DataEvidence(root)
             self.tabs.addTab(self.dataev, "DATA && EVIDENCE")
             self.debates = DebateStudio(root, self.mission.open_final_image)
@@ -217,7 +223,10 @@ def build_window(root: str):
             send.clicked.connect(self.send_to_phone)
             h.addWidget(recv)
             h.addWidget(send)
-            later = (("New Investigation", "W4"), ("Generate Report", "W4"), ("Export Results", "W4"))
+            newinv = QtWidgets.QPushButton("New Investigation")
+            newinv.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
+            h.addWidget(newinv)
+            later = (("Generate Report", "W4c"), ("Export Results", "W4c"))
             for name, step in later:
                 b = QtWidgets.QPushButton(name)
                 b.setEnabled(False)
@@ -325,6 +334,8 @@ def build_window(root: str):
                 self.mission.selected = None
                 self.debates.root = d
                 self.dataev.root = d
+                self.investigation.root = d
+                self.jobs.root = d
                 self.reload()
 
         # ---------------------------------------------------------------- data
@@ -337,6 +348,8 @@ def build_window(root: str):
                 self.debates.load(append=False)
             if hasattr(self, "dataev"):
                 self.dataev.load()
+            if hasattr(self, "jobs"):
+                self.jobs.load()
             while self.pills.count():
                 it = self.pills.takeAt(0)
                 if it.widget():
