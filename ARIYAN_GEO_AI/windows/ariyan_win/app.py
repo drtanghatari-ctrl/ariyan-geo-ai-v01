@@ -52,7 +52,7 @@ QLabel#tag {{ color: {ACCENT}; font-size: 11pt; font-weight: 600; }}
 QLabel#h {{ color: {ACCENT}; font-size: 9pt; font-weight: 700; letter-spacing: 1px; background: transparent; }}
 QLabel#muted {{ color: {MUTED}; background: transparent; }}
 QLabel#pill {{ border: 1px solid {LINE}; border-radius: 6px; padding: 4px 10px; background: {PANEL}; }}
-QTabBar::tab {{ background: transparent; color: {MUTED}; padding: 8px 16px; font-weight: 600; }}
+QTabBar::tab {{ background: transparent; color: {MUTED}; padding: 7px 9px; font-weight: 600; font-size: 9pt; }}
 QTabBar::tab:selected {{ color: {TEXT}; border-bottom: 2px solid {ACCENT}; }}
 QTabBar::tab:disabled {{ color: #4A5868; }}
 QTabWidget::pane {{ border: none; }}
@@ -179,6 +179,11 @@ def build_window(root: str):
             vl.addWidget(vb)
             vl.addStretch(1)
             self.tabs.addTab(vis, "VISUALIZATION")
+            from ariyan_win.grandproject import GrandProject, HistoricalResearch
+            self.grand = GrandProject(root)
+            self.tabs.addTab(self.grand, "GRAND PROJECT")
+            self.history = HistoricalResearch(root)
+            self.tabs.addTab(self.history, "HISTORICAL RESEARCH")
             from ariyan_win.review import AnalysisModels, ReportArchive
             self.models = AnalysisModels(root)
             self.tabs.addTab(self.models, "ANALYSIS && MODELS")
@@ -337,6 +342,8 @@ def build_window(root: str):
                 self.jobs.root = d
                 self.report.root = d
                 self.models.root = d
+                self.grand.root = d
+                self.history.root = d
                 self.reload()
 
         # ---------------------------------------------------------------- data
@@ -354,6 +361,9 @@ def build_window(root: str):
             if hasattr(self, "report"):
                 self.report._jobs_loaded = False
                 self.report.load(0)
+            if hasattr(self, "grand"):
+                self.grand.load()
+                self.history.load_saved()
             while self.pills.count():
                 it = self.pills.takeAt(0)
                 if it.widget():
