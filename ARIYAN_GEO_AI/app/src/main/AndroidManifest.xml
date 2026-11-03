@@ -78,6 +78,17 @@
             android:name=".DebateEngineActivity"
             android:exported="false" />
 
+        <!-- W2 bundle-v1 (2026-11-02): shares a project bundle (Send project to laptop). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/ariyan_file_paths" />
+        </provider>
+
         <!-- d4-v1 (2026-11-02): tank / silo spot-check list, read-only + verdict notes. -->
         <activity
             android:name=".SpotCheckActivity"

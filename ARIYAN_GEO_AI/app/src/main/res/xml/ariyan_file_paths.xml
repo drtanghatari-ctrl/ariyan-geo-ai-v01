@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- W2 bundle-v1 (2026-11-02): lets Android's share menu (Google Drive, Quick Share,
+     e-mail) read a project bundle the app made in ARIYAN_GEO_AI/offline_data/sync/. -->
+<paths>
+    <external-path name="ariyan_sync" path="ARIYAN_GEO_AI/offline_data/sync/" />
+</paths>

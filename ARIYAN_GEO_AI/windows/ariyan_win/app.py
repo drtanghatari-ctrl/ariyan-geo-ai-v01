@@ -10,6 +10,10 @@ ARIYAN GEO AI for Windows -- W0 (2026-11-02): the foundation.
   belong to later steps are visible but disabled and say which step brings them.
 * Nothing here writes to the project; it only reads.
 
+W2 (2026-11-02): "Receive from phone" and "Send to phone" (project_bundle, the
+same module the phone uses). Bundles travel through Google Drive for desktop
+(G:\\My Drive) or USB; one device works on the project at a time.
+
 Run from source:  python -m ariyan_win
 Self-test (CI):   python -m ariyan_win --selftest   (works headless, offscreen)
 """
@@ -70,6 +74,24 @@ def asset(name: str) -> str:
     if base:
         return os.path.join(base, "ariyan_win", "assets", name)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", name)
+
+
+def sync_folder() -> str:
+    """Where bundles are usually found: the folder used last, else Google Drive for desktop."""
+    last = config.load().get("sync_folder")
+    if last and os.path.isdir(last):
+        return last
+    for cand in ("G:\\My Drive", os.path.join(os.path.expanduser("~"), "Google Drive"),
+                 os.path.join(os.path.expanduser("~"), "My Drive"), os.path.join(os.path.expanduser("~"), "Downloads")):
+        if os.path.isdir(cand):
+            return cand
+    return os.path.expanduser("~")
+
+
+def remember_sync_folder(path: str) -> None:
+    s = config.load()
+    s["sync_folder"] = path
+    config.save(s)
 
 
 def load_mission(root: str) -> Dict[str, Any]:
@@ -168,8 +190,13 @@ def build_window(root: str):
         # ---------------------------------------------------------------- bottom bar
         def _bottom(self):
             h = QtWidgets.QHBoxLayout()
-            later = (("New Investigation", "W4"), ("Open Project", "W2"), ("Receive from phone", "W2"),
-                     ("Send to phone", "W2"), ("Generate Report", "W4"), ("Export Results", "W4"))
+            recv = QtWidgets.QPushButton("Receive from phone")
+            recv.clicked.connect(self.receive_from_phone)
+            send = QtWidgets.QPushButton("Send to phone")
+            send.clicked.connect(self.send_to_phone)
+            h.addWidget(recv)
+            h.addWidget(send)
+            later = (("New Investigation", "W4"), ("Generate Report", "W4"), ("Export Results", "W4"))
             for name, step in later:
                 b = QtWidgets.QPushButton(name)
                 b.setEnabled(False)
@@ -187,6 +214,78 @@ def build_window(root: str):
             for b in (choose, opendir, refresh, quit_):
                 h.addWidget(b)
             return h
+
+        # ---------------------------------------------------------------- W2 transfer
+        def _run_blocking(self, title: str, fn, *args):
+            """Run a core call off the screen thread with a small 'working' window."""
+            dlg = QtWidgets.QProgressDialog(title, None, 0, 0, self)
+            dlg.setWindowTitle("ARIYAN GEO AI")
+            dlg.setWindowModality(QtCore.Qt.WindowModal)
+            dlg.setMinimumDuration(0)
+            box: Dict[str, Any] = {}
+            loop = QtCore.QEventLoop()
+            w = Worker(fn, *args)
+            w.setAutoDelete(False)
+            w.signals.done.connect(lambda r: (box.update(r=r), loop.quit()))
+            self._xfer = w
+            QtCore.QThreadPool.globalInstance().start(w)
+            dlg.show()
+            loop.exec()
+            dlg.close()
+            return box.get("r", {"error": "no answer"})
+
+        def receive_from_phone(self):
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "Choose the project bundle the phone sent (.ariyan)", sync_folder(),
+                "ARIYAN project bundle (*.ariyan);;All files (*)")
+            if not path:
+                return
+            import project_bundle as pb
+            chk = self._run_blocking("Checking the bundle\u2026", lambda: json.loads(pb.check_receive_json(self.root, path)))
+            if "error" in chk:
+                QtWidgets.QMessageBox.warning(self, "Not received", chk["error"])
+                return
+            m, p = chk.get("manifest", {}), chk.get("manifest", {}).get("project", {})
+            text = ("From the %s, made %s UTC\n%s candidates \u00b7 %s jobs \u00b7 %s library files\n\n"
+                    % (m.get("from_device"), (m.get("created_at") or "")[:16].replace("T", " "),
+                       "{:,}".format(p.get("candidates", 0)), "{:,}".format(p.get("jobs", 0)),
+                       "{:,}".format(m.get("library_files", 0))))
+            text += "".join("\u26a0 %s\n\n" % w for w in chk.get("warnings", []))
+            text += "The current project (if any) is kept as a safety copy in db_backups before anything changes."
+            confirm = chk.get("needs_confirm", False)
+            ans = QtWidgets.QMessageBox.question(self, "Replace this computer's project?" if confirm else "Receive this project?",
+                                                 text, QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel)
+            if ans != QtWidgets.QMessageBox.Yes:
+                return
+            r = self._run_blocking("Receiving the project\u2026",
+                                   lambda: json.loads(pb.receive_json(self.root, path, "laptop", confirm)))
+            if "error" in r or not r.get("received"):
+                QtWidgets.QMessageBox.warning(self, "Not received", r.get("error", "Nothing was changed."))
+            else:
+                f = r.get("files", {})
+                QtWidgets.QMessageBox.information(self, "Project received",
+                    "This computer now has the project from the phone.\n%s library files added, %s already here.\n"
+                    "Previous project kept as: %s" % ("{:,}".format(f.get("added", 0)), "{:,}".format(f.get("kept", 0)),
+                                                      os.path.basename(r.get("safety_copy") or "") or "none"))
+            self.reload()
+
+        def send_to_phone(self):
+            out = QtWidgets.QFileDialog.getExistingDirectory(
+                self, "Where to put the bundle (your Google Drive folder, or a USB stick)", sync_folder())
+            if not out:
+                return
+            import project_bundle as pb
+            r = self._run_blocking("Preparing the project bundle\u2026",
+                                   lambda: json.loads(pb.make_bundle_json(self.root, out, "laptop")))
+            if "error" in r:
+                QtWidgets.QMessageBox.warning(self, "Not sent", r["error"])
+                return
+            remember_sync_folder(out)
+            QtWidgets.QMessageBox.information(self, "Bundle ready",
+                "%s (%.0f MB) is in\n%s\n\nOn the phone: Settings \u2192 Receive project from laptop, then choose "
+                "this file in Google Drive. Work on the phone from now on, until you send it back."
+                % (r["name"], r["bytes"] / 1e6, out))
+            self.reload()
 
         def choose_root(self):
             d = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose the ARIYAN data folder (offline_data)", self.root)
@@ -224,6 +323,15 @@ def build_window(root: str):
             self._pill("Offline laboratory", True)
             self._pill("Core " + VERSION, True)
             self._pill("Project database" if db_ok else "No project database yet", db_ok)
+            try:
+                import project_bundle as pb
+                h = pb.handoff(self.root)
+            except Exception:
+                h = {}
+            if h.get("state") == "SENT":
+                self._pill("Sent to the phone: work there", False)
+            elif h.get("state") == "RECEIVED":
+                self._pill("Received from the " + str(h.get("from")), True)
             self.status.setText("Data folder: " + self.root)
             g = self.mission_layout
             if "error" in o:
@@ -236,7 +344,7 @@ def build_window(root: str):
             p = o.get("project")
             if p is None:
                 lay.addWidget(label(o.get("empty_note", ""), wrap=True))
-                lay.addWidget(label("Step W2 brings \u201cReceive from phone\u201d, which loads your phone's project here.",
+                lay.addWidget(label("Use \u201cReceive from phone\u201d below to load your phone's project here.",
                                     "muted", wrap=True))
             else:
                 lay.addWidget(label(p["name"]))

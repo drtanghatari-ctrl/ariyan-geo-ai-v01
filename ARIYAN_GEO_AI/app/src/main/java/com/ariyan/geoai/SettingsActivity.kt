@@ -2,6 +2,10 @@ package com.ariyan.geoai
 
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.net.Uri
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
+import java.io.File
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
@@ -36,12 +40,25 @@ import java.util.Locale
  * own copies and grand_project.db are never deletable). A safe one has a Delete
  * button; a confirmation shows its name and size, Python checks the rule again
  * before deleting, and the deletion is written to the project timeline.
+ *
+ * W2 bundle-v1 (2026-11-02): PHONE <-> LAPTOP. "Send project to laptop" makes a
+ * sealed bundle (project_bundle.make_bundle) and opens Android's share menu
+ * (choose Google Drive); "Receive project from laptop" picks a bundle, checks it,
+ * asks first if this phone changed its project after sending it, keeps the
+ * current database as a safety copy, then switches. One device works on the
+ * project at a time; the panel shows which state this phone is in.
  */
 class SettingsActivity : AppCompatActivity() {
 
     private lateinit var python: Python
     private val offlineDataRoot: String by lazy { ExternalStorageAccess.offlineDataRoot().absolutePath }
     private lateinit var content: LinearLayout
+    private var busy = false
+
+    /** W2: the user picked a bundle to receive (Google Drive, Downloads, USB ...). */
+    private val pickBundle = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) receiveFrom(uri)
+    }
     private val d by lazy { resources.displayMetrics.density }
     private fun px(v: Int) = (v * d).toInt()
     private fun col(id: Int) = ContextCompat.getColor(this, id)
@@ -62,6 +79,7 @@ class SettingsActivity : AppCompatActivity() {
         content.removeAllViews()
         header()
         storage()
+        transfer()
         keys()
         val loading = text("Reading the offline_data folder\u2026", 13f, col(R.color.ariyan_text_secondary))
         content.addView(loading)
@@ -114,6 +132,127 @@ class SettingsActivity : AppCompatActivity() {
                 }
             })
         })
+    }
+
+    // ------------------------------------------------------------- W2 transfer
+
+    private fun transfer() {
+        val box = panel("PHONE \u2194 LAPTOP", "layers", AriyanDecor.BLUE)
+        val st = text("Reading\u2026", 12f, col(R.color.ariyan_text_secondary))
+        box.addView(st)
+        box.addView(pill("Send project to laptop", AriyanDecor.BLUE) { send() })
+        box.addView(pill("Receive project from laptop", AriyanDecor.TEAL) {
+            if (!busy) pickBundle.launch(arrayOf("*/*"))
+        })
+        line(box, "Send makes one sealed file (.ariyan) and opens the share menu: choose Google Drive. " +
+            "On the laptop: Receive from phone. Only one device works on the project at a time.")
+        content.addView(box)
+        lifecycleScope.launch {
+            val o = withContext(Dispatchers.Default) {
+                try { JSONObject(python.getModule("project_bundle").callAttr("status_json", offlineDataRoot).toString()) }
+                catch (e: PyException) { JSONObject().put("error", e.message) }
+            }
+            val h = o.optJSONObject("handoff") ?: JSONObject()
+            st.text = when (h.optString("state")) {
+                "SENT" -> "Sent to the laptop " + h.optString("at").take(16).replace("T", " ") +
+                    " UTC. The laptop has the project now; work there, then send it back."
+                "RECEIVED" -> "Received from the " + h.optString("from") + " " + h.optString("at").take(16).replace("T", " ") +
+                    " UTC. This phone has the project."
+                else -> if (o.has("error")) o.optString("error") else "Not sent yet. This phone has the project."
+            }
+        }
+    }
+
+    private fun send() {
+        if (busy) return
+        busy = true
+        android.widget.Toast.makeText(this, "Preparing the project bundle\u2026 (about a minute)", android.widget.Toast.LENGTH_LONG).show()
+        lifecycleScope.launch {
+            val o = withContext(Dispatchers.Default) {
+                try {
+                    val pb = python.getModule("project_bundle")
+                    val out = pb.callAttr("outgoing_dir", offlineDataRoot).toString()
+                    JSONObject(pb.callAttr("make_bundle_json", offlineDataRoot, out, "phone", true).toString())
+                } catch (e: PyException) { JSONObject().put("error", e.message) }
+            }
+            busy = false
+            if (o.has("error")) {
+                AlertDialog.Builder(this@SettingsActivity).setTitle("Not sent").setMessage(o.optString("error"))
+                    .setPositiveButton("Close", null).show()
+                return@launch
+            }
+            val f = File(o.getString("path"))
+            val uri = FileProvider.getUriForFile(this@SettingsActivity, "$packageName.files", f)
+            val share = Intent(Intent.ACTION_SEND).apply {
+                type = "application/octet-stream"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, f.name)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(share, "Send ${f.name} (${mb(o.optLong("bytes"))}) \u2014 choose Google Drive"))
+            load()
+        }
+    }
+
+    private fun receiveFrom(uri: Uri) {
+        busy = true
+        android.widget.Toast.makeText(this, "Checking the bundle\u2026", android.widget.Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            val r = withContext(Dispatchers.IO) {
+                try {
+                    val pb = python.getModule("project_bundle")
+                    val dir = File(pb.callAttr("incoming_dir", offlineDataRoot).toString()).apply { mkdirs() }
+                    dir.listFiles()?.forEach { it.delete() }           // only the bundle being received is kept here
+                    val f = File(dir, "incoming.ariyan")
+                    contentResolver.openInputStream(uri)?.use { input -> f.outputStream().use { input.copyTo(it) } }
+                        ?: throw java.io.IOException("could not read the chosen file")
+                    Pair(f.absolutePath, JSONObject(pb.callAttr("check_receive_json", offlineDataRoot, f.absolutePath).toString()))
+                } catch (e: Exception) { Pair(null, JSONObject().put("error", e.message)) }
+            }
+            busy = false
+            val (path, chk) = r
+            if (path == null || chk.has("error")) {
+                AlertDialog.Builder(this@SettingsActivity).setTitle("Not received").setMessage(chk.optString("error"))
+                    .setPositiveButton("Close", null).show()
+                return@launch
+            }
+            val m = chk.optJSONObject("manifest") ?: JSONObject()
+            val p = m.optJSONObject("project") ?: JSONObject()
+            val sb = StringBuilder()
+            sb.append(String.format(Locale.US, "From the %s, made %s UTC\n%,d candidates \u00B7 %,d jobs \u00B7 %,d library files\n\n",
+                m.optString("from_device"), m.optString("created_at").take(16).replace("T", " "),
+                p.optInt("candidates"), p.optInt("jobs"), m.optInt("library_files")))
+            val w = chk.optJSONArray("warnings")
+            if (w != null) for (i in 0 until w.length()) sb.append("\u26A0 ").append(w.optString(i)).append("\n\n")
+            sb.append("The current project is kept as a safety copy in db_backups before anything changes.")
+            AlertDialog.Builder(this@SettingsActivity)
+                .setTitle(if (chk.optBoolean("needs_confirm")) "Replace this phone's project?" else "Receive this project?")
+                .setMessage(sb.toString())
+                .setPositiveButton(if (chk.optBoolean("needs_confirm")) "Replace" else "Receive") { _, _ -> doReceive(path, chk.optBoolean("needs_confirm")) }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun doReceive(path: String, confirm: Boolean) {
+        busy = true
+        lifecycleScope.launch {
+            val o = withContext(Dispatchers.Default) {
+                try { JSONObject(python.getModule("project_bundle").callAttr("receive_json", offlineDataRoot, path, "phone", confirm).toString()) }
+                catch (e: PyException) { JSONObject().put("error", e.message) }
+            }
+            busy = false
+            val f = o.optJSONObject("files") ?: JSONObject()
+            AlertDialog.Builder(this@SettingsActivity)
+                .setTitle(if (o.optBoolean("received")) "Project received" else "Not received")
+                .setMessage(if (o.has("error")) o.optString("error") else if (o.optBoolean("received"))
+                    String.format(Locale.US, "This phone now has the project from the %s.\n%,d library files added, %,d already here.\n" +
+                        "Previous project kept as %s.", o.optJSONObject("manifest")?.optString("from_device") ?: "laptop",
+                        f.optInt("added"), f.optInt("kept"), File(o.optString("safety_copy", "none")).name)
+                    else "Nothing was changed.")
+                .setPositiveButton("Close", null).show()
+            load()
+        }
     }
 
     private fun keys() {
