@@ -71,6 +71,10 @@ def test_window_fits_a_1366x768_laptop_on_every_page(tmp_path):
     qa.processEvents()
     m = w.minimumSizeHint()
     assert m.width() <= 1300 and m.height() <= 640, m
-    assert w.tabs.tabBar().sizeHint().width() <= 1340
+    # the tab row's natural width depends on the machine's fonts (CI runners have no real screen);
+    # what must hold everywhere: it scrolls instead of widening the window
+    assert w.tabs.usesScrollButtons() and w.tabs.tabBar().usesScrollButtons()
+    assert w.tabs.minimumSizeHint().width() <= 1300 or w.tabs.sizePolicy().horizontalPolicy() == \
+        QtWidgets.QSizePolicy.Ignored
     w.close()
     qa.setStyleSheet(old)
