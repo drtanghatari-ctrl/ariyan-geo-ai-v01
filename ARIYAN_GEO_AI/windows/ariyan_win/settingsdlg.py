@@ -100,7 +100,7 @@ class SettingsDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.Yes:
             return
         try:
-            keys.save({n: "" for n in keys.NAMES})
+            keys.save({n: "" for n in keys.NAMES if not n.startswith("GOOGLE_")})   # Drive sign-in: Cloud window
         except Exception as e:
             QtWidgets.QMessageBox.warning(self, "Not removed", str(e))
         self.key_state.setText(self._state_text(keys.status()))

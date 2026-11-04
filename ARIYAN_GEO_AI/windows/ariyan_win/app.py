@@ -52,11 +52,11 @@ QLabel#tag {{ color: {ACCENT}; font-size: 11pt; font-weight: 600; }}
 QLabel#h {{ color: {ACCENT}; font-size: 9pt; font-weight: 700; letter-spacing: 1px; background: transparent; }}
 QLabel#muted {{ color: {MUTED}; background: transparent; }}
 QLabel#pill {{ border: 1px solid {LINE}; border-radius: 6px; padding: 4px 10px; background: {PANEL}; }}
-QTabBar::tab {{ background: transparent; color: {MUTED}; padding: 7px 9px; font-weight: 600; font-size: 9pt; }}
+QTabBar::tab {{ background: transparent; color: {MUTED}; padding: 6px 6px; font-weight: 600; font-size: 8.5pt; }}
 QTabBar::tab:selected {{ color: {TEXT}; border-bottom: 2px solid {ACCENT}; }}
 QTabBar::tab:disabled {{ color: #4A5868; }}
 QTabWidget::pane {{ border: none; }}
-QPushButton {{ background: {PANEL}; border: 1px solid {LINE}; border-radius: 8px; padding: 8px 14px; }}
+QPushButton {{ background: {PANEL}; border: 1px solid {LINE}; border-radius: 8px; padding: 7px 11px; }}
 QPushButton:hover {{ border-color: {ACCENT}; }}
 QPushButton:disabled {{ color: #4A5868; }}
 QTableWidget {{ background: {PANEL}; gridline-color: {LINE}; border: none; }}
@@ -73,6 +73,43 @@ QLineEdit:focus {{ border-color: {ACCENT}; }}
 QListWidget {{ background: #0E1626; border: 1px solid {LINE}; border-radius: 8px; }}
 QListWidget::item {{ padding: 5px 6px; border-bottom: 1px solid #172338; }}
 QListWidget::item:selected {{ background: #1B3A33; }}
+QListWidget::item:hover {{ background: #142236; }}
+QFrame#header {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #102236, stop:0.55 #0D1726, stop:1 #0B1220);
+                 border: 1px solid {LINE}; border-radius: 12px; }}
+QFrame#sep {{ background: {LINE}; border: none; margin: 4px 0; }}
+QTabBar::tab:hover {{ color: {TEXT}; }}
+QTabWidget QTabWidget QTabBar::tab {{ background: #0F1828; border: 1px solid {LINE}; border-radius: 8px; margin-right: 4px;
+                                     padding: 5px 12px; color: {MUTED}; }}
+QTabWidget QTabWidget QTabBar::tab:selected {{ background: #183B32; color: #FFFFFF; border-color: {ACCENT}; }}
+QPushButton#danger {{ color: #F2A5B5; }}
+QPushButton#danger:hover {{ border-color: {ROSE}; background: #2A1520; }}
+QPushButton#cloud {{ color: #BFE3FF; }}
+QPushButton#cloud:hover {{ border-color: #6FB8FF; }}
+QComboBox, QSpinBox, QDoubleSpinBox {{ background: #0E1626; border: 1px solid {LINE}; border-radius: 8px; padding: 5px 8px; }}
+QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{ border-color: {ACCENT}; }}
+QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 0; border: none; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{ background: #0E1626; border: 1px solid {LINE}; selection-background-color: #1B3A33; }}
+QCheckBox {{ spacing: 8px; background: transparent; }}
+QTextBrowser, QTextEdit, QPlainTextEdit {{ background: #0E1626; border: 1px solid {LINE}; border-radius: 8px; padding: 4px; }}
+QTableWidget {{ alternate-background-color: #111D30; selection-background-color: #1B3A33; border: 1px solid {LINE};
+                border-radius: 8px; }}
+QTableCornerButton::section {{ background: {BG}; border: none; }}
+QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: #2A3B55; border-radius: 4px; min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: #3A5070; }}
+QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: #2A3B55; border-radius: 4px; min-width: 30px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QToolTip {{ background: #13203A; color: {TEXT}; border: 1px solid {GOLD}; padding: 5px; border-radius: 6px; }}
+QProgressBar {{ background: #0E1626; border: 1px solid {LINE}; border-radius: 5px; text-align: center; }}
+QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
+QStatusBar {{ background: transparent; color: {MUTED}; }}
+QMessageBox {{ background: {PANEL}; }}
+QGroupBox {{ background: {PANEL}; border: 1px solid {LINE}; border-radius: 10px; margin-top: 14px; padding: 14px 10px 8px 10px; }}
+QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 12px; top: 2px; padding: 0 4px;
+                    color: {ACCENT}; font-weight: 700; font-size: 9pt; letter-spacing: 1px; }}
 """
 
 
@@ -159,7 +196,10 @@ def build_window(root: str):
             self.setCentralWidget(central)
             v = QtWidgets.QVBoxLayout(central)
             v.setContentsMargins(12, 10, 12, 10)
-            v.addLayout(self._header())
+            head = QtWidgets.QFrame()
+            head.setObjectName("header")
+            head.setLayout(self._header())
+            v.addWidget(head)
             self.tabs = QtWidgets.QTabWidget()
             from ariyan_win.mission import Workstation
             from ariyan_win.debates import DebateStudio
@@ -176,21 +216,14 @@ def build_window(root: str):
             self.jobs = JobsTab(root)
             inv.addTab(self.investigation, "Single point")
             inv.addTab(self.jobs, "Wide-area jobs")
-            self.tabs.addTab(inv, "INVESTIGATION")
+            from ariyan_win.ui import PageFrame, VisualizationPage, decorate_tabs, decorate_button, vline, unwrap
+            self.tabs.addTab(PageFrame("INVESTIGATION", inv), "INVESTIGATION")
             self.dataev = DataEvidence(root)
-            self.tabs.addTab(self.dataev, "DATA && EVIDENCE")
+            self.tabs.addTab(PageFrame("DATA & EVIDENCE", self.dataev), "DATA && EVIDENCE")
             self.debates = DebateStudio(root, self.mission.open_final_image)
-            self.tabs.addTab(self.debates, "AI DEBATE STUDIO")
-            vis = QtWidgets.QWidget()
-            vl = QtWidgets.QVBoxLayout(vis)
-            vl.addWidget(label("VISUALIZATION opens the Final Image of the candidate selected on Mission Control: "
-                               "map with exact cells, contours, UTM grid and saved satellite layers; profile and "
-                               "section; 3D surface.", "muted", wrap=True))
-            vb = QtWidgets.QPushButton("Open the Final Image of the selected candidate \u2197")
-            vb.clicked.connect(lambda: self.mission.open_final_image(self.mission.selected))
-            vl.addWidget(vb)
-            vl.addStretch(1)
-            self.tabs.addTab(vis, "VISUALIZATION")
+            self.tabs.addTab(PageFrame("AI DEBATE STUDIO", self.debates), "AI DEBATE STUDIO")
+            self.visual = VisualizationPage(root, self.mission)                # u6: one card per view
+            self.tabs.addTab(PageFrame("VISUALIZATION", self.visual), "VISUALIZATION")
             from ariyan_win.grandproject import GrandProject, HistoricalResearch
             self.grand = GrandProject(root)
             self.grand.candidates.search.opened.connect(self.mission.open_final_image)
@@ -202,14 +235,15 @@ def build_window(root: str):
             self.jobs.steward_go = self.steward_go
             self.mission.steward_go = self.steward_go
             self.inv_tabs = inv
-            self.tabs.addTab(self.grand, "GRAND PROJECT")
+            self.tabs.addTab(PageFrame("GRAND PROJECT", self.grand), "GRAND PROJECT")
             self.history = HistoricalResearch(root)
-            self.tabs.addTab(self.history, "HISTORICAL RESEARCH")
+            self.tabs.addTab(PageFrame("HISTORICAL RESEARCH", self.history), "HISTORICAL RESEARCH")
             from ariyan_win.review import AnalysisModels, ReportArchive
             self.models = AnalysisModels(root)
-            self.tabs.addTab(self.models, "ANALYSIS && MODELS")
+            self.tabs.addTab(PageFrame("ANALYSIS & MODELS", self.models), "ANALYSIS && MODELS")
             self.report = ReportArchive(root, self.mission.open_final_image)
-            self.report_index = self.tabs.addTab(self.report, "REPORT && ARCHIVE")
+            self.report_index = self.tabs.addTab(PageFrame("REPORT & ARCHIVE", self.report), "REPORT && ARCHIVE")
+            decorate_tabs(self.tabs)
             v.addWidget(self.tabs, 1)
             from ariyan_win.stewardui import StewardBar              # u3d: the Steward on every page
             self.steward_bar = StewardBar(root, self.steward_go)
@@ -218,7 +252,12 @@ def build_window(root: str):
             self.inv_tabs.currentChanged.connect(lambda i: (self.steward_bar.by_tab.pop("INVESTIGATION", None),
                                                             self.steward_bar.show_tab("INVESTIGATION")))
             v.addWidget(self.steward_bar)
-            v.addLayout(self._bottom())
+            self.toolbar = QtWidgets.QWidget()
+            self.toolbar.setLayout(self._bottom())
+            self.toolbar.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+            v.addWidget(self.toolbar)
+            for t in self.findChildren(QtWidgets.QTableWidget):              # u6: easier to read rows
+                t.setAlternatingRowColors(True)
             self.status = label("", "muted")
             self.statusBar().addWidget(self.status)
             self.reload()
@@ -228,7 +267,8 @@ def build_window(root: str):
             for i in range(self.tabs.count()):
                 if self.tabs.tabText(i).replace("&&", "&") == top:
                     self.tabs.setCurrentIndex(i)
-                    w = self.tabs.widget(i)
+                    from ariyan_win.ui import unwrap
+                    w = unwrap(self.tabs.widget(i))
                     if sub and isinstance(w, QtWidgets.QTabWidget):
                         for k in range(w.count()):
                             if w.tabText(k).replace("&&", "&") == sub:
@@ -324,6 +364,7 @@ def build_window(root: str):
         # ---------------------------------------------------------------- header
         def _header(self):
             h = QtWidgets.QHBoxLayout()
+            h.setContentsMargins(12, 6, 12, 6)
             logo = QtWidgets.QLabel()
             pm = QtGui.QPixmap(asset("ariyan_emblem.png"))
             if not pm.isNull():
@@ -351,19 +392,34 @@ def build_window(root: str):
             recv.clicked.connect(self.receive_from_phone)
             send = QtWidgets.QPushButton("Send to phone")
             send.clicked.connect(self.send_to_phone)
+            from ariyan_win.ui import decorate_button, vline, glyph_icon
+            self._tools = []                     # (button, full text): shortened to icons when space is short
+            decorate_button(recv, "Choose a project bundle (.ariyan) the phone made, from a folder or a USB stick")
+            decorate_button(send, "Make a project bundle for the phone, in a folder or on a USB stick")
+            h.setSpacing(6)
             h.addWidget(recv)
             h.addWidget(send)
             cloud = QtWidgets.QPushButton("\u2601  Google Drive")             # win-u5: online storage
             cloud.setObjectName("cloud")
+            cloud.setToolTip("Upload this project to your Google Drive, or download and receive one from it")
             cloud.clicked.connect(self.open_cloud)
+            cloud.setText("Google Drive")
+            cloud.setIcon(glyph_icon("\u2601", "#BFE3FF", 16))
+            cloud.setIconSize(QtCore.QSize(14, 14))
             h.addWidget(cloud)
+            h.addSpacing(4)
+            h.addWidget(vline())
+            h.addSpacing(4)
             newinv = QtWidgets.QPushButton("New Investigation")
+            decorate_button(newinv, "Go to Investigation: a single point or a wide-area job")
             newinv.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
             h.addWidget(newinv)
             gen = QtWidgets.QPushButton("Generate Report")
             gen.clicked.connect(lambda: (self.tabs.setCurrentIndex(self.report_index), self.report.generate_report()))
             exr = QtWidgets.QPushButton("Export Results")
             exr.clicked.connect(lambda: self.report.export_results())
+            decorate_button(gen, "Write the job report: HTML, CSV and PDF, with the satellite layers")
+            decorate_button(exr, "Export all results as CSV and GeoJSON")
             h.addWidget(gen)
             h.addWidget(exr)
             h.addStretch(1)
@@ -378,9 +434,52 @@ def build_window(root: str):
             refresh.clicked.connect(self.reload)
             quit_ = QtWidgets.QPushButton("Exit Laboratory")
             quit_.clicked.connect(self.close)
-            for b in (choose, opendir, refresh, quit_):
+            decorate_button(sett, "Keys for OpenTopography and Copernicus, and other settings")
+            decorate_button(choose, "Choose which data folder (offline_data) this computer works on")
+            decorate_button(opendir, "Open the data folder in Windows Explorer")
+            decorate_button(refresh, "Read the project again from the database")
+            decorate_button(quit_, "Close ARIYAN GEO AI")
+            quit_.setObjectName("danger")
+            h.addSpacing(4)
+            h.addWidget(vline())
+            h.addSpacing(4)
+            for b in (choose, opendir, refresh):
                 h.addWidget(b)
+            h.addSpacing(4)
+            h.addWidget(vline())
+            h.addSpacing(4)
+            h.addWidget(quit_)
+            # the order in which labels give way to icons (least used first; Exit and Drive keep theirs longest)
+            for b in (opendir, choose, refresh, sett, exr, newinv, gen, send, recv, cloud, quit_):
+                self._tools.append((b, b.text()))
+                if not b.toolTip():
+                    b.setToolTip(b.text())
             return h
+
+        def _fit_toolbar(self):
+            """Labels give way to icons, one by one, until the toolbar fits the window."""
+            room = self.centralWidget().width() - 30
+            for b, t in self._tools:
+                b.setText(t)
+            for b, t in self._tools:
+                if self.toolbar.layout().sizeHint().width() <= room:
+                    break
+                b.setText("")
+                b.setMinimumWidth(38)
+
+        def resizeEvent(self, e):
+            super().resizeEvent(e)
+            if hasattr(self, "_tools"):
+                self._fit_toolbar()
+            # safety net: the window never grows past the screen by itself
+            if not (self.isMaximized() or self.isFullScreen()):
+                scr = self.screen() or QtGui.QGuiApplication.primaryScreen()
+                if scr is not None:
+                    a = scr.availableGeometry()
+                    fw, fh = self.frameGeometry().width() - self.width(), self.frameGeometry().height() - self.height()
+                    mw, mh = a.width() - fw, a.height() - fh
+                    if self.width() > mw or self.height() > mh:
+                        QtCore.QTimer.singleShot(0, lambda: self.resize(min(self.width(), mw), min(self.height(), mh)))
 
         # ---------------------------------------------------------------- W2 transfer
         def _run_blocking(self, title: str, fn, *args):

@@ -125,7 +125,8 @@ def annex_html(results: List[Dict[str, Any]], rows_by_id: Dict[str, Dict[str, An
 
 
 def export_job_report_with_layers(root: str, gid: str, job_id: str, top_n: int, exact: bool,
-                                  progress: Optional[Callable[[int, int], None]] = None) -> Dict[str, Any]:
+                                  progress: Optional[Callable[[int, int], None]] = None,
+                                  pdf: bool = True) -> Dict[str, Any]:
     """The core job report plus the layers section, written and logged like the core export."""
     import grand_project_db as db
     import grand_project_report as rep
@@ -156,6 +157,18 @@ def export_job_report_with_layers(root: str, gid: str, job_id: str, top_n: int, 
     rep._write_atomic(html_path, html_bytes)
     rep._write_atomic(csv_path, csv_bytes)
     html_md5, csv_md5 = rep._md5_bytes(html_bytes), rep._md5_bytes(csv_bytes)
+    pdf_path, pdf_md5, pdf_pages, pdf_error = None, None, 0, None
+    if pdf:                                       # win-u5b: the same report as a PDF (pdf-v1)
+        try:
+            from ariyan_win import reportpdf
+            pdf_path = os.path.join(out_dir, base + ".pdf")
+            tmp = pdf_path + ".tmp"
+            pdf_pages = reportpdf.write_pdf(reportpdf.pdf_html(built, results, os.path.basename(html_path), html_md5),
+                                            tmp, "ARIYAN GEO AI report %s" % info["job_id"][:6])
+            os.replace(tmp, pdf_path)
+            pdf_md5 = rep._md5_bytes(open(pdf_path, "rb").read())
+        except Exception as e:                    # the HTML and CSV still stand; the failure is reported
+            pdf_path, pdf_error = None, "%s: %s" % (type(e).__name__, e)
     n_img = sum(1 for r in results for l in r.get("layers", []) if l.get("uri") and l["product"] != "RELIEF")
     desc = ("Report %s + %s exported for job %s: %s rows of %d, %s coordinates, provenance %s; layers for %d "
             "candidate(s), %d satellite picture(s). HTML %s md5 %s; CSV %s md5 %s"
@@ -164,6 +177,10 @@ def export_job_report_with_layers(root: str, gid: str, job_id: str, top_n: int, 
                "EXACT" if info["exact_coords"] else "rounded (0.01 deg)",
                "VERIFIED" if info["provenance_verified"] else "NOT VERIFIED", len(results), n_img,
                os.path.basename(html_path), html_md5, os.path.basename(csv_path), csv_md5))
+    if pdf_path:
+        desc += "; PDF %s md5 %s (%d pages)" % (os.path.basename(pdf_path), pdf_md5, pdf_pages)
+    elif pdf:
+        desc += "; PDF not written (%s)" % pdf_error
     logged = True
     try:
         db.log_timeline_event(root, gid, rep.EVENT_TYPE, related_entity_type="wide_area_search_job",
@@ -173,6 +190,11 @@ def export_job_report_with_layers(root: str, gid: str, job_id: str, top_n: int, 
     summary = rep._export_summary(info, html_path, csv_path, html_md5, csv_md5, logged)
     summary += "\n\nSatellite layers (%s): %d candidate(s), %d picture(s) from saved images." % (
         VERSION, len(results), n_img)
+    if pdf_path:
+        summary += "\nPDF: %s (%d pages), MD5 %s" % (pdf_path, pdf_pages, pdf_md5)
+    elif pdf:
+        summary += "\nPDF not written: %s" % pdf_error
     return {"job_id": info["job_id"], "html_path": html_path, "csv_path": csv_path, "html_md5": html_md5,
             "csv_md5": csv_md5, "layers_candidates": len(results), "layers_pictures": n_img,
+            "pdf_path": pdf_path, "pdf_md5": pdf_md5, "pdf_pages": pdf_pages, "pdf_error": pdf_error,
             "timeline_event_logged": logged, "summary_text": summary}

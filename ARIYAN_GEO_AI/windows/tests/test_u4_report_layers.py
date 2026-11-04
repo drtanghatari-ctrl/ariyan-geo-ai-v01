@@ -69,3 +69,30 @@ def test_the_steward_sees_this_report(tmp_path, monkeypatch):
     reportlayers.export_job_report_with_layers(root, gid, jid, 50, False)
     g = mentor.job_guide(root, jid)
     assert {s["key"]: s["state"] for s in g["steps"]}["report"] == "done"
+
+
+def test_report_pdf_is_written_and_logged(tmp_path, monkeypatch):
+    from PySide6 import QtWidgets
+    qa = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["t"])   # noqa: F841
+    root = str(tmp_path)
+    gid, jid, a, b = _job(root)
+    monkeypatch.setattr(workstation, "terrain", _fake_terrain)
+    r = reportlayers.export_job_report_with_layers(root, gid, jid, 50, False)
+    assert r["pdf_error"] is None and r["pdf_path"].endswith(".pdf") and r["pdf_pages"] >= 2
+    raw = open(r["pdf_path"], "rb").read()
+    assert raw.startswith(b"%PDF") and hashlib.md5(raw).hexdigest() == r["pdf_md5"]
+    conn = db.get_connection(root)
+    d = conn.execute("SELECT description FROM timeline_event WHERE event_type='REPORT_EXPORTED'").fetchone()[0]
+    conn.close()
+    assert r["pdf_md5"] in d and r["html_md5"] in d
+
+
+def test_pdf_page_layout_replaces_the_wide_table(tmp_path, monkeypatch):
+    import grand_project_report as rep
+    from ariyan_win import reportpdf
+    root = str(tmp_path)
+    gid, jid, a, b = _job(root)
+    built = rep.build_job_report(root, gid, jid, 50, False)
+    page = reportpdf.pdf_html(built, [], "x.html", "abc")
+    assert "class='wrap'" not in page and "table class='c'" in page and "PDF copy (pdf-v1)" in page
+    assert "<dl>" not in page

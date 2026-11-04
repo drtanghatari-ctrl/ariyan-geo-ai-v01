@@ -194,19 +194,40 @@ class InvestigationTab(QtWidgets.QWidget):
         left.addRow("Grid cells", self.grid)
         left.addRow("Live DEM", self.dem)
         left.addRow(self.sat)
-        self.run_btn = QtWidgets.QPushButton("Run investigation")
+        self.run_btn = QtWidgets.QPushButton("\u25b6  Run investigation")
+        self.run_btn.setObjectName("primary")
+        self.run_btn.setMinimumHeight(38)
         self.run_btn.clicked.connect(self._run)
         left.addRow(self.run_btn)
         self.keys_note = _lab("", colour=MUTED)
         left.addRow(self.keys_note)
-        lw = QtWidgets.QWidget()
-        lw.setLayout(left)
+        lw = QtWidgets.QFrame()                                         # u6: the point, in a panel
+        lw.setObjectName("panel")
+        lv = QtWidgets.QVBoxLayout(lw)
+        lv.setContentsMargins(14, 10, 14, 10)
+        lh = QtWidgets.QLabel("\u2316  THE POINT TO INVESTIGATE")
+        lh.setObjectName("h")
+        lv.addWidget(lh)
+        left.setVerticalSpacing(8)
+        lv.addLayout(left)
+        lv.addStretch(1)
         lw.setMaximumWidth(460)
         v.addWidget(lw)
-        right = QtWidgets.QVBoxLayout()
+        rw = QtWidgets.QFrame()
+        rw.setObjectName("panel")
+        right = QtWidgets.QVBoxLayout(rw)
+        right.setContentsMargins(14, 10, 14, 10)
+        rh = QtWidgets.QLabel("\u25a6  RESULT")
+        rh.setObjectName("h")
+        rh.setStyleSheet("color: %s;" % GOLD)
+        right.addWidget(rh)
         self.progress = _lab("", colour=GOLD)
         right.addWidget(self.progress)
         self.result = QtWidgets.QTextBrowser()
+        self.result.setHtml("<p style='color:%s'>Set a point on the left (type it, paste \u201clat, lon\u201d from "
+                            "Google Maps, or use the candidate selected on Mission Control), then press "
+                            "<b>Run investigation</b>. The DEM anomaly, the satellite correlation, the AI debate "
+                            "and the Steward\u2019s band will appear here.</p>" % MUTED)
         right.addWidget(self.result, 1)
         self.cands = QtWidgets.QListWidget()
         self.cands.currentItemChanged.connect(lambda it, _p: it and __import__("ariyan_win.stewardui", fromlist=["x"])
@@ -216,16 +237,17 @@ class InvestigationTab(QtWidgets.QWidget):
                                              self.open_final_image(it.data(QtCore.Qt.UserRole)))
         right.addWidget(_lab("Candidates saved to the project (double-click for the Final Image):", colour=MUTED))
         right.addWidget(self.cands)
-        v.addLayout(right, 1)
+        v.addWidget(rw, 1)
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._poll)
         self._refresh_keys()
 
     def _refresh_keys(self):
         st = keys.status()
-        self.keys_note.setText("Keys: OpenTopography %s (without it, offline tiles only) \u00b7 Copernicus %s "
-                               "(without it, no satellite correlation). Change them in Settings." % (
-                                   "set" if st["opentopography"] else "not set", "set" if st["copernicus"] else "not set"))
+        self.keys_note.setText("Keys: OpenTopography %s \u00b7 Copernicus %s (Settings)" % (
+            "\u2713" if st["opentopography"] else "not set", "\u2713" if st["copernicus"] else "not set"))
+        self.keys_note.setToolTip("Without OpenTopography: offline terrain tiles only. Without Copernicus: no satellite "
+                                  "correlation. Change them in Settings.")
 
     def _paste(self, e):
         try:

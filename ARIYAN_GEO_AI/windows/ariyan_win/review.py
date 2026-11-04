@@ -268,9 +268,20 @@ class ReportArchive(QtWidgets.QWidget):
         if "error" in r:
             QtWidgets.QMessageBox.warning(self, "No report", r["error"])
             return
-        QtWidgets.QMessageBox.information(self, "Report written", r.get("summary_text") or json.dumps(r, indent=1))
-        if r.get("html_path"):
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Report written")
+        box.setText(r.get("summary_text") or json.dumps(r, indent=1))
+        bpdf = box.addButton("Open PDF", QtWidgets.QMessageBox.AcceptRole) if r.get("pdf_path") else None
+        bhtml = box.addButton("Open HTML", QtWidgets.QMessageBox.ActionRole)
+        box.addButton("Close", QtWidgets.QMessageBox.RejectRole)
+        box.exec()
+        pick = box.clickedButton()
+        if bpdf is not None and pick is bpdf:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(r["pdf_path"]))
+        elif pick is bhtml and r.get("html_path"):
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(r["html_path"]))
+        self.count.setText("Report written: %s%s" % (os.path.basename(r.get("html_path") or ""),
+                                                     " + PDF" if r.get("pdf_path") else ""))
 
     def export_results(self):
         qtwork.run_async(workstation.export_results, self._exported, self.root)
