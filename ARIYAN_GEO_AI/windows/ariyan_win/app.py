@@ -194,6 +194,11 @@ def build_window(root: str):
             self.grand.candidates.search.opened.connect(self.mission.open_final_image)
             self.grand.candidates.view.opened.connect(self.mission.open_final_image)
             self.jobs.open_final_image = self.mission.open_final_image
+            from ariyan_win.stewardui import StewardBanner          # sm-v1: the Steward as mentor
+            self.steward = StewardBanner(root, self.steward_go)
+            self.mission.steward_slot.addWidget(self.steward)
+            self.jobs.steward_go = self.steward_go
+            self.inv_tabs = inv
             self.tabs.addTab(self.grand, "GRAND PROJECT")
             self.history = HistoricalResearch(root)
             self.tabs.addTab(self.history, "HISTORICAL RESEARCH")
@@ -207,6 +212,61 @@ def build_window(root: str):
             self.status = label("", "muted")
             self.statusBar().addWidget(self.status)
             self.reload()
+
+        # ---------------------------------------------------------------- steward
+        def _goto(self, top: str, sub: Optional[str] = None):
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i).replace("&&", "&") == top:
+                    self.tabs.setCurrentIndex(i)
+                    w = self.tabs.widget(i)
+                    if sub and isinstance(w, QtWidgets.QTabWidget):
+                        for k in range(w.count()):
+                            if w.tabText(k).replace("&&", "&") == sub:
+                                w.setCurrentIndex(k)
+                    return w
+            return None
+
+        def steward_go(self, action: str, job_id: Optional[str] = None):
+            """Take the user to where the Steward's suggestion is done (and start what the button names)."""
+            from ariyan_win import mentor
+            top, sub = mentor.WHERE.get(action, (None, None))
+            if action == "receive":
+                self.receive_from_phone()
+                return
+            if top:
+                self._goto(top, sub)
+            if action in ("auto", "retry", "run_job", "new_job"):
+                if job_id:
+                    for i in range(self.jobs.jobs.count()):
+                        if self.jobs.jobs.item(i).data(QtCore.Qt.UserRole) == job_id:
+                            self.jobs.jobs.setCurrentRow(i)
+                if action == "auto" and job_id:
+                    self.jobs._auto()
+                elif action == "retry" and job_id:
+                    self.jobs._retry()
+                elif action == "new_job":
+                    self.jobs._new_job()
+            elif action in ("target", "trust"):
+                t = self.grand.jobs
+                for r in range(t.rowCount()):
+                    it = t.item(r, 0)
+                    if it and it.data(QtCore.Qt.UserRole) == job_id:
+                        t.selectRow(r)
+                        (self.grand._target if action == "target" else self.grand._trust)()
+                        break
+            elif action in ("review", "report"):
+                rep = self.report
+                if not rep._jobs_loaded:
+                    rep._load_jobs()
+                i = rep.job.findData(job_id)
+                if i >= 0:
+                    rep.job.setCurrentIndex(i)
+                if action == "review":
+                    rep.status.setCurrentIndex(max(0, rep.status.findData("GENERATED")))
+                    rep.load(0)
+                else:
+                    rep.generate_report()
+            self.steward.load()
 
         # ---------------------------------------------------------------- header
         def _header(self):
@@ -354,6 +414,8 @@ def build_window(root: str):
                 self.investigation.root = d
                 self.jobs.root = d
                 self.jobs.cand_search.root = d
+                self.jobs.guide.root = d
+                self.steward.root = d
                 self.report.root = d
                 self.models.root = d
                 self.grand.root = d
@@ -367,6 +429,8 @@ def build_window(root: str):
                 return
             self._busy = True
             self.mission.terrain_data = {}             # re-read the selected candidate too
+            if hasattr(self, "steward"):
+                self.steward.load()
             if hasattr(self, "debates"):
                 self.debates.load(append=False)
             if hasattr(self, "dataev"):

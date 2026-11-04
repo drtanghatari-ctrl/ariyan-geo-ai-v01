@@ -319,19 +319,24 @@ class JobsTab(QtWidgets.QWidget):
         self.jobs = QtWidgets.QListWidget()
         self.jobs.currentItemChanged.connect(lambda *_: self._show_job())
         self.jobs.currentItemChanged.connect(lambda *_: self.cand_search.edit.text().strip() and self.cand_search.run())
-        left.addWidget(self.jobs, 1)
+        left.addWidget(self.jobs, 2)
         from ariyan_win.candidates import CandidateSearch        # u2: find a candidate in the job
         self.open_final_image = None
         self.cand_search = CandidateSearch(root, job_id=self._job_id)
         self.cand_search.picked.connect(self._candidate)
         self.cand_search.opened.connect(lambda c: self.open_final_image and self.open_final_image(c))
-        left.addWidget(self.cand_search, 1)
+        left.addWidget(self.cand_search, 3)
         lw = QtWidgets.QWidget()
         lw.setLayout(left)
         lw.setMaximumWidth(460)
         v.addWidget(lw)
         right = QtWidgets.QVBoxLayout()
+        from ariyan_win.stewardui import StewardGuide             # sm-v1: the Steward leads the job
+        self.steward_go = None
+        self.guide = StewardGuide(root, lambda a, j: self.steward_go and self.steward_go(a, j))
+        right.addWidget(self.guide)
         self.detail = QtWidgets.QTextBrowser()
+        self.detail.setMaximumHeight(170)
         right.addWidget(self.detail, 1)
         b1 = QtWidgets.QHBoxLayout()
         self.b_full = QtWidgets.QPushButton("Run (full evidence)")
@@ -395,6 +400,7 @@ class JobsTab(QtWidgets.QWidget):
         jid = self._job_id()
         if not jid:
             return
+        self.guide.load(jid)
         import auto_pipeline as ap
         import wide_area_search_mobile as wa
 
@@ -511,6 +517,7 @@ class JobsTab(QtWidgets.QWidget):
                                                                      (st.get("detail") or "")[:160]))
 
     def _run_done(self, r):
+        self.guide.load(self._job_id())
         self.timer.stop()
         self._busy(False)
         self._running_job = None
@@ -568,6 +575,7 @@ class JobsTab(QtWidgets.QWidget):
             self.progress.setText(self.progress.text() + " \u2014 stopping after this step\u2026")
 
     def _auto_done(self, r):
+        self.guide.load(self._job_id())
         self._busy(False)
         self.b_stop.setEnabled(False)
         if "error" in r:
