@@ -441,6 +441,8 @@ class Workstation(QtWidgets.QScrollArea):
 
     # ---------------------------------------------------------------- candidate
     def select(self, cid: str):
+        from ariyan_win.stewardui import focus_candidate
+        focus_candidate(cid, self)
         self.selected = cid
         self.terrain_data = {}
         self.terrain.set_message("Reading the terrain window\u2026")

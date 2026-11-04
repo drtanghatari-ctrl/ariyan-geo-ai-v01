@@ -112,6 +112,9 @@ class DebateStudio(QtWidgets.QWidget):
         qtwork.run_async(lambda: json.loads(mc.debate_detail_json(self.root, rid)), self._show)
 
     def _show(self, d: Dict[str, Any]):
+        if d.get("candidate_id"):
+            from ariyan_win.stewardui import focus_candidate
+            focus_candidate(d["candidate_id"], self)
         if "error" in d:
             self.detail.setPlainText(d["error"])
             return

@@ -94,7 +94,7 @@ def test_banner_and_guide_build(tmp_path):
     for _ in range(3):
         qtwork.wait_all(30000)
         qa.processEvents()
-    assert "step 1 of" in w.jobs.guide.count.text()
+    assert "0 of 8 done" in w.jobs.guide.count.text()
     w.close()
 
 

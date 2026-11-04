@@ -209,6 +209,13 @@ def build_window(root: str):
             self.report = ReportArchive(root, self.mission.open_final_image)
             self.report_index = self.tabs.addTab(self.report, "REPORT && ARCHIVE")
             v.addWidget(self.tabs, 1)
+            from ariyan_win.stewardui import StewardBar              # u3d: the Steward on every page
+            self.steward_bar = StewardBar(root, self.steward_go)
+            self.steward_bar.fallback = self._page_context
+            self.tabs.currentChanged.connect(lambda i: self.steward_bar.show_tab(self.tabs.tabText(i)))
+            self.inv_tabs.currentChanged.connect(lambda i: (self.steward_bar.by_tab.pop("INVESTIGATION", None),
+                                                            self.steward_bar.show_tab("INVESTIGATION")))
+            v.addWidget(self.steward_bar)
             v.addLayout(self._bottom())
             self.status = label("", "muted")
             self.statusBar().addWidget(self.status)
@@ -227,12 +234,54 @@ def build_window(root: str):
                     return w
             return None
 
-        def steward_go(self, action: str, job_id: Optional[str] = None):
+        def _page_context(self, tab: str):
+            """What each page is already showing, for the Steward bar when you arrive on it."""
+            if tab == "MISSION CONTROL" and self.mission.selected:
+                return ("candidate", self.mission.selected)
+            if tab == "INVESTIGATION":
+                if self.inv_tabs.currentWidget() is self.jobs and self.jobs._job_id():
+                    return ("job", self.jobs._job_id())
+                it = self.investigation.cands.currentItem() or (self.investigation.cands.item(0)
+                                                                if self.investigation.cands.count() else None)
+                if self.inv_tabs.currentWidget() is self.investigation and it:
+                    return ("candidate", it.data(QtCore.Qt.UserRole))
+            if tab == "GRAND PROJECT" and getattr(self.grand.candidates.view, "shown", None):
+                return ("candidate", self.grand.candidates.view.shown)
+            if tab == "REPORT & ARCHIVE" and self.report.cid:
+                return ("candidate", self.report.cid)
+            return None
+
+        def steward_go(self, action: str, job_id: Optional[str] = None, cid: Optional[str] = None):
             """Take the user to where the Steward's suggestion is done (and start what the button names)."""
             from ariyan_win import mentor
             top, sub = mentor.WHERE.get(action, (None, None))
             if action == "receive":
                 self.receive_from_phone()
+                return
+            if action == "final_image":
+                self.mission.open_final_image(cid or job_id)
+                return
+            if action == "review_cand":
+                self._goto("REPORT & ARCHIVE")
+                rep = self.report
+                if not rep._jobs_loaded:
+                    rep._load_jobs()
+                rep.job.setCurrentIndex(0)
+                rep.status.setCurrentIndex(0)
+                rep.band.setCurrentIndex(0)
+                rep.find.setText((cid or "")[:8])
+                rep.pending_select = cid
+                rep.load(0)
+                return
+            if action == "rerun_point":
+                self._goto("INVESTIGATION", "Single point")
+                try:
+                    from ariyan_win import workstation
+                    c = workstation.candidate_detail_light(self.root, cid)
+                    self.investigation.lat.setValue(c["lat"])
+                    self.investigation.lon.setValue(c["lon"])
+                except Exception:
+                    pass
                 return
             if top:
                 self._goto(top, sub)
@@ -268,6 +317,7 @@ def build_window(root: str):
                 else:
                     rep.generate_report()
             self.steward.load()
+            self.steward_bar.refresh()
 
         # ---------------------------------------------------------------- header
         def _header(self):
@@ -418,6 +468,7 @@ def build_window(root: str):
                 self.jobs.guide.root = d
                 self.mission.job_guide.root = d
                 self.steward.root = d
+                self.steward_bar.root = d
                 self.report.root = d
                 self.models.root = d
                 self.grand.root = d
@@ -433,6 +484,8 @@ def build_window(root: str):
             self.mission.terrain_data = {}             # re-read the selected candidate too
             if hasattr(self, "steward"):
                 self.steward.load()
+            if hasattr(self, "steward_bar"):
+                self.steward_bar.refresh()
             if hasattr(self, "debates"):
                 self.debates.load(append=False)
             if hasattr(self, "dataev"):

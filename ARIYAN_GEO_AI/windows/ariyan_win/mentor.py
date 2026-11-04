@@ -226,9 +226,10 @@ def job_guide(root: str, job_id: str) -> Dict[str, Any]:
                            "No candidate reached Moderate or higher; nothing left for you to decide."))
     elif open_lead:
         top = ", ".join(c["id"][:8] for c in open_lead[:3])
-        steps.append(_step("review", "todo", "%d leading candidate%s still wait for your decision (first: %s). "
+        steps.append(_step("review", "todo", "%d leading candidate%s still wait%s for your decision (first: %s). "
                            "Open each one, read the Steward and the debate, then mark it Supported, Inconclusive or "
-                           "Rejected with your reason." % (len(open_lead), "" if len(open_lead) == 1 else "s", top),
+                           "Rejected with your reason." % (len(open_lead), "" if len(open_lead) == 1 else "s",
+                                                          "s" if len(open_lead) == 1 else "", top),
                            "review", "Review the candidates"))
     else:
         steps.append(_step("review", "done", "You have decided every leading candidate (%d)." % len(lead)))
@@ -331,3 +332,149 @@ def project_guide(root: str, now: Optional[datetime] = None) -> Dict[str, Any]:
     return {"version": VERSION, "hello": hello, "say": say, "action": action, "action_label": label,
             "focus_job": focus["job_id"] if focus else None, "jobs": guides, "complete": len(complete),
             "open": len(open_), "singles": singles}
+
+
+# ---------------------------------------------------------------- u3d: one candidate, everywhere
+CANDIDATE_STEPS = {"rated": "Steward rating", "layers": "Satellite layers", "debate": "AI debate",
+                   "review": "Your decision", "job": "Its job", "field": "Field data (advice)"}
+NEEDED_LAYERS = ("TRUE_COLOR", "NDVI", "THERMAL")      # radar is a bonus, never required
+WHERE.update({"final_image": (None, None), "review_cand": ("REPORT & ARCHIVE", None),
+              "rerun_point": ("INVESTIGATION", "Single point")})
+
+
+def _cstep(key, state, text, action=None, label="", optional=False):
+    return {"key": key, "name": CANDIDATE_STEPS[key], "state": state, "text": text, "action": action,
+            "action_label": label, "optional": optional}
+
+
+def _layers_covering(root: str, lat: float, lon: float, half_m: float = 900.0) -> Dict[str, bool]:
+    import math
+    import sat_image as si
+    dlat = half_m / 111320.0
+    dlon = half_m / (111320.0 * max(0.1, math.cos(math.radians(lat))))
+    b = {"west": lon - dlon, "east": lon + dlon, "south": lat - dlat, "north": lat + dlat}
+    out = {}
+    for p in si.LAYER_ORDER:
+        try:
+            out[p] = si.find_saved(root, p, b) is not None
+        except Exception:
+            out[p] = False
+    return out
+
+
+def candidate_guide(root: str, cid: str) -> Dict[str, Any]:
+    """The Steward's path for one candidate: rated, layers saved, debated, decided by you,
+    and where its job stands. The same guidance wherever the candidate is opened."""
+    conn = _conn(root)
+    try:
+        c = conn.execute("SELECT c.id, c.lat, c.lon, c.status, UPPER(COALESCE(c.confidence_band, '')) AS band, "
+                         "c.confidence_numeric, c.investigation_id, t.job_id, j.title FROM candidate c "
+                         "LEFT JOIN wide_area_search_tile t ON t.investigation_id = c.investigation_id "
+                         "LEFT JOIN wide_area_search_job j ON j.id = t.job_id WHERE c.id = ?", (cid,)).fetchone()
+        if c is None:
+            return {"error": "candidate %s not found" % cid}
+        c = dict(c)
+        reviewed = conn.execute("SELECT new_status, reason FROM candidate_review WHERE candidate_id = ? AND "
+                                "reviewed_by = 'user' ORDER BY id DESC LIMIT 1", (cid,)).fetchone() \
+            if _has(conn, "candidate_review") else None
+        field = conn.execute("SELECT COUNT(*) FROM field_dataset WHERE candidate_id = ?", (cid,)).fetchone()[0] \
+            if _has(conn, "field_dataset") else 0
+    finally:
+        conn.close()
+    try:
+        from ariyan_win import workstation
+        deb = (workstation.candidate_detail(root, cid) or {}).get("debate")
+    except Exception:
+        deb = None
+    band = c["band"] or "NOT_RATED"
+    steps: List[Dict[str, Any]] = []
+    single = not c["job_id"]
+    # rated
+    if band not in ("", "NOT_RATED", "NO_DATA"):
+        steps.append(_cstep("rated", "done", "The Steward rates it %s%s." % (
+            band.title(), "" if c["confidence_numeric"] is None else " %.2f" % c["confidence_numeric"])))
+    elif single:
+        steps.append(_cstep("rated", "todo", "Not rated yet. May I suggest running its investigation again so the "
+                            "Steward can rate it?", "rerun_point", "Open single-point investigation"))
+    else:
+        steps.append(_cstep("rated", "todo", "Not rated yet. The review step of its job\u2019s Automatic run rates "
+                            "it. May I suggest the Automatic run?", "auto", "Automatic run of its job"))
+    # layers
+    have = _layers_covering(root, c["lat"], c["lon"])
+    need_missing = [p for p in NEEDED_LAYERS if not have.get(p)]
+    import sat_image as si
+    names = lambda ps: ", ".join(si.PRODUCTS[p]["label"].split(" (")[0] for p in ps)     # noqa: E731
+    n_have = sum(1 for v in have.values() if v)
+    if not need_missing:
+        steps.append(_cstep("layers", "done", "%d of %d layers saved here (true colour, NDVI and thermal "
+                            "included)." % (n_have, len(have))))
+    else:
+        steps.append(_cstep("layers", "todo", "Missing here: %s. May I suggest opening its Final Image and fetching "
+                            "them from Satellite? Each uses the Copernicus quota once, then stays saved." % names(
+                                need_missing), "final_image", "Open its Final Image"))
+    # debate
+    if deb:
+        syn = deb.get("synthesis") or {}
+        steps.append(_cstep("debate", "done", "Debate stored: %s." % AGREE.get(syn.get("agreement_level"),
+                                                                                 "recorded")))
+    else:
+        steps.append(_cstep("debate", "advice", "No debate stored (debates are kept from investigations run since "
+                            "2026-10-31). Re-running its investigation would add one.",
+                            "rerun_point" if single else None, "Open single-point investigation" if single else "",
+                            optional=True))
+    # review
+    if reviewed:
+        steps.append(_cstep("review", "done", "You decided: %s \u2014 %s" % (
+            str(reviewed[0]).title(), (reviewed[1] or "")[:120])))
+    elif band in LEADING_BANDS or single:
+        steps.append(_cstep("review", "todo", "Read the Steward and the debate, then decide: Supported, "
+                            "Inconclusive or Rejected, with your reason.", "review_cand", "Decide on it"))
+    else:
+        steps.append(_cstep("review", "advice", "Below Moderate: your decision is welcome but not needed for the "
+                            "job to be complete.", "review_cand", "Decide on it", optional=True))
+    # job
+    if single:
+        steps.append(_cstep("job", "advice", "It comes from a single-point investigation. Turning it into a one-tile "
+                            "job lets the Automatic run, trust and report cover it.", "single",
+                            "Grand Project \u2192 Single points", optional=True))
+    else:
+        jg = job_guide(root, c["job_id"])
+        if "error" in jg:
+            steps.append(_cstep("job", "advice", jg["error"], optional=True))
+        elif jg["complete"]:
+            steps.append(_cstep("job", "done", "Its job \u201c%s\u201d is complete." % jg["title"]))
+        else:
+            n = jg.get("next") or {}
+            steps.append(_cstep("job", "todo", "Its job \u201c%s\u201d is at %d of %d. Next: %s" % (
+                jg["title"], jg["done"], jg["total"], n.get("text") or "waiting"), n.get("action"),
+                n.get("action_label") or ""))
+    if band not in ("SUBSTANTIAL",) and not field and band in LEADING_BANDS:
+        steps.append(_cstep("field", "advice", "To go beyond %s it needs field data: GPR or ERT here, imported in "
+                            "Data & Evidence." % band.title(), "field", "Open Data & Evidence", optional=True))
+    req = [s for s in steps if not s["optional"]]
+    done = sum(1 for s in req if s["state"] == "done")
+    nxt = next((s for s in req if s["state"] == "todo"), None)
+    complete = done == len(req)
+    say = ("Candidate %s is fully worked: rated, layered and decided%s." % (
+        cid[:8], ", and its job is complete" if not single else "") if complete else nxt["text"])
+    return {"version": VERSION, "kind": "candidate", "id": cid, "title": "Candidate %s" % cid[:8],
+            "job_id": c["job_id"], "steps": steps, "done": done, "total": len(req), "complete": complete,
+            "next": nxt, "say": say}
+
+
+AGREE = {"LEADING_INTERPRETATION": "a leading interpretation", "CONTESTED": "contested", "WEAK_SIGNAL": "a weak signal",
+         "NO_DATA": "no data"}
+
+TAB_HINTS = {
+    "MISSION CONTROL": "Pick a candidate anywhere on this page and I will tell you what it still needs.",
+    "INVESTIGATION": "Choose a job, or run a single point. I will lead it step by step to a finished, reported result.",
+    "DATA & EVIDENCE": "Field data (GPR, ERT) is what lets a candidate go beyond Moderate. Import it here for the "
+                       "leading candidate of a job.",
+    "AI DEBATE STUDIO": "Each stored debate shows four perspectives. Pick one; I will say what its candidate still needs.",
+    "VISUALIZATION": "The Final Image is where missing satellite layers are fetched; each is saved after one fetch.",
+    "GRAND PROJECT": "Search a candidate, read its group and interpretation; I will guide what is left for it.",
+    "HISTORICAL RESEARCH": "History points to places; a promising place becomes a single point, then a one-tile job I "
+                           "can lead to the end.",
+    "ANALYSIS & MODELS": "These are the rules the laboratory applies. Nothing here changes a result by itself.",
+    "REPORT & ARCHIVE": "Decide every leading candidate with your reason, then export the job report.",
+}

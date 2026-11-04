@@ -209,6 +209,8 @@ class InvestigationTab(QtWidgets.QWidget):
         self.result = QtWidgets.QTextBrowser()
         right.addWidget(self.result, 1)
         self.cands = QtWidgets.QListWidget()
+        self.cands.currentItemChanged.connect(lambda it, _p: it and __import__("ariyan_win.stewardui", fromlist=["x"])
+                                              .focus_candidate(it.data(QtCore.Qt.UserRole)))
         self.cands.setMaximumHeight(160)
         self.cands.itemDoubleClicked.connect(lambda it: it.data(QtCore.Qt.UserRole) and
                                              self.open_final_image(it.data(QtCore.Qt.UserRole)))
@@ -293,6 +295,9 @@ class InvestigationTab(QtWidgets.QWidget):
             it = QtWidgets.QListWidgetItem(str(cid)[:8])
             it.setData(QtCore.Qt.UserRole, cid)
             self.cands.addItem(it)
+        if saved.get("candidate_ids"):
+            from ariyan_win.stewardui import focus_candidate
+            focus_candidate(saved["candidate_ids"][0], self)
 
 
 # ---------------------------------------------------------------------------
@@ -387,10 +392,12 @@ class JobsTab(QtWidgets.QWidget):
             self.jobs.addItem(it)
             if j["id"] == cur:
                 self.jobs.setCurrentItem(it)
+        if self.jobs.currentItem() is None and self.jobs.count():
+            self.jobs.setCurrentRow(0)               # u3d: a job is always selected, so the Steward can guide it
 
     def _candidate(self, cid: str):
         from ariyan_win.candidates import CandidateDialog
-        CandidateDialog(self.root, cid, self.open_final_image, self).show()
+        CandidateDialog(self.root, cid, self.open_final_image, self, steward_go=self.steward_go).show()
 
     def _job_id(self) -> Optional[str]:
         it = self.jobs.currentItem()
@@ -401,6 +408,8 @@ class JobsTab(QtWidgets.QWidget):
         if not jid:
             return
         self.guide.load(jid)
+        from ariyan_win.stewardui import focus_job
+        focus_job(jid, self)
         import auto_pipeline as ap
         import wide_area_search_mobile as wa
 

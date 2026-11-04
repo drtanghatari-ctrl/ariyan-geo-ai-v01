@@ -92,9 +92,7 @@ class CandidateSearch(QtWidgets.QFrame):
             self.note.setText("Type an ID, a name or a coordinate.")
             return
         jid = self._job_id() if (self._job_id and self.only_job is not None and self.only_job.isChecked()) else None
-        if self.only_job is not None and self.only_job.isChecked() and not jid:
-            self.note.setText("Select a job on the left first, or untick \u201cOnly the selected job\u201d.")
-            return
+        # no job selected yet: search the whole project rather than refusing
         self.note.setText("Searching\u2026")
         qtwork.run_async(workstation.search_candidates, lambda r, q=q: self._show(q, r), self.root, q, 60, jid)
 
@@ -267,6 +265,8 @@ class GroupInterpretation(QtWidgets.QSplitter):
 
     def _interpret(self, cid: str):
         self.shown = cid
+        from ariyan_win.stewardui import focus_candidate
+        focus_candidate(cid, self)
         self.fi.setEnabled(True)
         self.text.setHtml("<p style='color:%s'>Reading\u2026</p>" % MUTED)
         qtwork.run_async(workstation.interpretation, lambda d, c=cid: c == self.shown and
@@ -299,15 +299,21 @@ class CandidatesPage(QtWidgets.QSplitter):
 class CandidateDialog(QtWidgets.QDialog):
     """A candidate picked from a job's search: its group and interpretation in a window."""
 
-    def __init__(self, root: str, cid: str, open_final_image=None, parent=None):
+    def __init__(self, root: str, cid: str, open_final_image=None, parent=None, steward_go=None):
         super().__init__(parent)
-        self.setWindowTitle("Candidate %s \u2014 group and interpretation" % cid[:8])
-        self.resize(1100, 680)
+        self.setWindowTitle("Candidate %s \u2014 group, interpretation and the Steward" % cid[:8])
+        self.resize(1100, 720)
         v = QtWidgets.QVBoxLayout(self)
         self.view = GroupInterpretation(root)
         if open_final_image:
             self.view.opened.connect(open_final_image)
         v.addWidget(self.view, 1)
+        from ariyan_win.stewardui import StewardBar                 # u3d: the Steward here too
+        self.steward = StewardBar(root, steward_go or (lambda *a, **k: None), follow=False)
+        self.view.group.currentItemChanged.connect(
+            lambda it, _p: it and self.steward.show_context(("candidate", it.data(QtCore.Qt.UserRole))))
+        v.addWidget(self.steward)
+        self.steward.show_context(("candidate", cid))
         b = QtWidgets.QPushButton("Close")
         b.clicked.connect(self.accept)
         v.addWidget(b, 0, QtCore.Qt.AlignRight)

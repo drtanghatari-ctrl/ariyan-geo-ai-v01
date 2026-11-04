@@ -153,6 +153,13 @@ class ReportArchive(QtWidgets.QWidget):
                 self.table.setItem(i, j, it)
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setStretchLastSection(True)
+        want = getattr(self, "pending_select", None)
+        self.pending_select = None
+        if want:
+            for i in range(self.table.rowCount()):
+                if self.table.item(i, 0).data(QtCore.Qt.UserRole) == want:
+                    self.table.selectRow(i)
+                    break
         self.count.setText("%s candidate(s); showing %d\u2013%d" % ("{:,}".format(r["total"]), r["offset"] + 1 if r["rows"] else 0,
                                                                   r["offset"] + len(r["rows"])))
         self.prev.setEnabled(r["offset"] > 0)
@@ -163,6 +170,8 @@ class ReportArchive(QtWidgets.QWidget):
         if not it:
             return
         self.cid = it[0].data(QtCore.Qt.UserRole)
+        from ariyan_win.stewardui import focus_candidate
+        focus_candidate(self.cid, self)
         import grand_project_query_mobile as q
         cid = self.cid
         qtwork.run_async(lambda: {"d": json.loads(q.get_candidate_detail_json(self.root, cid)),

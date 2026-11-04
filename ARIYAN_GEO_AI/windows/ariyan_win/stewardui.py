@@ -147,7 +147,7 @@ class StewardBanner(QtWidgets.QFrame):
             row.addWidget(_lab("complete" if j["complete"] else "next: " + (nxt.get("name") or "waiting"),
                                colour=MUTED, wrap=False), 1)
             if nxt.get("action"):
-                b = QtWidgets.QPushButton(nxt.get("action_label") or "Go")
+                b = QtWidgets.QPushButton((nxt.get("action_label") or "Go").replace("&", "&&"))
                 b.clicked.connect(lambda _=False, a=nxt["action"], jid=j["job_id"]: self.go(a, jid))
                 row.addWidget(b)
             self.jobs_box.addLayout(row)
@@ -223,11 +223,11 @@ class StewardGuide(QtWidgets.QFrame):
             return
         self.bar.setRange(0, g["total"])
         self.bar.setValue(g["done"])
-        self.count.setText("\u2713 complete" if g["complete"] else "step %d of %d" % (g["done"] + 1, g["total"]))
+        self.count.setText("\u2713 complete" if g["complete"] else "%d of %d done" % (g["done"], g["total"]))
         self.say.setText("\u201c%s\u201d" % g["say"])
         nxt = g.get("next") or {}
         if nxt.get("action") and nxt.get("state") == "todo":
-            self.act.setText(nxt["action_label"] + "  \u2192")
+            self.act.setText(nxt["action_label"].replace("&", "&&") + "  \u2192")
             self.act.show()
         else:
             self.act.hide()
@@ -253,3 +253,191 @@ class StewardGuide(QtWidgets.QFrame):
         nxt = (self.guide or {}).get("next") or {}
         if nxt.get("action"):
             self.go(nxt["action"], self.job_id)
+
+
+# ---------------------------------------------------------------- u3d: the Steward everywhere
+class _Bus(QtCore.QObject):
+    """Every page tells the Steward what you are looking at; the Steward bar follows."""
+    candidate = QtCore.Signal(str)
+    job = QtCore.Signal(str)
+
+
+_BUS: Optional[_Bus] = None
+
+
+def bus() -> _Bus:
+    global _BUS
+    if _BUS is None:
+        _BUS = _Bus()
+    return _BUS
+
+
+def _seen(source) -> bool:
+    """Only a page you are looking at moves the Steward (pages filling in the background do not)."""
+    try:
+        return source is None or source.isVisible()
+    except Exception:
+        return True
+
+
+def focus_candidate(cid: Optional[str], source=None):
+    if cid and _seen(source):
+        bus().candidate.emit(str(cid))
+
+
+def focus_job(jid: Optional[str], source=None):
+    if jid and _seen(source):
+        bus().job.emit(str(jid))
+
+
+class StewardBar(QtWidgets.QFrame):
+    """Always on screen, above the toolbar: guidance for what you are looking at -- a candidate,
+    a job or the page -- with the next step and its button. "Path" shows every step."""
+
+    def __init__(self, root: str, go: Callable[..., None], parent=None, follow: bool = True):
+        super().__init__(parent)
+        self.root, self.go = root, go
+        self.setObjectName("steward")
+        self.setStyleSheet(STYLE)
+        self.context: Optional[tuple] = None          # ("candidate"|"job", id)
+        self.by_tab: Dict[str, tuple] = {}
+        self.fallback: Optional[Callable[[str], Optional[tuple]]] = None   # what the page already shows
+        self.tab = "MISSION CONTROL"
+        self.guide: Dict[str, Any] = {}
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(10, 6, 10, 6)
+        v.setSpacing(4)
+        h = QtWidgets.QHBoxLayout()
+        h.setSpacing(10)
+        em = QtWidgets.QLabel("\u2726")
+        em.setFixedSize(30, 30)
+        em.setAlignment(QtCore.Qt.AlignCenter)
+        em.setStyleSheet("color: %s; font-size: 14pt; border: 1px solid %s; border-radius: 15px;" % (GOLD, GOLD))
+        h.addWidget(em, 0, QtCore.Qt.AlignTop)
+        mid = QtWidgets.QVBoxLayout()
+        mid.setSpacing(1)
+        self.head = _lab("THE SCIENTIFIC STEWARD", "stewardHead", wrap=False)
+        self.say = _lab("", "stewardSay")
+        mid.addWidget(self.head)
+        mid.addWidget(self.say)
+        h.addLayout(mid, 1)
+        self.bar = QtWidgets.QProgressBar()
+        self.bar.setFixedSize(90, 10)
+        self.bar.hide()
+        h.addWidget(self.bar, 0, QtCore.Qt.AlignVCenter)
+        self.act = QtWidgets.QPushButton("")
+        self.act.setObjectName("primary")
+        self.act.hide()
+        self.act.clicked.connect(self._act)
+        h.addWidget(self.act, 0, QtCore.Qt.AlignVCenter)
+        self.path = QtWidgets.QPushButton("Path \u25b4")
+        self.path.setCheckable(True)
+        self.path.hide()
+        self.path.toggled.connect(self._toggle)
+        h.addWidget(self.path, 0, QtCore.Qt.AlignVCenter)
+        self.steps_wrap = QtWidgets.QWidget()
+        self.steps_wrap.setStyleSheet("background: transparent;")
+        self.steps = QtWidgets.QGridLayout(self.steps_wrap)
+        self.steps.setContentsMargins(40, 0, 0, 0)
+        self.steps.setHorizontalSpacing(8)
+        self.steps.setVerticalSpacing(1)
+        self.steps_wrap.hide()
+        v.addWidget(self.steps_wrap)
+        v.addLayout(h)
+        if follow:
+            bus().candidate.connect(lambda c: self.show_context(("candidate", c)))
+            bus().job.connect(lambda j: self.show_context(("job", j)))
+        self.show_tab(self.tab)
+
+    # --- what to show
+    def show_tab(self, name: str):
+        self.tab = name.replace("&&", "&")
+        ctx = self.by_tab.get(self.tab)
+        if not ctx and self.fallback:
+            try:
+                ctx = self.fallback(self.tab)
+            except Exception:
+                ctx = None
+        if ctx:
+            self.context = ctx
+            self._load()
+        else:
+            self.context = None
+            self.guide = {}
+            self.head.setText("THE SCIENTIFIC STEWARD \u00b7 %s" % self.tab)
+            self.say.setText(mentor.TAB_HINTS.get(self.tab, "I am here on every page."))
+            self.act.hide()
+            self.bar.hide()
+            self.path.hide()
+            self.steps_wrap.hide()
+
+    def show_context(self, ctx: tuple):
+        self.by_tab[self.tab] = ctx
+        self.context = ctx
+        self._load()
+
+    def refresh(self):
+        if self.context:
+            self._load()
+
+    def _load(self):
+        kind, ident = self.context
+        fn = mentor.candidate_guide if kind == "candidate" else mentor.job_guide
+        self.say.setText("Reading\u2026")
+        qtwork.run_async(fn, lambda g, c=self.context: self._show(c, g), self.root, ident)
+
+    def _show(self, ctx: tuple, g: Dict[str, Any]):
+        if ctx != self.context:
+            return
+        self.guide = g
+        _clear(self.steps)
+        if "error" in g:
+            self.say.setText(g["error"])
+            self.act.hide()
+            return
+        title = g.get("title") or ""
+        self.head.setText("THE SCIENTIFIC STEWARD \u00b7 %s \u00b7 %s" % (
+            title, "\u2713 complete" if g["complete"] else "%d of %d done" % (g["done"], g["total"])))
+        self.say.setText("\u201c%s\u201d" % g["say"])
+        self.bar.setRange(0, g["total"] or 1)
+        self.bar.setValue(g["done"])
+        self.bar.show()
+        nxt = g.get("next") or {}
+        if nxt.get("action") and nxt.get("state") == "todo":
+            self.act.setText(nxt["action_label"].replace("&", "&&") + "  \u2192")
+            self.act.show()
+        else:
+            self.act.hide()
+        self.path.show()
+        for i, s in enumerate(g["steps"]):
+            ic, col = ICON.get(s["state"], ("\u25cb", MUTED))
+            self.steps.addWidget(_lab(ic, colour=col, bold=True, wrap=False), i, 0)
+            self.steps.addWidget(_lab(s["name"], colour=col if s["state"] != "waiting" else MUTED, wrap=False), i, 1)
+            t = _lab(s["text"].split(". ")[0].rstrip(".") + ".", colour=MUTED if s["state"] in ("done", "waiting")
+                     else None)
+            t.setToolTip(s["text"])
+            self.steps.addWidget(t, i, 2)
+            if s.get("action") and s["state"] in ("todo", "advice"):
+                b = QtWidgets.QPushButton((s.get("action_label") or "Go").replace("&", "&&"))
+                b.clicked.connect(lambda _=False, a=s["action"]: self._go(a))
+                self.steps.addWidget(b, i, 3)
+        self.steps.setColumnStretch(2, 1)
+
+    def _toggle(self, on: bool):
+        self.steps_wrap.setVisible(on)
+        self.path.setText("Path \u25be" if on else "Path \u25b4")
+
+    def _go(self, action: str):
+        if not self.context:
+            return
+        kind, ident = self.context
+        if kind == "candidate":
+            self.go(action, ident if action in ("final_image", "review_cand", "rerun_point")
+                    else (self.guide.get("job_id") or None), cid=ident)
+        else:
+            self.go(action, ident)
+
+    def _act(self):
+        nxt = (self.guide or {}).get("next") or {}
+        if nxt.get("action"):
+            self._go(nxt["action"])
