@@ -614,8 +614,13 @@ class Workstation(QtWidgets.QScrollArea):
         self.drape_combo.blockSignals(True)
         self.drape_combo.clear()
         self.drape_combo.addItems(list(self._layer_images))
+        keep = getattr(self, "_keep_drape", None)
+        self._keep_drape = None
+        if keep and keep in self._layer_images:
+            self.drape_combo.setCurrentText(keep)
         self.drape_combo.blockSignals(False)
-        self.terrain.set_drape_array(self._layer_arrays["Relief (hillshaded DEM)"])
+        self.terrain.set_drape_array(self._layer_arrays.get(self.drape_combo.currentText(),
+                                                            self._layer_arrays["Relief (hillshaded DEM)"]))
         ve = s.get("ve_auto", 1.0)
         self.terrain_caption.setText("Real DEM window \u00b11 km (%s). Height \u00d7%s (automatic). %d candidate pins; "
                                      "the selected candidate is the large white pin." % (m.get("source"),
@@ -641,7 +646,17 @@ class Workstation(QtWidgets.QScrollArea):
             return
         from ariyan_win.finalimage import FinalImageWindow
         w = FinalImageWindow(self.root, cid, self.window(), start_tab=start_tab)
+        w.layers_changed.connect(self._layers_changed)
         w.show()
+
+    def _layers_changed(self, cid: str):
+        """u3c: a layer was fetched in a Final Image. Saved layers serve every window they cover,
+        so re-read the selected candidate's layers (keeping the drape you chose)."""
+        if not self.selected:
+            return
+        self._keep_drape = self.drape_combo.currentText()
+        qtwork.run_async(workstation.terrain, lambda r, c=self.selected: self._show_terrain(c, r), self.root,
+                         self.selected)
 
     def _tile_chips(self, layers: List[Dict[str, Any]]):
         """u1: every layer of this window as a card -- the relief and each saved satellite layer with

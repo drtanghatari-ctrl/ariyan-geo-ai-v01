@@ -442,9 +442,12 @@ class ProfilePlot(QtWidgets.QWidget):
 # ---------------------------------------------------------------------------
 
 class FinalImageWindow(QtWidgets.QMainWindow):
+    layers_changed = QtCore.Signal(str)              # u3c: a layer was fetched and saved for this window
+
     def __init__(self, root: str, cid: str, parent=None, start_tab: int = 0):
         super().__init__(parent)
         self.root, self.cid = root, cid
+        self._fetched_any = False
         self._start_tab = start_tab
         self.sid: Optional[str] = None
         self.data: Dict[str, Any] = {}
@@ -644,6 +647,8 @@ class FinalImageWindow(QtWidgets.QMainWindow):
             self.sid = None
 
     def closeEvent(self, e):
+        if self._fetched_any:
+            self.layers_changed.emit(self.cid)
         self._close_session()
         super().closeEvent(e)
 
@@ -738,6 +743,9 @@ class FinalImageWindow(QtWidgets.QMainWindow):
             self.layer_note.setText("Hidden: %s" % r.get("hidden_reason"))
             return
         self.layer_payload = r
+        if r.get("fetched_now") or not r.get("reused", True):
+            self._fetched_any = True
+            self.layers_changed.emit(self.cid)       # Mission Control re-reads its layers now
         g = r["grid"]
         img = widgets.image_from_rgba(r["rgba"], g["width"], g["height"])
         self.canvas.set_layer(img, r["placement"])

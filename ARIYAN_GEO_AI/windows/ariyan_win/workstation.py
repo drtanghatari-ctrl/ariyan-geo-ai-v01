@@ -109,7 +109,7 @@ def terrain(root: str, cid: str) -> Dict[str, Any]:
         finite = np.isfinite(heights)
         median_m = (float(m["z_min_m"]) - float(np.nanmin(heights))) if finite.any() and m.get("z_min_m") is not None else 0.0
         layers = []
-        th = json.loads(mc.thumbs_json(root, sid))
+        th = _thumbs_with_keys(root, sid)
         for l in th.get("layers", []):
             item = dict(l)
             if l.get("state") == "SAVED":
@@ -132,6 +132,37 @@ def terrain(root: str, cid: str) -> Dict[str, Any]:
             fim.close_session(sid)
         except Exception:
             pass
+
+
+def _thumbs_with_keys(root: str, sid: str) -> Dict[str, Any]:
+    """mission_control.thumbs, but with the Copernicus login from Settings, so a layer that is
+    saved but not yet self-checked can be checked (never fetched: fetch stays False)."""
+    import sat_image as si
+    import sat_image_mobile as sim
+    try:
+        from ariyan_win import keys
+        kid, sec = keys.copernicus()
+    except Exception:
+        kid, sec = "", ""
+    out: List[Dict[str, Any]] = []
+    for p in si.LAYER_ORDER:
+        label = si.PRODUCTS[p]["label"]
+        try:
+            r = json.loads(sim.open_layer_json(root, sid, p, kid or "", sec or "", False))
+        except Exception as e:
+            r = {"error": "%s: %s" % (type(e).__name__, e)}
+        if r.get("needs_fetch"):
+            out.append({"product": p, "label": label, "state": "NOT_SAVED"})
+        elif "error" in r:
+            out.append({"product": p, "label": label, "state": "ERROR", "reason": r["error"]})
+        elif not r.get("allowed"):
+            out.append({"product": p, "label": label, "state": "HIDDEN", "reason": r.get("hidden_reason") or r.get("check")})
+        else:
+            g = r.get("grid") or {}
+            out.append({"product": p, "label": label, "state": "SAVED", "scene_date": r.get("scene_date"),
+                        "clear_fraction": r.get("clear_fraction_window"), "width": g.get("width"),
+                        "height": g.get("height")})
+    return {"layers": out}
 
 
 def candidate_detail_light(root: str, cid: str) -> Dict[str, Any]:
