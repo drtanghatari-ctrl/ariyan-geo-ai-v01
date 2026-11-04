@@ -117,6 +117,7 @@ def terrain(root: str, cid: str) -> Dict[str, Any]:
                     item["rgba"] = bytes(sim.layer_rgba(sid, l["product"]))
                     # w3: where the layer's own cells sit on the DEM window (DEM pixel units)
                     item["placement"] = sim._LAYERS[sid][l["product"]]["payload"]["placement"]
+                    item["legend"] = sim._LAYERS[sid][l["product"]]["payload"].get("legend")
                 except Exception as e:
                     item["state"], item["reason"] = "ERROR", str(e)
             layers.append(item)

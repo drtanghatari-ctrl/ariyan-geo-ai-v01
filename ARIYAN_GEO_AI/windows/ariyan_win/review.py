@@ -253,10 +253,16 @@ class ReportArchive(QtWidgets.QWidget):
         exact = QtWidgets.QMessageBox.question(
             self, "Coordinates", "Put exact coordinates in the report?\n\nNo = rounded (safer to share; sites can be "
             "looted).") == QtWidgets.QMessageBox.Yes
-        import grand_project_query_mobile as q
         jid = self.job.currentData()
-        qtwork.run_async(lambda: json.loads(q.export_job_report_json(self.root, _gid(self.root), jid, n, exact)),
-                         self._reported)
+        from ariyan_win import reportlayers                       # u4: the report carries every saved layer
+
+        def make():
+            try:
+                return reportlayers.export_job_report_with_layers(self.root, _gid(self.root), jid, n, exact)
+            except Exception as e:
+                return {"error": "%s: %s" % (type(e).__name__, e)}
+        self.count.setText("Writing the job report with the satellite layers of its leading candidates\u2026")
+        qtwork.run_async(make, self._reported)
 
     def _reported(self, r):
         if "error" in r:
