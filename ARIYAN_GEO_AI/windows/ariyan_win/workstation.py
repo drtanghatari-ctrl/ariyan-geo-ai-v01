@@ -472,3 +472,27 @@ def interpretation(root: str, cid: str) -> Dict[str, Any]:
     d["reviews"] = reviews
     d["hypothesis"] = hyp[0] if hyp else None
     return d
+
+
+def candidate_context(root: str, cid: str) -> Dict[str, Any]:
+    """u4: what fills Mission Control's side columns for the selected candidate -- the recorded
+    sites around it (gazetteer), its group (same job, chained within 300 m) and its job. Read-only."""
+    c = candidate_detail_light(root, cid)
+    out: Dict[str, Any] = {"id": cid, "lat": c["lat"], "lon": c["lon"]}
+    try:
+        import known_sites
+        a = known_sites.annotate(c["lat"], c["lon"], k=6)
+        out["sites"] = {"text": a.get("text"), "label": a.get("label"), "nearest": a.get("nearest") or [],
+                        "extents": a.get("extents_within_near") or [], "density": a.get("density_points"),
+                        "radius_km": a.get("density_radius_km"), "source": a.get("source")}
+    except Exception as e:
+        out["sites"] = {"error": "%s: %s" % (type(e).__name__, e)}
+    out["group"] = candidate_group(root, cid)
+    conn = _conn(root)
+    try:
+        r = conn.execute("SELECT t.job_id FROM candidate c JOIN wide_area_search_tile t ON t.investigation_id = "
+                         "c.investigation_id WHERE c.id = ?", (cid,)).fetchone()
+        out["job_id"] = r[0] if r else None
+    finally:
+        conn.close()
+    return out

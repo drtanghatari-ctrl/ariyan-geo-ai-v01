@@ -96,3 +96,25 @@ def test_banner_and_guide_build(tmp_path):
         qa.processEvents()
     assert "step 1 of" in w.jobs.guide.count.text()
     w.close()
+
+
+def test_mission_side_columns_are_filled(tmp_path):
+    from PySide6 import QtWidgets
+    from ariyan_win import app, qtwork, workstation
+    root = str(tmp_path)
+    gid, jid = _job(root)
+    tile = db.list_tiles_for_job(root, jid)[0]
+    inv = db.create_investigation(root, gid, objective="tile")
+    db.mark_tile_done(root, tile["id"], inv)
+    a = db.create_candidate(root, gid, inv, 36.95, 45.52, score=10.0)
+    db.create_candidate(root, gid, inv, 36.951, 45.52, score=8.0)
+    x = workstation.candidate_context(root, a)
+    assert x["job_id"] == jid and len(x["group"]["members"]) == 2 and x["sites"]["nearest"]
+    qa = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["t"])
+    w = app.build_window(root)
+    for _ in range(5):
+        qtwork.wait_all(30000)
+        qa.processEvents()
+    assert w.mission.group_list.count() == 2
+    assert w.mission.job_guide.job_id == jid
+    w.close()

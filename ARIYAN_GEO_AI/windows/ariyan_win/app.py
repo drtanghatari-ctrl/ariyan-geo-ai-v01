@@ -198,6 +198,7 @@ def build_window(root: str):
             self.steward = StewardBanner(root, self.steward_go)
             self.mission.steward_slot.addWidget(self.steward)
             self.jobs.steward_go = self.steward_go
+            self.mission.steward_go = self.steward_go
             self.inv_tabs = inv
             self.tabs.addTab(self.grand, "GRAND PROJECT")
             self.history = HistoricalResearch(root)
@@ -415,6 +416,7 @@ def build_window(root: str):
                 self.jobs.root = d
                 self.jobs.cand_search.root = d
                 self.jobs.guide.root = d
+                self.mission.job_guide.root = d
                 self.steward.root = d
                 self.report.root = d
                 self.models.root = d

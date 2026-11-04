@@ -183,8 +183,9 @@ class Workstation(QtWidgets.QScrollArea):
         self.coord_box, self.coord = panel("INVESTIGATION COORDINATE", TEAL)
         self.vital_box, self.vital = panel("INVESTIGATION VITAL SIGNS (selected candidate)", ACCENT)
         self.health_box, self.health = panel("LABORATORY SYSTEM HEALTH", "#9A7BFF")
+        self.sites_box, self.sites = panel("\u2302  RECORDED SITES AROUND IT (gazetteer)", ORANGE)
         left = QtWidgets.QVBoxLayout()
-        for b in (self.coord_box, self.vital_box, self.health_box):
+        for b in (self.coord_box, self.vital_box, self.sites_box, self.health_box):
             left.addWidget(b)
         left.addStretch(1)
         # centre
@@ -245,8 +246,19 @@ class Workstation(QtWidgets.QScrollArea):
         # right
         self.evid_box, self.evid = panel("EVIDENCE SUMMARY (selected candidate)", ACCENT)
         self.stew_box, self.stew = panel("THE STEWARD (selected candidate)", GOLD)
+        from ariyan_win.stewardui import StewardGuide           # u4: the Steward on the candidate's job
+        self.steward_go = None
+        self.job_guide = StewardGuide(root, lambda a, j: self.steward_go and self.steward_go(a, j), compact=True)
+        self.group_box, gl = panel("\u25ce  ITS GROUP (same job, within 300 m \u00b7 click one)", TEAL)
+        self.group_note = lab("", colour=MUTED)
+        gl.addWidget(self.group_note)
+        self.group_list = QtWidgets.QListWidget()
+        self.group_list.setMinimumHeight(170)
+        self.group_list.itemClicked.connect(lambda it: self.select(it.data(QtCore.Qt.UserRole)))
+        self.group_list.itemDoubleClicked.connect(lambda it: self.open_final_image(it.data(QtCore.Qt.UserRole)))
+        gl.addWidget(self.group_list, 1)
         right = QtWidgets.QVBoxLayout()
-        for b in (self.evid_box, self.stew_box):
+        for b in (self.job_guide, self.evid_box, self.stew_box, self.group_box):
             right.addWidget(b)
         right.addStretch(1)
         # bottom
@@ -438,6 +450,7 @@ class Workstation(QtWidgets.QScrollArea):
         self.drape_combo.blockSignals(False)
         qtwork.run_async(workstation.candidate_detail, lambda r, c=cid: self._show_detail(c, r), self.root, cid)
         qtwork.run_async(workstation.terrain, lambda r, c=cid: self._show_terrain(c, r), self.root, cid)
+        qtwork.run_async(workstation.candidate_context, lambda r, c=cid: self._show_context(c, r), self.root, cid)
 
     def _show_detail(self, cid: str, d: Dict[str, Any]):
         if cid != self.selected:
@@ -522,6 +535,54 @@ class Workstation(QtWidgets.QScrollArea):
                                       colour=BAND.get(st["band"], GOLD), bold=True))
         self.debate.addWidget(lab("A ranked rule-based opinion, not proof; the Steward's band is what counts.",
                                   colour=MUTED))
+
+    def _show_context(self, cid: str, x: Dict[str, Any]):
+        if cid != self.selected:
+            return
+        clear(self.sites, 1)
+        if "error" in x and "sites" not in x:
+            self.sites.addWidget(lab(x["error"], colour=ROSE))
+            return
+        st = x.get("sites") or {}
+        if "error" in st:
+            self.sites.addWidget(lab(st["error"], colour=ROSE))
+        else:
+            self.sites.addWidget(lab(st.get("text") or "", colour=GOLD if st.get("label") == "NEAR_KNOWN_SITE"
+                                     else None, bold=True))
+            for e in (st.get("extents") or [])[:2]:
+                self.sites.addWidget(lab("\u25a2 %s \u2014 %s" % (e["name"], "inside" if e.get("inside") else
+                                                                  "%.0f m" % e["distance_m"]), colour=ORANGE))
+            for n in (st.get("nearest") or [])[:6]:
+                row = QtWidgets.QHBoxLayout()
+                row.addWidget(lab("\u2022 " + n["name"], wrap=True), 1)
+                d = n["distance_m"]
+                dl = lab("%.0f m" % d if d < 1000 else "%.1f km" % (d / 1000.0), colour=MUTED, wrap=False)
+                dl.setAlignment(QtCore.Qt.AlignRight)
+                row.addWidget(dl)
+                self.sites.addLayout(row)
+            if not st.get("nearest"):
+                self.sites.addWidget(lab("No recorded site within 50 km.", colour=MUTED))
+            self.sites.addWidget(lab("%s recorded points within %s km \u00b7 a known site is context, not evidence." % (
+                st.get("density", "?"), st.get("radius_km", "?")), colour=MUTED))
+        g = x.get("group") or {}
+        self.group_list.clear()
+        if "error" in g:
+            self.group_note.setText(g["error"])
+        else:
+            m = g.get("members") or []
+            self.group_note.setText("%d candidate%s of %s lie together here." % (len(m), "" if len(m) == 1 else "s",
+                                                                                g.get("scope", "")))
+            for mm in m:
+                conf = mm["band"].replace("_", " ").title() + ("" if mm.get("confidence_numeric") is None
+                                                               else " %.2f" % mm["confidence_numeric"])
+                it = QtWidgets.QListWidgetItem("%s%s  %s \u00b7 %s  %s" % (
+                    "\u25b6 " if mm["selected"] else "", mm["id"][:8], conf, mc_status(mm.get("status")),
+                    "" if mm["selected"] else "%.0f m" % mm["distance_m"]))
+                it.setData(QtCore.Qt.UserRole, mm["id"])
+                if mm["band"] != "NOT_RATED":
+                    it.setForeground(QtGui.QColor(BAND.get(mm["band"], "#E6EDF3")))
+                self.group_list.addItem(it)
+        self.job_guide.load(x.get("job_id"))
 
     def _show_terrain(self, cid: str, t: Dict[str, Any]):
         if cid != self.selected:

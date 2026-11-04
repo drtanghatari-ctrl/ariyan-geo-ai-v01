@@ -165,9 +165,10 @@ class StewardBanner(QtWidgets.QFrame):
 class StewardGuide(QtWidgets.QFrame):
     """One job's path, step by step: what is done, what is next and why, and the button for it."""
 
-    def __init__(self, root: str, go: Callable[[str, Optional[str]], None], parent=None):
+    def __init__(self, root: str, go: Callable[[str, Optional[str]], None], parent=None, compact: bool = False):
         super().__init__(parent)
         self.root, self.go = root, go
+        self.compact = compact
         self.job_id: Optional[str] = None
         self.setObjectName("steward")
         self.setStyleSheet(STYLE)
@@ -175,7 +176,8 @@ class StewardGuide(QtWidgets.QFrame):
         v.setContentsMargins(14, 10, 14, 10)
         v.setSpacing(4)
         top = QtWidgets.QHBoxLayout()
-        top.addWidget(_lab("\u2726  THE STEWARD \u00b7 THIS JOB, STEP BY STEP", "stewardHead"), 1)
+        top.addWidget(_lab("\u2726  THE STEWARD \u00b7 %s" % ("ITS JOB" if compact else "THIS JOB, STEP BY STEP"),
+                           "stewardHead"), 1)
         self.count = _lab("", colour=GOLD, bold=True, wrap=False)
         top.addWidget(self.count)
         v.addLayout(top)
@@ -201,6 +203,12 @@ class StewardGuide(QtWidgets.QFrame):
     def load(self, job_id: Optional[str]):
         self.job_id = job_id
         if not job_id:
+            _clear(self.steps)
+            self.bar.setValue(0)
+            self.count.setText("")
+            self.act.hide()
+            self.say.setText("This candidate comes from a single-point investigation, not a job. Turning it into a "
+                             "one-tile job (Grand Project \u2192 Single points) lets me guide it to the end.")
             return
         qtwork.run_async(mentor.job_guide, lambda g, j=job_id: self._show(j, g), self.root, job_id)
 
@@ -223,6 +231,10 @@ class StewardGuide(QtWidgets.QFrame):
             self.act.show()
         else:
             self.act.hide()
+        if self.compact:
+            nm = g.get("title") or ""
+            self.count.setText(("\u2713 " if g["complete"] else "%d/%d \u00b7 " % (g["done"], g["total"])) + nm[:22])
+            return
         for i, s in enumerate(g["steps"]):
             ic, col = ICON.get(s["state"], ("\u25cb", MUTED))
             a = _lab(ic, colour=col, bold=True, wrap=False)
