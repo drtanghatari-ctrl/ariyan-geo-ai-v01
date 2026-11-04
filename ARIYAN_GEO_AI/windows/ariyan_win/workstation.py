@@ -257,3 +257,120 @@ def export_results(root: str) -> Dict[str, Any]:
     md5 = {p: hashlib.md5(open(p, "rb").read()).hexdigest() for p in (csv_path, gj_path)}
     return {"rows": len(rows), "csv": csv_path, "geojson": gj_path, "md5": md5,
             "note": "Coordinates are exact. Statuses and bands are as stored; nothing was changed."}
+
+
+# ---------------------------------------------------------------- u1: candidate search
+import re as _re
+
+_COORD = _re.compile(r"^\s*(-?\d{1,2}(?:\.\d+)?)\s*[,;\s]\s*(-?\d{1,3}(?:\.\d+)?)\s*(?:[,;\s]\s*(?:r\s*=?\s*)?(\d+(?:\.\d+)?)\s*(km|m)?)?\s*$",
+                     _re.I)
+_HEX = _re.compile(r"^[0-9a-f\-]{3,}$", _re.I)
+SEARCH_RADIUS_M = 1000.0
+
+
+def parse_query(q: str) -> Dict[str, Any]:
+    """'36.953, 45.524' (optionally ', 500 m' or ', 2 km') -> coordinate; hex text -> ID; anything else -> name."""
+    q = (q or "").strip()
+    m = _COORD.match(q)
+    if m:
+        lat, lon = float(m.group(1)), float(m.group(2))
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            r = SEARCH_RADIUS_M
+            if m.group(3):
+                r = float(m.group(3)) * (1000.0 if (m.group(4) or "").lower() == "km" else 1.0)
+            return {"kind": "coordinate", "lat": lat, "lon": lon, "radius_m": min(max(r, 10.0), 50000.0)}
+    if _HEX.match(q) and any(ch.isdigit() for ch in q):
+        return {"kind": "id", "text": q.lower()}
+    return {"kind": "name", "text": q}
+
+
+def _fold(t: str) -> str:
+    """Lower case without accents, so 'kultepe' finds 'Kültepe' and 'saqqez' finds 'Saqqēz'."""
+    import unicodedata
+    return "".join(ch for ch in unicodedata.normalize("NFKD", str(t or "")) if not unicodedata.combining(ch)).lower()
+
+
+def _dist_m(lat1, lon1, lat2, lon2) -> float:
+    import math
+    return math.hypot((lat2 - lat1) * 111320.0, (lon2 - lon1) * 111320.0 * math.cos(math.radians(lat1)))
+
+
+def _near(conn, lat: float, lon: float, radius_m: float, limit: int) -> List[Dict[str, Any]]:
+    import math
+    dlat = radius_m / 111320.0
+    dlon = radius_m / (111320.0 * max(0.1, math.cos(math.radians(lat))))
+    out = []
+    for r in conn.execute(_SEARCH_SELECT + "WHERE c.lat BETWEEN ? AND ? AND c.lon BETWEEN ? AND ?",
+                          (lat - dlat, lat + dlat, lon - dlon, lon + dlon)):
+        d = _dist_m(lat, lon, r["lat"], r["lon"])
+        if d <= radius_m:
+            x = dict(r)
+            x["distance_m"] = round(d, 1)
+            out.append(x)
+    out.sort(key=lambda x: x["distance_m"])
+    return out[:limit]
+
+
+_SEARCH_SELECT = ("SELECT c.id, c.lat, c.lon, c.status, c.confidence_band, c.confidence_numeric, c.score, "
+                  "j.title AS job_title FROM candidate c "
+                  "LEFT JOIN wide_area_search_tile t ON t.investigation_id = c.investigation_id "
+                  "LEFT JOIN wide_area_search_job j ON j.id = t.job_id ")
+
+
+def search_candidates(root: str, query: str, limit: int = 60) -> Dict[str, Any]:
+    """Find candidates by ID (prefix), by name (job title, or a known site from the gazetteer:
+    candidates within 1 km of it) or by coordinate (within a radius, default 1 km).
+    Read-only; every row says why it matched."""
+    p = parse_query(query)
+    if not (query or "").strip():
+        return {"query": p, "rows": [], "note": "Type an ID, a name or a coordinate."}
+    conn = _conn(root)
+    rows: List[Dict[str, Any]] = []
+    try:
+        if p["kind"] == "coordinate":
+            for x in _near(conn, p["lat"], p["lon"], p["radius_m"], limit):
+                x["match"] = "%.0f m from %.5f, %.5f" % (x["distance_m"], p["lat"], p["lon"])
+                rows.append(x)
+            note = "Candidates within %s of the point, nearest first." % (
+                "%.0f m" % p["radius_m"] if p["radius_m"] < 1000 else "%g km" % (p["radius_m"] / 1000.0))
+        elif p["kind"] == "id":
+            for r in conn.execute(_SEARCH_SELECT + "WHERE c.id LIKE ? ORDER BY c.created_at DESC LIMIT ?",
+                                  (p["text"] + "%", int(limit))):
+                x = dict(r)
+                x["match"] = "ID"
+                rows.append(x)
+            note = "Candidates whose ID starts with %s." % p["text"]
+        else:
+            text = p["text"]
+            seen = set()
+            for r in conn.execute(_SEARCH_SELECT + "WHERE j.title LIKE ? ORDER BY c.confidence_numeric IS NULL, "
+                                  "c.confidence_numeric DESC, ABS(COALESCE(c.score, 0)) DESC LIMIT ?",
+                                  ("%" + text + "%", int(limit))):
+                x = dict(r)
+                x["match"] = "job: %s" % (x.get("job_title") or "")
+                rows.append(x)
+                seen.add(x["id"])
+            sites = []
+            try:
+                import known_sites
+                known_sites._load()
+                low = _fold(text)
+                sites = [s for s in known_sites._points if s.get("kind") != "N" and low in _fold(s["name"])][:25]
+            except Exception:
+                sites = []
+            for s in sites:
+                if len(rows) >= limit:
+                    break
+                for x in _near(conn, s["lat"], s["lon"], SEARCH_RADIUS_M, limit):
+                    if x["id"] in seen:
+                        continue
+                    x["match"] = "%.0f m from known site %s" % (x["distance_m"], s["name"])
+                    rows.append(x)
+                    seen.add(x["id"])
+            note = "Jobs named like \u201c%s\u201d, and candidates within 1 km of %d known site(s) with that name." % (
+                text, len(sites))
+    finally:
+        conn.close()
+    for x in rows:
+        x["band"] = (x.get("confidence_band") or "NOT_RATED").upper()
+    return {"query": p, "rows": rows[:limit], "note": note}

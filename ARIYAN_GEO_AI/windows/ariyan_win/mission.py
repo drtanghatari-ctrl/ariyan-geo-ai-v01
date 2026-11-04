@@ -6,7 +6,7 @@ real data only (LiDAR left out, as the user asked):
           measures only), laboratory system health
   centre  data-source tiles, the 3D terrain of the selected candidate (its real
           DEM window, relief or any SAVED satellite layer as drape, the pins),
-          thermal, cross-section A-A', subsurface/Surfer pointer (Final Image, W3)
+          every layer of the window (u1), cross-section A-A', subsurface/Surfer pointer
   right   final scientific assessment (gauge on the highest STORED confidence),
           evidence summary of the selected candidate, the Steward's own words
   bottom  candidate targets (click one to make it the selected candidate), map,
@@ -37,6 +37,11 @@ BAND = widgets.BAND_COLOURS
 PERSPECTIVE = ["#2FA6B8", "#D9A62B", "#E0607E", "#3FB68B"]
 AGREEMENT = {"LEADING_INTERPRETATION": "Leading interpretation", "CONTESTED": "Contested",
              "WEAK_SIGNAL": "Weak signal", "NO_DATA": "No data"}
+
+
+def mc_status(s: Optional[str]) -> str:
+    return {"GENERATED": "Open", "SUPPORTED": "Supported", "REJECTED": "Rejected",
+            "INCONCLUSIVE": "Inconclusive"}.get(s or "", (s or "").title())
 
 
 def lab(text: str = "", obj: str = "", wrap: bool = True, colour: Optional[str] = None, size: Optional[int] = None,
@@ -78,6 +83,49 @@ def clear(layout: QtWidgets.QLayout, keep: int = 0):
             clear(it.layout())
 
 
+STATUS_COLOURS = {"Supported": "#3FB68B", "Open": "#5B8DEF", "Inconclusive": "#D9A62B", "Rejected": "#E0607E"}
+
+
+class ClickCard(QtWidgets.QFrame):
+    """A panel that reacts to a click (layer cards, search results)."""
+    clicked = QtCore.Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+
+    def mousePressEvent(self, e):
+        if e.button() == QtCore.Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
+
+def stat_tile(value: str, name: str, colour: str, tint: str) -> QtWidgets.QFrame:
+    f = QtWidgets.QFrame()
+    f.setObjectName("stat")
+    f.setStyleSheet("QFrame#stat { background: %s; border-radius: 10px; }" % tint)
+    v = QtWidgets.QVBoxLayout(f)
+    v.setContentsMargins(8, 8, 8, 8)
+    v.setSpacing(0)
+    a = lab(value, wrap=False, colour=colour, size=17, bold=True)
+    a.setAlignment(QtCore.Qt.AlignCenter)
+    b = lab(name, wrap=False, colour=MUTED)
+    b.setAlignment(QtCore.Qt.AlignCenter)
+    v.addWidget(a)
+    v.addWidget(b)
+    return f
+
+
+def chip(text: str, colour: str) -> QtWidgets.QLabel:
+    c = QtGui.QColor(colour)
+    w = QtWidgets.QLabel(text)
+    w.setStyleSheet("QLabel { color: %s; font-weight: 700; border: 1px solid %s; border-radius: 12px; "
+                    "padding: 3px 10px; background: rgba(%d,%d,%d,40); }" % (colour, colour, c.red(), c.green(),
+                                                                            c.blue()))
+    return w
+
+
 def fmt(n) -> str:
     return "{:,}".format(n) if isinstance(n, int) else str(n)
 
@@ -100,6 +148,37 @@ class Workstation(QtWidgets.QScrollArea):
         g.setHorizontalSpacing(10)
         g.setVerticalSpacing(10)
         self.grid = g
+        # u1: overview row -- the phone's Study Area card, the assessment gauge, candidate search
+        self.study_box, self.study = panel("\u25c8  STUDY AREA", TEAL)
+        self.study.addWidget(lab("Reading the project\u2026", colour=MUTED))
+        self.assess_box, self.assess = panel("\u25c9  FINAL SCIENTIFIC ASSESSMENT", GOLD)
+        self.gauge = widgets.Gauge()
+        self.assess.addWidget(self.gauge)
+        self.assess_text = QtWidgets.QVBoxLayout()
+        self.assess.addLayout(self.assess_text)
+        self.search_box, srl = panel("\u2315  FIND A CANDIDATE \u00b7 ID, name or coordinate", ACCENT)
+        srow = QtWidgets.QHBoxLayout()
+        self.search_edit = QtWidgets.QLineEdit()
+        self.search_edit.setPlaceholderText("090689e5  \u00b7  Hasanlu  \u00b7  36.9532, 45.5245  (add , 500 m)")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.returnPressed.connect(self.run_search)
+        srow.addWidget(self.search_edit, 1)
+        sbtn = QtWidgets.QPushButton("Search")
+        sbtn.setObjectName("primary")
+        sbtn.clicked.connect(self.run_search)
+        srow.addWidget(sbtn)
+        srl.addLayout(srow)
+        self.search_note = lab("Search every candidate of the project, not only the top ten.", colour=MUTED)
+        srl.addWidget(self.search_note)
+        self.search_list = QtWidgets.QListWidget()
+        self.search_list.setMinimumHeight(150)
+        self.search_list.itemClicked.connect(lambda it: self.select(it.data(QtCore.Qt.UserRole)))
+        self.search_list.itemDoubleClicked.connect(lambda it: self.open_final_image(it.data(QtCore.Qt.UserRole)))
+        srl.addWidget(self.search_list, 1)
+        overview = QtWidgets.QHBoxLayout()
+        overview.setSpacing(10)
+        for b, st in ((self.study_box, 3), (self.assess_box, 3), (self.search_box, 4)):
+            overview.addWidget(b, st)
         # left
         self.coord_box, self.coord = panel("INVESTIGATION COORDINATE", TEAL)
         self.vital_box, self.vital = panel("INVESTIGATION VITAL SIGNS (selected candidate)", ACCENT)
@@ -109,7 +188,6 @@ class Workstation(QtWidgets.QScrollArea):
             left.addWidget(b)
         left.addStretch(1)
         # centre
-        self.tiles_row = QtWidgets.QHBoxLayout()
         self.terrain_box, tl = panel("3D TERRAIN \u00b7 SELECTED CANDIDATE", ORANGE)
         ctrl = QtWidgets.QHBoxLayout()
         ctrl.addWidget(lab("Drape:", wrap=False))
@@ -133,13 +211,22 @@ class Workstation(QtWidgets.QScrollArea):
         tl.addWidget(self.terrain_caption)
         tl.addWidget(self.height_line)
         small = QtWidgets.QHBoxLayout()
-        self.thermal_box, thl = panel("THERMAL (saved, this window)", ROSE)
-        self.thermal_img = QtWidgets.QLabel()
-        self.thermal_img.setMinimumSize(110, 120)
-        self.thermal_img.setAlignment(QtCore.Qt.AlignCenter)
-        thl.addWidget(self.thermal_img, 1)
-        self.thermal_note = lab("", colour=MUTED)
-        thl.addWidget(self.thermal_note)
+        self.layers_box, lyl = panel("\u25a4  LAYERS FOR THIS WINDOW (saved on this computer \u00b7 click one to drape "
+                                     "it on the 3D terrain and the map)", GOLD)
+        self.layers_scroll = QtWidgets.QScrollArea()
+        self.layers_scroll.setWidgetResizable(True)
+        self.layers_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.layers_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.layers_scroll.setMinimumHeight(232)
+        inner = QtWidgets.QWidget()
+        self.layers_row = QtWidgets.QHBoxLayout(inner)
+        self.layers_row.setContentsMargins(0, 0, 0, 0)
+        self.layers_row.setSpacing(8)
+        self.layers_scroll.setWidget(inner)
+        lyl.addWidget(self.layers_scroll)
+        self.layers_note = lab("", colour=MUTED)
+        lyl.addWidget(self.layers_note)
+        self._layer_cards: Dict[str, QtWidgets.QFrame] = {}
         self.section_box, sl = panel("CROSS SECTION A\u2013A\u2032 (real heights)", TEAL)
         self.profile = widgets.ProfileView()
         sl.addWidget(self.profile, 1)
@@ -149,22 +236,17 @@ class Workstation(QtWidgets.QScrollArea):
         sb.clicked.connect(lambda: self.open_final_image(self.selected, start_tab=4))
         subl.addWidget(sb)
         subl.addStretch(1)
-        for b, s in ((self.thermal_box, 1), (self.section_box, 2), (self.sub_box, 1)):
+        for b, s in ((self.section_box, 2), (self.sub_box, 1)):
             small.addWidget(b, s)
         centre = QtWidgets.QVBoxLayout()
-        centre.addLayout(self.tiles_row)
         centre.addWidget(self.terrain_box, 1)
+        centre.addWidget(self.layers_box)
         centre.addLayout(small)
         # right
-        self.assess_box, self.assess = panel("FINAL SCIENTIFIC ASSESSMENT", GOLD)
-        self.gauge = widgets.Gauge()
-        self.assess.addWidget(self.gauge)
-        self.assess_text = QtWidgets.QVBoxLayout()
-        self.assess.addLayout(self.assess_text)
         self.evid_box, self.evid = panel("EVIDENCE SUMMARY (selected candidate)", ACCENT)
         self.stew_box, self.stew = panel("THE STEWARD (selected candidate)", GOLD)
         right = QtWidgets.QVBoxLayout()
-        for b in (self.assess_box, self.evid_box, self.stew_box):
+        for b in (self.evid_box, self.stew_box):
             right.addWidget(b)
         right.addStretch(1)
         # bottom
@@ -187,18 +269,19 @@ class Workstation(QtWidgets.QScrollArea):
         bottom = QtWidgets.QHBoxLayout()
         for b, s in ((self.targets_box, 3), (self.map_box, 2), (self.time_box, 2), (self.debate_box, 3)):
             bottom.addWidget(b, s)
-        g.addLayout(left, 0, 0)
-        g.addLayout(centre, 0, 1)
-        g.addLayout(right, 0, 2)
-        g.addLayout(bottom, 1, 0, 1, 3)
+        g.addLayout(overview, 0, 0, 1, 3)
+        g.addLayout(left, 1, 0)
+        g.addLayout(centre, 1, 1)
+        g.addLayout(right, 1, 2)
+        g.addLayout(bottom, 2, 0, 1, 3)
         foot = lab("Real Data Only \u00b7 Scientific Integrity \u00b7 No Synthetic Data \u00b7 Uncertainty Quantified "
                    "\u00b7 Human Oversight", "tag")
         foot.setAlignment(QtCore.Qt.AlignCenter)
-        g.addWidget(foot, 2, 0, 1, 3)
+        g.addWidget(foot, 3, 0, 1, 3)
         purpose = lab("The purpose of this laboratory is not to prove a hypothesis. Its purpose is to discover reality, "
                       "wherever the evidence leads.", colour=MUTED)
         purpose.setAlignment(QtCore.Qt.AlignCenter)
-        g.addWidget(purpose, 3, 0, 1, 3)
+        g.addWidget(purpose, 4, 0, 1, 3)
         g.setColumnStretch(0, 22)
         g.setColumnStretch(1, 52)
         g.setColumnStretch(2, 26)
@@ -210,19 +293,22 @@ class Workstation(QtWidgets.QScrollArea):
         clear(self.health, 1)
         if "error" in o:
             self.assess_text.addWidget(lab(o["error"], colour=ROSE))
+            self._show_study(None, o["error"])
             return
         c = o.get("confidence") or {}
         self.gauge.set(c.get("highest_numeric"), c.get("highest"))
+
         self.assess_text.addWidget(lab("Highest stored confidence in the project \u00b7 band ceiling %s"
                                        % ("%.2f" % c["highest_ceiling"] if c.get("highest_ceiling") else "\u2014"),
                                        colour=MUTED))
         for b in c.get("bands", []):
             if b["count"]:
-                self.assess_text.addWidget(lab("\u25a0 %s  %s" % (b["band"].title(), fmt(b["count"])),
+                self.assess_text.addWidget(lab("\u25a0 %s  %s" % (b["band"].replace("_", " ").title(), fmt(b["count"])),
                                                colour=BAND.get(b["band"], MUTED)))
         if c.get("why"):
             self.assess_text.addWidget(lab("Why not higher: " + c["why"]))
         p = o.get("project")
+        self._show_study(p)
         if p:
             self.health.addWidget(lab("%s \u00b7 %s jobs \u00b7 %s candidates" % (p["name"], fmt(p["jobs"]),
                                                                                   fmt(p["candidates"])), colour=MUTED))
@@ -257,6 +343,81 @@ class Workstation(QtWidgets.QScrollArea):
             self.terrain.set_message("No candidate targets yet.")
         qtwork.run_async(lambda: workstation.timeline(self.root, 12), self._show_timeline)
 
+    def _show_study(self, p: Optional[Dict[str, Any]], error: str = ""):
+        clear(self.study, 1)
+        if not p:
+            self.study.addWidget(lab(error or "No Grand Project on this computer yet. Use \u201cReceive from phone\u201d.",
+                                     colour=ROSE if error else MUTED))
+            return
+        self.study.addWidget(lab(p.get("name") or "Grand Project", size=15, bold=True))
+        tiles = QtWidgets.QHBoxLayout()
+        tiles.setSpacing(6)
+        tiles.addWidget(stat_tile(fmt(p.get("jobs", 0)), "Jobs", TEAL, "#15263A"))
+        tiles.addWidget(stat_tile(fmt(p.get("investigations", 0)), "Investigations", "#6E9BFF", "#16213D"))
+        tiles.addWidget(stat_tile(fmt(p.get("candidates", 0)), "Candidates", GOLD, "#262A22"))
+        self.study.addLayout(tiles)
+        if p.get("jobs_unfinished"):
+            self.study.addWidget(lab("%s job%s not finished" % (fmt(p["jobs_unfinished"]),
+                                                               "" if p["jobs_unfinished"] == 1 else "s"), colour=MUTED))
+        sc = p.get("status_counts") or {}
+        order = ["Supported", "Open", "Inconclusive", "Rejected"] + sorted(k for k in sc if k not in STATUS_COLOURS)
+        shown = [k for k in order if k in sc]
+        for i in range(0, len(shown), 2):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(6)
+            for k in shown[i:i + 2]:
+                row.addWidget(chip("%s %s" % (k, fmt(sc[k])), STATUS_COLOURS.get(k, MUTED)))
+            row.addStretch(1)
+            self.study.addLayout(row)
+        last = (p.get("last_activity") or "")[:16].replace("T", " ")
+        if last:
+            self.study.addWidget(lab("Last activity: %s UTC" % last, colour=MUTED))
+        self.study.addStretch(1)
+        ob = QtWidgets.QPushButton("Open Investigation")
+        ob.setObjectName("primary")
+        ob.clicked.connect(lambda: self._goto_tab("INVESTIGATION"))
+        self.study.addWidget(ob)
+
+    def _goto_tab(self, name: str):
+        w = self.parentWidget()
+        while w is not None and not isinstance(w, QtWidgets.QTabWidget):
+            w = w.parentWidget()
+        if w is not None:
+            for i in range(w.count()):
+                if w.tabText(i).replace("&&", "&").upper() == name:
+                    w.setCurrentIndex(i)
+                    return
+
+    def run_search(self):
+        q = self.search_edit.text().strip()
+        self.search_list.clear()
+        if not q:
+            self.search_note.setText("Type an ID, a name or a coordinate.")
+            return
+        self.search_note.setText("Searching\u2026")
+        qtwork.run_async(workstation.search_candidates, lambda r, q=q: self._show_search(q, r), self.root, q)
+
+    def _show_search(self, q: str, r: Dict[str, Any]):
+        if q != self.search_edit.text().strip():
+            return
+        self.search_list.clear()
+        if isinstance(r, dict) and "error" in r and "rows" not in r:
+            self.search_note.setText(r["error"])
+            return
+        rows = r.get("rows") or []
+        self.search_note.setText("%s  %d found%s. Click to select, double-click for its Final Image." % (
+            r.get("note", ""), len(rows), " (first %d shown)" % len(rows) if len(rows) >= 60 else ""))
+        for x in rows:
+            conf = x["band"].replace("_", " ").title() + ("" if x.get("confidence_numeric") is None
+                                                          else " %.2f" % x["confidence_numeric"])
+            st = mc_status(x.get("status"))
+            it = QtWidgets.QListWidgetItem("%s   %.5f, %.5f   %s \u00b7 %s\n      %s" % (
+                x["id"][:8], x["lat"], x["lon"], conf, st, x.get("match") or ""))
+            it.setData(QtCore.Qt.UserRole, x["id"])
+            it.setForeground(QtGui.QColor(BAND.get(x["band"], "#E6EDF3") if x["band"] != "NOT_RATED" else "#E6EDF3"))
+            it.setToolTip("Candidate %s\nJob: %s" % (x["id"], x.get("job_title") or "\u2014"))
+            self.search_list.addItem(it)
+
     def _row_selected(self):
         items = self.table.selectedItems()
         if items:
@@ -279,6 +440,12 @@ class Workstation(QtWidgets.QScrollArea):
     def _show_detail(self, cid: str, d: Dict[str, Any]):
         if cid != self.selected:
             return
+        ids = [self.table.item(i, 0).data(QtCore.Qt.UserRole) for i in range(self.table.rowCount())
+               if self.table.item(i, 0)]
+        if cid not in ids:                             # picked from the search: not one of the top ten
+            self.table.blockSignals(True)
+            self.table.clearSelection()
+            self.table.blockSignals(False)
         for lay in (self.coord, self.vital, self.evid, self.stew, self.debate):
             clear(lay, 1)
         if "error" in d:
@@ -358,7 +525,6 @@ class Workstation(QtWidgets.QScrollArea):
         if cid != self.selected:
             return
         self.terrain_data = t
-        clear(self.tiles_row)
         if "error" in t:
             self.terrain.set_message("Terrain not available: " + t["error"])
             nt = t.get("needs_tile") or {}
@@ -405,16 +571,6 @@ class Workstation(QtWidgets.QScrollArea):
         d = np.arange(h.shape[1]) * float(s["cell_dx_m"])
         self.profile.set(d, ha[r, :], c * float(s["cell_dx_m"]))
         self.map.set(relief, t["pins"], h.shape[1], h.shape[0])
-        th = self._layer_images.get(next((l["label"] for l in t["layers"] if l["product"] == "THERMAL"), ""), None)
-        if th is not None:
-            self.thermal_img.setPixmap(QtGui.QPixmap.fromImage(th).scaled(
-                self.thermal_img.width(), self.thermal_img.height(), QtCore.Qt.KeepAspectRatio,
-                QtCore.Qt.FastTransformation))
-            self.thermal_note.setText(next(("%s" % (l.get("scene_date") or "") for l in t["layers"]
-                                            if l["product"] == "THERMAL"), ""))
-        else:
-            self.thermal_img.clear()
-            self.thermal_note.setText("Not saved for this window. Open the Final Image to fetch it (W3).")
         self._tile_chips(t["layers"])
 
     def open_final_image(self, cid: Optional[str], start_tab: int = 0):
@@ -425,26 +581,77 @@ class Workstation(QtWidgets.QScrollArea):
         w.show()
 
     def _tile_chips(self, layers: List[Dict[str, Any]]):
-        clear(self.tiles_row)
-        dem_ok = "meta" in self.terrain_data
-        chips = [("DEM / terrain", dem_ok, "this window" if dem_ok else "tile missing")]
+        """u1: every layer of this window as a card -- the relief and each saved satellite layer with
+        its picture, date and clear share; layers not saved yet are shown too, never hidden."""
+        clear(self.layers_row)
+        self._layer_cards = {}
+        if "meta" not in self.terrain_data:
+            self.layers_row.addWidget(lab("No terrain window for this candidate on this computer yet.", colour=MUTED))
+            self.layers_row.addStretch(1)
+            self.layers_note.setText("")
+            return
+        cards = [("Relief (hillshaded DEM)", "Terrain (relief, hillshaded)", "%s" % (
+            self.terrain_data["meta"].get("source") or ""), True, "")]
+        missing = 0
         for l in layers:
-            ok = l.get("state") == "SAVED"
-            short = {"TRUE_COLOR": "True colour", "NDVI": "NDVI", "THERMAL": "Thermal", "SAR_VV": "Radar VV",
-                     "SAR_VH": "Radar VH"}.get(l.get("product"), l["label"].split(" (")[0])
-            chips.append((short, ok, "saved" if ok else ("not saved" if l.get("state") == "NOT_SAVED" else "hidden")))
-        for name, ok, note in chips:
-            box = QtWidgets.QFrame()
-            box.setObjectName("panel")
-            v = QtWidgets.QVBoxLayout(box)
-            v.setContentsMargins(8, 6, 8, 6)
-            v.addWidget(lab(name, wrap=True, bold=True, colour=ACCENT if ok else MUTED))
-            v.addWidget(lab(("\u2713 " if ok else "\u2013 ") + note, wrap=True, colour=ACCENT if ok else MUTED))
-            self.tiles_row.addWidget(box)
-        self.tiles_row.addStretch(1)
+            state = l.get("state")
+            ok = state == "SAVED" and l["label"] in self._layer_images
+            if ok:
+                cf = l.get("clear_fraction")
+                note = " \u00b7 ".join(x for x in [str(l.get("scene_date") or ""),
+                                                  "" if cf is None else "%d%% clear" % round(100 * float(cf))] if x)
+            elif state == "NOT_SAVED":
+                missing += 1
+                note = "not saved yet \u2014 fetch it in the Final Image"
+            elif state == "HIDDEN":
+                note = "hidden: %s" % (l.get("reason") or "failed the quality check")
+            else:
+                note = "error: %s" % (l.get("reason") or "")
+            cards.append((l["label"], l["label"], note, ok, state or ""))
+        for key, title, note, ok, state in cards:
+            card = ClickCard()
+            card.setFixedWidth(178)
+            v = QtWidgets.QVBoxLayout(card)
+            v.setContentsMargins(6, 6, 6, 6)
+            v.setSpacing(3)
+            pic = QtWidgets.QLabel()
+            pic.setFixedSize(164, 130)
+            pic.setAlignment(QtCore.Qt.AlignCenter)
+            if ok:
+                pic.setPixmap(QtGui.QPixmap.fromImage(self._layer_images[key]).scaled(
+                    164, 130, QtCore.Qt.KeepAspectRatioByExpanding, QtCore.Qt.FastTransformation).copy(0, 0, 164, 130))
+                card.clicked.connect(lambda k=key: self._pick_layer(k))
+            else:
+                pic.setText("not saved\non this computer" if state == "NOT_SAVED" else "\u2014")
+                pic.setStyleSheet("QLabel { background: #0E1626; color: %s; border-radius: 6px; }" % MUTED)
+                card.clicked.connect(lambda: self.open_final_image(self.selected))
+            v.addWidget(pic)
+            v.addWidget(lab(title, bold=True, colour=None if ok else MUTED))
+            v.addWidget(lab(note, colour=MUTED))
+            v.addStretch(1)
+            self.layers_row.addWidget(card)
+            self._layer_cards[key] = card
+        self.layers_row.addStretch(1)
+        self.layers_note.setText(("%d layer%s not saved for this window: click it (or \u201cOpen its Final Image\u201d) "
+                                  "and choose it from Satellite (uses Copernicus quota once; saved after)." % (
+                                      missing, "" if missing == 1 else "s")) if missing else
+                                 "All layers of this window are saved on this computer.")
+        self._mark_layer(self.drape_combo.currentText() or "Relief (hillshaded DEM)")
+
+    def _pick_layer(self, key: str):
+        i = self.drape_combo.findText(key)
+        if i >= 0:
+            self.drape_combo.setCurrentIndex(i)
+
+    def _mark_layer(self, key: str):
+        for k, c in self._layer_cards.items():
+            c.setProperty("on", k == key)
+            c.style().unpolish(c)
+            c.style().polish(c)
 
     def _drape_changed(self, _i: int):
         name = self.drape_combo.currentText()
+        self._mark_layer(name)
         arr = getattr(self, "_layer_arrays", {}).get(name)
         if arr is not None:
             self.terrain.set_drape_array(arr)              # each layer sits where its own cells are

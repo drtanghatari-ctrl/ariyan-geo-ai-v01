@@ -61,6 +61,16 @@ QPushButton:hover {{ border-color: {ACCENT}; }}
 QPushButton:disabled {{ color: #4A5868; }}
 QTableWidget {{ background: {PANEL}; gridline-color: {LINE}; border: none; }}
 QHeaderView::section {{ background: {BG}; color: {MUTED}; border: none; padding: 4px; font-weight: 600; }}
+QFrame#card {{ background: #0F1828; border: 1px solid {LINE}; border-radius: 10px; }}
+QFrame#card:hover {{ border-color: {GOLD}; }}
+QFrame#card[on="true"] {{ border: 2px solid {GOLD}; background: #1A1F24; }}
+QPushButton#primary {{ background: {ACCENT}; color: #06221A; border: none; font-weight: 700; }}
+QPushButton#primary:hover {{ background: #52C99D; }}
+QLineEdit {{ background: #0E1626; border: 1px solid {LINE}; border-radius: 8px; padding: 7px 10px; }}
+QLineEdit:focus {{ border-color: {ACCENT}; }}
+QListWidget {{ background: #0E1626; border: 1px solid {LINE}; border-radius: 8px; }}
+QListWidget::item {{ padding: 5px 6px; border-bottom: 1px solid #172338; }}
+QListWidget::item:selected {{ background: #1B3A33; }}
 """
 
 
