@@ -66,6 +66,8 @@ QFrame#card:hover {{ border-color: {GOLD}; }}
 QFrame#card[on="true"] {{ border: 2px solid {GOLD}; background: #1A1F24; }}
 QPushButton#primary {{ background: {ACCENT}; color: #06221A; border: none; font-weight: 700; }}
 QPushButton#primary:hover {{ background: #52C99D; }}
+QPushButton#primary:disabled {{ background: #173029; color: #5E7C72; }}
+QPushButton:disabled {{ color: #5E6B7D; }}
 QLineEdit {{ background: #0E1626; border: 1px solid {LINE}; border-radius: 8px; padding: 7px 10px; }}
 QLineEdit:focus {{ border-color: {ACCENT}; }}
 QListWidget {{ background: #0E1626; border: 1px solid {LINE}; border-radius: 8px; }}
@@ -351,6 +353,10 @@ def build_window(root: str):
             send.clicked.connect(self.send_to_phone)
             h.addWidget(recv)
             h.addWidget(send)
+            cloud = QtWidgets.QPushButton("\u2601  Google Drive")             # win-u5: online storage
+            cloud.setObjectName("cloud")
+            cloud.clicked.connect(self.open_cloud)
+            h.addWidget(cloud)
             newinv = QtWidgets.QPushButton("New Investigation")
             newinv.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
             h.addWidget(newinv)
@@ -401,11 +407,15 @@ def build_window(root: str):
                 "ARIYAN project bundle (*.ariyan);;All files (*)")
             if not path:
                 return
+            self.receive_path(path)
+
+        def receive_path(self, path: str, where: str = "the phone") -> bool:
+            """Check and receive one bundle file (from a folder, a USB stick or Google Drive)."""
             import project_bundle as pb
             chk = self._run_blocking("Checking the bundle\u2026", lambda: json.loads(pb.check_receive_json(self.root, path)))
             if "error" in chk:
                 QtWidgets.QMessageBox.warning(self, "Not received", chk["error"])
-                return
+                return False
             m, p = chk.get("manifest", {}), chk.get("manifest", {}).get("project", {})
             text = ("From the %s, made %s UTC\n%s candidates \u00b7 %s jobs \u00b7 %s library files\n\n"
                     % (m.get("from_device"), (m.get("created_at") or "")[:16].replace("T", " "),
@@ -417,18 +427,21 @@ def build_window(root: str):
             ans = QtWidgets.QMessageBox.question(self, "Replace this computer's project?" if confirm else "Receive this project?",
                                                  text, QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel)
             if ans != QtWidgets.QMessageBox.Yes:
-                return
+                return False
             r = self._run_blocking("Receiving the project\u2026",
                                    lambda: json.loads(pb.receive_json(self.root, path, "laptop", confirm)))
             if "error" in r or not r.get("received"):
                 QtWidgets.QMessageBox.warning(self, "Not received", r.get("error", "Nothing was changed."))
+                self.reload()
+                return False
             else:
                 f = r.get("files", {})
                 QtWidgets.QMessageBox.information(self, "Project received",
-                    "This computer now has the project from the phone.\n%s library files added, %s already here.\n"
-                    "Previous project kept as: %s" % ("{:,}".format(f.get("added", 0)), "{:,}".format(f.get("kept", 0)),
+                    "This computer now has the project from %s.\n%s library files added, %s already here.\n"
+                    "Previous project kept as: %s" % (where, "{:,}".format(f.get("added", 0)), "{:,}".format(f.get("kept", 0)),
                                                       os.path.basename(r.get("safety_copy") or "") or "none"))
             self.reload()
+            return True
 
         def send_to_phone(self):
             out = QtWidgets.QFileDialog.getExistingDirectory(
@@ -446,6 +459,11 @@ def build_window(root: str):
                 "%s (%.0f MB) is in\n%s\n\nOn the phone: Settings \u2192 Receive project from laptop, then choose "
                 "this file in Google Drive. Work on the phone from now on, until you send it back."
                 % (r["name"], r["bytes"] / 1e6, out))
+            self.reload()
+
+        def open_cloud(self):
+            from ariyan_win.cloud import CloudDialog
+            CloudDialog(self).exec()
             self.reload()
 
         def open_settings(self):

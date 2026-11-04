@@ -20,7 +20,9 @@ import os
 import sys
 from typing import Dict
 
-NAMES = ("OPENTOPOGRAPHY_API_KEY", "COPERNICUS_CLIENT_ID", "COPERNICUS_CLIENT_SECRET")
+NAMES = ("OPENTOPOGRAPHY_API_KEY", "COPERNICUS_CLIENT_ID", "COPERNICUS_CLIENT_SECRET",
+         # win-u5: Google Drive (your own OAuth "Desktop app" client, and the sign-in it gave)
+         "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN", "GOOGLE_ACCOUNT")
 _ENTROPY = b"ARIYAN GEO AI keys v1"
 
 
