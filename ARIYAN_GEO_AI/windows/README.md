@@ -11,11 +11,24 @@ on both. Only the screens are new (PySide6 / Qt).
   one device works on the project at a time)
 - **W3** Final Image (map, layers, cross-section, 3D, subsurface block)
 - **W4** investigations, wide-area jobs, Grand Project review, reports
-- **W5** installer, user guide, polish
+- **W5** installer (W5a, done), user guide (W5b); polish was U6
 
 ## Install (from GitHub)
 Actions -> **Build Windows app** -> newest green run -> download
-**ARIYAN-GEO-AI-windows** -> unzip anywhere -> run `ARIYAN GEO AI.exe`.
+**ARIYAN-GEO-AI-Setup** -> unzip -> run `ARIYAN_GEO_AI_Setup_<version>.exe` (win-w5a).
+It installs for you only (no administrator rights) in
+`%LOCALAPPDATA%\Programs\ARIYAN GEO AI`, with a Start-menu entry, an optional desktop
+icon and an uninstaller (Settings > Apps). A newer setup updates the program in place.
+Install, upgrade and uninstall never touch the data folder, the settings, the saved
+keys or the Google Drive sign-in. Windows may say "Windows protected your PC" (the setup
+is not signed with a paid certificate): **More info -> Run anyway**.
+
+Without installing: download **ARIYAN-GEO-AI-windows** instead, unzip anywhere and run
+`ARIYAN GEO AI.exe`.
+
+The installer is `installer/ariyan.iss` (Inno Setup 6). CI builds it, installs it
+silently, self-tests the installed program, uninstalls it and checks that the data
+folder is still there before uploading it.
 
 ## Run from source
     cd ARIYAN_GEO_AI/windows

@@ -1,0 +1,22 @@
+ARIYAN GEO AI - Scientific Geospatial Laboratory
+
+What this installs
+  The program, for you only (no administrator rights needed), in
+  %LOCALAPPDATA%\Programs\ARIYAN GEO AI, with a Start-menu entry, an
+  optional desktop icon and an uninstaller (Settings > Apps).
+
+What it never touches
+  - Your project data: %USERPROFILE%\ARIYAN_GEO_AI\offline_data
+    (or the data folder you chose in the program)
+  - Your settings, saved keys and Google Drive sign-in:
+    %APPDATA%\ARIYAN_GEO_AI
+  Installing a newer version updates the program in place; uninstalling
+  removes only the program. Your projects, reports and keys stay.
+
+After installing
+  Open ARIYAN GEO AI. The Scientific Steward welcomes you on Mission
+  Control and guides every job step by step. If this computer has no
+  project yet, use "Receive from phone" or "Google Drive" first.
+
+Windows may show "Windows protected your PC" because this installer is
+not signed by a paid certificate: press "More info", then "Run anyway".
