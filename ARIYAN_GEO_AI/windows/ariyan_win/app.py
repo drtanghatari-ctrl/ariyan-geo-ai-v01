@@ -191,6 +191,9 @@ def build_window(root: str):
             self.tabs.addTab(vis, "VISUALIZATION")
             from ariyan_win.grandproject import GrandProject, HistoricalResearch
             self.grand = GrandProject(root)
+            self.grand.candidates.search.opened.connect(self.mission.open_final_image)
+            self.grand.candidates.view.opened.connect(self.mission.open_final_image)
+            self.jobs.open_final_image = self.mission.open_final_image
             self.tabs.addTab(self.grand, "GRAND PROJECT")
             self.history = HistoricalResearch(root)
             self.tabs.addTab(self.history, "HISTORICAL RESEARCH")
@@ -350,9 +353,11 @@ def build_window(root: str):
                 self.dataev.root = d
                 self.investigation.root = d
                 self.jobs.root = d
+                self.jobs.cand_search.root = d
                 self.report.root = d
                 self.models.root = d
                 self.grand.root = d
+                self.grand.candidates.set_root(d)
                 self.history.root = d
                 self.reload()
 

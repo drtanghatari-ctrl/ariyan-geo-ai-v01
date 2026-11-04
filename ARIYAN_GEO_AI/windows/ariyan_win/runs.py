@@ -318,7 +318,14 @@ class JobsTab(QtWidgets.QWidget):
         left.addLayout(row)
         self.jobs = QtWidgets.QListWidget()
         self.jobs.currentItemChanged.connect(lambda *_: self._show_job())
+        self.jobs.currentItemChanged.connect(lambda *_: self.cand_search.edit.text().strip() and self.cand_search.run())
         left.addWidget(self.jobs, 1)
+        from ariyan_win.candidates import CandidateSearch        # u2: find a candidate in the job
+        self.open_final_image = None
+        self.cand_search = CandidateSearch(root, job_id=self._job_id)
+        self.cand_search.picked.connect(self._candidate)
+        self.cand_search.opened.connect(lambda c: self.open_final_image and self.open_final_image(c))
+        left.addWidget(self.cand_search, 1)
         lw = QtWidgets.QWidget()
         lw.setLayout(left)
         lw.setMaximumWidth(460)
@@ -375,6 +382,10 @@ class JobsTab(QtWidgets.QWidget):
             self.jobs.addItem(it)
             if j["id"] == cur:
                 self.jobs.setCurrentItem(it)
+
+    def _candidate(self, cid: str):
+        from ariyan_win.candidates import CandidateDialog
+        CandidateDialog(self.root, cid, self.open_final_image, self).show()
 
     def _job_id(self) -> Optional[str]:
         it = self.jobs.currentItem()

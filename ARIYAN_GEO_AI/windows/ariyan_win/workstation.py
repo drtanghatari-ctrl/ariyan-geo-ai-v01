@@ -317,11 +317,14 @@ _SEARCH_SELECT = ("SELECT c.id, c.lat, c.lon, c.status, c.confidence_band, c.con
                   "LEFT JOIN wide_area_search_job j ON j.id = t.job_id ")
 
 
-def search_candidates(root: str, query: str, limit: int = 60) -> Dict[str, Any]:
+def search_candidates(root: str, query: str, limit: int = 60, job_id: Optional[str] = None) -> Dict[str, Any]:
     """Find candidates by ID (prefix), by name (job title, or a known site from the gazetteer:
     candidates within 1 km of it) or by coordinate (within a radius, default 1 km).
     Read-only; every row says why it matched."""
     p = parse_query(query)
+    want = limit
+    if job_id:
+        limit = max(limit * 20, 1000)
     if not (query or "").strip():
         return {"query": p, "rows": [], "note": "Type an ID, a name or a coordinate."}
     conn = _conn(root)
@@ -367,10 +370,105 @@ def search_candidates(root: str, query: str, limit: int = 60) -> Dict[str, Any]:
                     x["match"] = "%.0f m from known site %s" % (x["distance_m"], s["name"])
                     rows.append(x)
                     seen.add(x["id"])
-            note = "Jobs named like \u201c%s\u201d, and candidates within 1 km of %d known site(s) with that name." % (
-                text, len(sites))
+            note = ("Jobs named like \u201c%s\u201d, and candidates within 1 km of %d known site(s) with that name." % (
+                text, len(sites))) if sites else "Jobs named like \u201c%s\u201d (no known site has that name)." % text
     finally:
         conn.close()
+    if job_id:
+        conn = _conn(root)
+        try:
+            keep = {r[0] for r in conn.execute(
+                "SELECT c.id FROM candidate c JOIN wide_area_search_tile t ON t.investigation_id = c.investigation_id "
+                "WHERE t.job_id = ?", (job_id,))}
+        finally:
+            conn.close()
+        rows = [x for x in rows if x["id"] in keep]
+        note += " Only this job."
+    limit = want
     for x in rows:
         x["band"] = (x.get("confidence_band") or "NOT_RATED").upper()
     return {"query": p, "rows": rows[:limit], "note": note}
+
+
+# ---------------------------------------------------------------- u2: groups and interpretation
+GROUP_RADIUS_M = 300.0          # neighbours closer than this are one group (chained)
+GROUP_CAP = 80
+
+
+def candidate_group(root: str, cid: str, radius_m: float = GROUP_RADIUS_M, cap: int = GROUP_CAP) -> Dict[str, Any]:
+    """The candidates of the same job (or the same investigation, for a single point) that lie
+    together with this one: each member is within radius_m of another member (chained).
+    A grouping for reading only -- nothing is merged, linked or changed."""
+    import math
+    conn = _conn(root)
+    try:
+        me = conn.execute("SELECT c.id, c.lat, c.lon, c.investigation_id, t.job_id, j.title FROM candidate c "
+                          "LEFT JOIN wide_area_search_tile t ON t.investigation_id = c.investigation_id "
+                          "LEFT JOIN wide_area_search_job j ON j.id = t.job_id WHERE c.id = ?", (cid,)).fetchone()
+        if me is None:
+            return {"error": "candidate %s not found" % cid}
+        sel = ("SELECT c.id, c.lat, c.lon, c.status, c.score, c.confidence_band, c.confidence_numeric FROM candidate c ")
+        if me["job_id"]:
+            pool = [dict(r) for r in conn.execute(sel + "JOIN wide_area_search_tile t ON t.investigation_id = "
+                                                  "c.investigation_id WHERE t.job_id = ?", (me["job_id"],))]
+            scope = "job %s" % (me["title"] or me["job_id"][:8])
+        else:
+            pool = [dict(r) for r in conn.execute(sel + "WHERE c.investigation_id = ?", (me["investigation_id"],))]
+            scope = "this investigation"
+    finally:
+        conn.close()
+    lat0 = me["lat"]
+    kx = 111320.0 * math.cos(math.radians(lat0))
+    cell = {}
+    for i, r in enumerate(pool):
+        cell.setdefault((int(r["lat"] * 111320.0 // radius_m), int(r["lon"] * kx // radius_m)), []).append(i)
+    start = next(i for i, r in enumerate(pool) if r["id"] == cid)
+    seen, queue = {start}, [start]
+    while queue and len(seen) < cap:
+        i = queue.pop(0)
+        a = pool[i]
+        ci, cj = int(a["lat"] * 111320.0 // radius_m), int(a["lon"] * kx // radius_m)
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for k in cell.get((ci + di, cj + dj), []):
+                    if k in seen:
+                        continue
+                    b = pool[k]
+                    if math.hypot((b["lat"] - a["lat"]) * 111320.0, (b["lon"] - a["lon"]) * kx) <= radius_m:
+                        seen.add(k)
+                        queue.append(k)
+    members = []
+    for k in seen:
+        r = dict(pool[k])
+        r["distance_m"] = round(_dist_m(me["lat"], me["lon"], r["lat"], r["lon"]), 1)
+        r["band"] = (r.get("confidence_band") or "NOT_RATED").upper()
+        r["selected"] = r["id"] == cid
+        members.append(r)
+    members.sort(key=lambda r: (not r["selected"], -(r.get("confidence_numeric") or 0), -abs(r.get("score") or 0)))
+    return {"scope": scope, "radius_m": radius_m, "members": members, "capped": len(seen) >= cap,
+            "note": "Candidates of %s lying together with this one (each within %.0f m of another). A reading "
+                    "aid only: nothing is merged or changed." % (scope, radius_m)}
+
+
+def interpretation(root: str, cid: str) -> Dict[str, Any]:
+    """Everything the laboratory has said about one candidate: Steward band and reasoning, the
+    stored debate (each perspective's stance and reasons, the synthesis note), the investigation's
+    own summary, your reviews, evidence, known-site and same-place notes. Read-only."""
+    d = candidate_detail(root, cid)
+    conn = _conn(root)
+    try:
+        inv = conn.execute("SELECT i.interpretation_summary, i.objective FROM candidate c JOIN investigation i "
+                           "ON i.id = c.investigation_id WHERE c.id = ?", (cid,)).fetchone()
+        reviews = []
+        if _has(conn, "candidate_review"):
+            reviews = [dict(r) for r in conn.execute(
+                "SELECT previous_status, new_status, reason, reviewed_at FROM candidate_review WHERE candidate_id = ? "
+                "ORDER BY id DESC LIMIT 10", (cid,))]
+        hyp = conn.execute("SELECT h.statement FROM candidate c JOIN hypothesis h ON h.id = c.hypothesis_id "
+                           "WHERE c.id = ?", (cid,)).fetchone()
+    finally:
+        conn.close()
+    d["investigation_summary"] = (inv["interpretation_summary"] if inv else None) or None
+    d["reviews"] = reviews
+    d["hypothesis"] = hyp[0] if hyp else None
+    return d

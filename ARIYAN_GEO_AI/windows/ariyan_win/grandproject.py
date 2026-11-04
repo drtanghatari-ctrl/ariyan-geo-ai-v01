@@ -84,6 +84,9 @@ class GrandProject(QtWidgets.QTabWidget):
         row.addStretch(1)
         dv.addLayout(row)
         self.addTab(dash, "Dashboard && jobs")
+        from ariyan_win.candidates import CandidatesPage          # u2: search, groups, interpretation
+        self.candidates = CandidatesPage(root)
+        self.addTab(self.candidates, "Candidates \u00b7 groups \u00b7 interpretation")
         # --- hypotheses
         hyp = QtWidgets.QWidget()
         hv = QtWidgets.QVBoxLayout(hyp)
