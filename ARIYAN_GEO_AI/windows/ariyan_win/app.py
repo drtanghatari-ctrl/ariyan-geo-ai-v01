@@ -258,6 +258,16 @@ def build_window(root: str):
             v.addWidget(self.toolbar)
             for t in self.findChildren(QtWidgets.QTableWidget):              # u6: easier to read rows
                 t.setAlternatingRowColors(True)
+            # u6b: no part of the window may demand more width than the screen has (Windows fonts are wider):
+            # a tab row that does not fit gets arrows, the bands clip instead of pushing, pages scroll
+            for tw in self.findChildren(QtWidgets.QTabWidget) + [self.tabs]:
+                tw.tabBar().setUsesScrollButtons(True)
+                tw.setUsesScrollButtons(True)
+            for part in (head, self.tabs, self.steward_bar, self.toolbar):
+                sp = part.sizePolicy()
+                sp.setHorizontalPolicy(QtWidgets.QSizePolicy.Ignored)
+                part.setSizePolicy(sp)
+            self.setMinimumSize(900, 500)
             self.status = label("", "muted")
             self.statusBar().addWidget(self.status)
             self.reload()

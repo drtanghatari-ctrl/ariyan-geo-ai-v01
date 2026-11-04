@@ -62,7 +62,10 @@ def test_window_fits_a_1366x768_laptop_on_every_page(tmp_path):
             qtwork.wait_all(30000)
             qa.processEvents()
         m = w.minimumSizeHint()
-        assert m.width() <= 1300 and m.height() <= 640, (w.tabs.tabText(i), m)
+        lay = w.centralWidget().layout()
+        parts = [(type(lay.itemAt(k).widget() or lay.itemAt(k).layout()).__name__, lay.itemAt(k).minimumSize().width(),
+                  lay.itemAt(k).minimumSize().height()) for k in range(lay.count())]
+        assert m.width() <= 1300 and m.height() <= 640, (w.tabs.tabText(i), m, parts)
     w.inv_tabs.setCurrentWidget(w.jobs)
     w.steward_bar.path.setChecked(True)
     qa.processEvents()
