@@ -5,7 +5,9 @@ name: Build Windows app
 #   1. core-tests-windows -- the same core test suite the phone build uses
 #      (shows any Windows-only difference in the science; does not block job 2)
 #   2. build-exe -- self-test from source, PyInstaller build, self-test of the
-#      built program itself, then the folder is uploaded as an artifact.
+#      built program itself, then the folder is uploaded as an artifact;
+#      win-w5a: the Inno Setup installer is built, installed silently, its program
+#      self-tested, uninstalled (data folder must survive) and uploaded.
 on:
   push:
     branches: [ main ]
@@ -83,3 +85,46 @@ jobs:
           name: ARIYAN-GEO-AI-windows
           path: ARIYAN_GEO_AI/windows/dist/ARIYAN GEO AI
           retention-days: 30
+      # ---- win-w5a: the installer (Inno Setup 6), then a real install / self-test / uninstall
+      - name: Make sure Inno Setup is here
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup could not be installed" }
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $ver = python -c "from ariyan_win import VERSION; print(VERSION)"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DAppVer=$ver" "/DBuildNo=${{ github.run_number }}" "/DSourceDir=..\dist\ARIYAN GEO AI" installer\ariyan.iss
+          if ($LASTEXITCODE -ne 0) { throw "the installer did not build (ISCC exit $LASTEXITCODE)" }
+          Get-ChildItem installer\output
+      - name: Test the installer (install, self-test, uninstall, data kept)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $data = Join-Path $env:USERPROFILE "ARIYAN_GEO_AI\offline_data"
+          New-Item -ItemType Directory -Force $data | Out-Null
+          Set-Content (Join-Path $data "keep_me.txt") "the uninstaller must not remove this"
+          $setup = (Get-ChildItem installer\output\*.exe | Select-Object -First 1).FullName
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/TASKS=desktopicon","/LOG=$env:TEMP\ariyan_setup.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:TEMP\ariyan_setup.log" -Tail 40; throw "setup failed (exit $($p.ExitCode))" }
+          $app = Join-Path $env:LOCALAPPDATA "Programs\ARIYAN GEO AI"
+          $exe = Join-Path $app "ARIYAN GEO AI.exe"
+          if (-not (Test-Path $exe)) { throw "the program was not installed at $exe" }
+          $s = Start-Process $exe -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content (Join-Path $env:TEMP "ariyan_selftest.txt")
+          if ($s.ExitCode -ne 0) { throw "self-test of the installed program failed (exit $($s.ExitCode))" }
+          $u = Start-Process (Join-Path $app "unins000.exe") -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          for ($i = 0; $i -lt 60 -and (Test-Path $exe); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path $exe) { throw "the uninstaller left the program behind" }
+          if (-not (Test-Path (Join-Path $data "keep_me.txt"))) { throw "the uninstaller removed the data folder" }
+          "install, self-test and uninstall passed; the data folder was kept"
+      - name: Upload the installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: ARIYAN-GEO-AI-Setup
+          path: ARIYAN_GEO_AI/windows/installer/output/*.exe
+          retention-days: 60
