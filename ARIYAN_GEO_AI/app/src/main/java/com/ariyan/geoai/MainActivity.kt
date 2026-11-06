@@ -915,14 +915,14 @@ class MainActivity : AppCompatActivity() {
      * always rendered first, unconditionally, by the existing code in
      * appendDebateSection().
      *
-     * STAGE 1 ONLY: no SHA-256/provenance verification exists yet (that
-     * is Scientific Steward Stage 2, not yet built), so a
-     * PROVENANCE_WARNING appearing on every single candidate right now is
-     * the CORRECT, honest, expected state -- not a bug. Likewise,
-     * confidence currently cannot exceed MODERATE for any candidate
-     * (Stage 1 does not yet claim to have verified/controlled for
-     * environmental confounders the way Stage 3's Team A/B/Judge debate
-     * is meant to) -- also expected, not a bug.
+     * PROVENANCE_WARNING appearing on every candidate here is expected,
+     * not a bug: the Steward runs BEFORE the evidence rows are recorded, so
+     * it cannot see the SHA-256 provenance verdict (provenance_ledger.py /
+     * provenance_check.py), which is computed afterwards and shown in the
+     * Grand Project screens. Likewise, confidence currently cannot exceed
+     * MODERATE for any candidate: controlling environmental confounders
+     * needs direct field investigation, which is not available yet -- also
+     * expected, not a bug.
      *
      * CONFIDENCE REASONING TRAIL, ADDED THIS SESSION: previously this
      * function read only `confidence`'s "band" and "clamped_confidence"
