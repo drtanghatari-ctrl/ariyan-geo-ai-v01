@@ -148,7 +148,9 @@ def generate_warnings(
         warnings.append(
             StewardWarning(
                 WarningKind.PROVENANCE,
-                "Evidence lineage cannot currently be verified.",
+                "Evidence lineage is not verified at this stage: the Steward runs "
+                "before the evidence is recorded. The SHA-256 provenance check "
+                "(Grand Project) gives the verdict once it is.",
             )
         )
 
