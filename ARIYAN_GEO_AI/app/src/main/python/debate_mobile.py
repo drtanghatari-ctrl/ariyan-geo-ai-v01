@@ -364,9 +364,15 @@ guessing, per this project's zero-fabrication rule:
     (two perspectives closely competing). This is honestly a proxy, not
     the real Team-A/Team-B/Judge contradiction detection the Scientific
     Steward spec describes for Stage 3.
-  - environmental_confounders_controlled: always False for Stage 1.
-  - provenance_verified: always False for Stage 1 (Stage 2, SHA-256
-    evidence validation, not yet built).
+  - environmental_confounders_controlled: always False. Controlling them
+    needs direct field investigation, which is not available yet, so the
+    ceiling stays at MODERATE (HIGH and above are not reachable).
+  - provenance_verified: always False HERE, deliberately. The Steward runs
+    BEFORE the evidence rows exist, so it cannot see the verdict of the
+    SHA-256 provenance ledger/check (provenance_ledger.py,
+    provenance_check.py), which is computed afterwards and shown in the
+    Grand Project screens. That check is read-only and does not change
+    the Steward's band.
   - quality_hints / requested_precision_m / effective_resolution_m: left
     unset (UNKNOWN / None). Not currently tracked as explicit
     per-candidate fields anywhere in this schema.
@@ -1064,6 +1070,8 @@ def _build_steward_report(debate: dict, candidate: dict) -> dict:
         hypothesis=hypothesis,
         alternative_hypotheses=alternative_hypotheses,
         debate_summary=steward_note,
+        # Always False at this point -- see this module's docstring: the
+        # provenance verdict only exists after evidence rows are recorded.
         provenance_verified=False,
     )
     return report.as_dict()
