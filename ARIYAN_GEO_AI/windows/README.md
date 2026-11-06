@@ -4,14 +4,20 @@ The desktop version of ARIYAN GEO AI. It runs **the same Python core as the phon
 (`../app/src/main/python`, the very same files), so a candidate gets the same score
 on both. Only the screens are new (PySide6 / Qt).
 
-## Plan (approved 2026-11-02)
-- **W0** foundation: window, Mission Control read-out, Windows build on GitHub *(this step)*
-- **W1** Mission Control workstation (the Windows mock-up, without LiDAR)
-- **W2** Send / Receive project between phone and laptop (Google Drive or USB;
-  one device works on the project at a time)
-- **W3** Final Image (map, layers, cross-section, 3D, subsurface block)
-- **W4** investigations, wide-area jobs, Grand Project review, reports
-- **W5** installer (W5a, done), user guide (W5b); polish was U6
+New to the app? Read the **[user guide](USER_GUIDE.md)**.
+
+## Plan (approved 2026-11-02) and status
+- **W0** foundation: window, Mission Control read-out, Windows build on GitHub (done)
+- **W1** Mission Control workstation (the Windows mock-up, without LiDAR) (done)
+- **W2** Send / Receive project between phone and laptop (Google Drive, folder or USB;
+  one device works on the project at a time) (done)
+- **W3** Final Image (map, layers, cross-section, 3D, subsurface block) (done)
+- **W4** investigations, wide-area jobs, Grand Project review, reports (done)
+- **W5** installer (W5a, done), user guide (W5b, done: see `USER_GUIDE.md`); polish was U6
+
+Not done: automatic upload of a project from the phone straight to Google Drive (today the
+phone shares a `.ariyan` file and you choose Google Drive in the share menu). The installer
+is not signed with a paid certificate.
 
 ## Install (from GitHub)
 Actions -> **Build Windows app** -> newest green run -> download
