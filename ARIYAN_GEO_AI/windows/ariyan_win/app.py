@@ -730,13 +730,69 @@ def main(argv: Optional[List[str]] = None) -> int:
     argv = list(argv or sys.argv)
     if "--selftest" in argv:
         return selftest()
-    core_path.install()
-    QtCore, QtGui, QtWidgets = _imports()
-    app = QtWidgets.QApplication(argv)
-    app.setApplicationName("ARIYAN GEO AI")
-    app.setWindowIcon(QtGui.QIcon(asset("ariyan.ico")))
-    app.setStyleSheet(STYLE)
-    w = build_window(config.data_root())
-    # win-w4a.1: open filling the screen, so the bottom bar (Settings, Receive/Send, ...) is always visible
-    w.showMaximized()
-    return app.exec()
+    # win-w5a.2: a windowed .exe has no console, so a slow or failing start used to look like
+    # "the app does not open". Now: a loading window shows at once, every step is timed in
+    # %TEMP%\ariyan_startup.txt, a crash is written there and shown, and if the start takes
+    # long the log gets a stack trace every 15 seconds that says exactly where it is waiting.
+    import time
+    t0 = time.time()
+    try:
+        logf = open(os.path.join(tempfile.gettempdir(), "ariyan_startup.txt"), "w", encoding="utf-8", buffering=1)
+    except OSError:
+        logf = None
+
+    def note(msg: str) -> None:
+        if logf:
+            logf.write("%6.1fs  %s\n" % (time.time() - t0, msg))
+            logf.flush()
+
+    faulthandler = None
+    if logf:
+        try:
+            import faulthandler
+            faulthandler.enable(file=logf)
+            faulthandler.dump_traceback_later(15, repeat=True, file=logf)
+        except Exception:
+            faulthandler = None
+    note("start " + VERSION)
+    splash = None
+    try:
+        core_path.install()
+        note("core path installed")
+        QtCore, QtGui, QtWidgets = _imports()
+        note("qt imported")
+        app = QtWidgets.QApplication(argv)
+        note("qt application started")
+        app.setApplicationName("ARIYAN GEO AI")
+        app.setWindowIcon(QtGui.QIcon(asset("ariyan.ico")))
+        app.setStyleSheet(STYLE)
+        splash = QtWidgets.QLabel("ARIYAN GEO AI\n\nStarting … opening your project")
+        splash.setWindowFlags(QtCore.Qt.SplashScreen | QtCore.Qt.WindowStaysOnTopHint)
+        splash.setAlignment(QtCore.Qt.AlignCenter)
+        splash.setStyleSheet("background: #0B1220; color: #F3E7C4; font-size: 16pt; padding: 40px 70px; "
+                             "border: 1px solid #2FA6B8;")
+        splash.show()
+        app.processEvents()
+        note("loading window shown")
+        w = build_window(config.data_root())
+        note("window built")
+        # win-w4a.1: open filling the screen, so the bottom bar (Settings, Receive/Send, ...) is always visible
+        w.showMaximized()
+        splash.close()
+        note("window shown")
+        if faulthandler is not None:
+            faulthandler.cancel_dump_traceback_later()
+        return app.exec()
+    except Exception:
+        text = traceback.format_exc()
+        note("STARTUP FAILED\n" + text)
+        try:
+            if splash is not None:
+                splash.close()
+            QtWidgets.QMessageBox.critical(
+                None, "ARIYAN GEO AI could not start",
+                "The program could not start.\n\nThe details are in\n%s\n\n%s"
+                % (os.path.join(tempfile.gettempdir(), "ariyan_startup.txt"), text[-1200:]))
+        except Exception:
+            pass
+        return 1
