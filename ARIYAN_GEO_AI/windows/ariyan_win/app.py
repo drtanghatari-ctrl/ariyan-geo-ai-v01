@@ -143,9 +143,24 @@ def remember_sync_folder(path: str) -> None:
     config.save(s)
 
 
+_startup_note = None          # set by main(): writes a timed line to %TEMP%\ariyan_startup.txt
+
+
+def _note(msg: str) -> None:
+    if _startup_note is not None:
+        try:
+            _startup_note(msg)
+        except Exception:
+            pass
+
+
 def load_mission(root: str) -> Dict[str, Any]:
+    _note("project read: importing mission_control")
     import mission_control
-    return json.loads(mission_control.mission_json(root, 10))
+    _note("project read: mission_control imported, reading " + root)
+    r = json.loads(mission_control.mission_json(root, 10))
+    _note("project read: done")
+    return r
 
 
 def build_window(root: str):
@@ -638,6 +653,12 @@ def build_window(root: str):
 
         def show_mission(self, o: Dict[str, Any]):
             self._busy = False
+            _note("project shown on screen")
+            try:
+                import faulthandler
+                faulthandler.cancel_dump_traceback_later()
+            except Exception:
+                pass
             self.render_mission(o)
 
         def render_mission(self, o: Dict[str, Any]):
@@ -727,6 +748,7 @@ def selftest() -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    global _startup_note
     argv = list(argv or sys.argv)
     if "--selftest" in argv:
         return selftest()
@@ -754,6 +776,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             faulthandler.dump_traceback_later(15, repeat=True, file=logf)
         except Exception:
             faulthandler = None
+    _startup_note = note
+    if faulthandler is not None:
+        # the stack dumps stop when the project has been read; at the latest after 5 minutes
+        import threading
+        stop = threading.Timer(300, faulthandler.cancel_dump_traceback_later)
+        stop.daemon = True
+        stop.start()
     note("start " + VERSION)
     splash = None
     try:
@@ -780,8 +809,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         w.showMaximized()
         splash.close()
         note("window shown")
-        if faulthandler is not None:
-            faulthandler.cancel_dump_traceback_later()
         return app.exec()
     except Exception:
         text = traceback.format_exc()
