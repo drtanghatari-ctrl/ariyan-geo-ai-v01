@@ -125,15 +125,17 @@ def _db_path(db_root: str) -> str:
 #      as grand_project_auto_YYYYMMDD.db. The newest AUTO_BACKUP_KEEP copies
 #      are kept, and the LARGEST backup is never pruned.
 #
-#      db-safe-v2 (2026-11-10): the backup now runs on ONE background daemon
-#      thread with its own source connection, never inside get_connection().
-#      Before, every worker thread that opened a connection at startup tried
-#      the same backup at once into the same ".tmp" file, and conn.backup()
-#      has no timeout (it sleeps and retries forever on a locked database),
-#      so the whole app froze on the loading screen. Now get_connection()
-#      returns immediately, only one backup runs at a time, a failed or
-#      stuck attempt is abandoned after _BACKUP_DEADLINE_SECONDS and retried
-#      no sooner than _BACKUP_RETRY_SECONDS later.
+#      db-safe-v2 (2026-11-10): the backup now runs on ONE daemon thread with
+#      its own source connection. Before, every worker thread that opened a
+#      connection at startup tried the same backup at once into the same
+#      ".tmp" file, and conn.backup() has no timeout (it sleeps and retries
+#      forever on a locked database), so the whole app froze on the loading
+#      screen. Now the first caller waits at most _BACKUP_WAIT_SECONDS (a
+#      normal backup finishes well within that, so the backup and guard
+#      marker exist when get_connection() returns); if it takes longer, it
+#      carries on in the background. Other threads never wait. A stuck
+#      attempt is abandoned after _BACKUP_DEADLINE_SECONDS and, after a
+#      failure, retried no sooner than _BACKUP_RETRY_SECONDS later.
 #
 # Deliberate override (e.g. the user really wants a brand-new project): create
 # an empty file named ALLOW_NEW_GRAND_PROJECT_DB in offline_data. The next
@@ -156,8 +158,9 @@ _daily_done: Dict[str, str] = {}
 # db-safe-v2: background-backup bookkeeping (all guarded by _backup_state_lock).
 _backup_state_lock = threading.Lock()
 _backup_inflight: Dict[str, bool] = {}
-_backup_last_attempt: Dict[str, float] = {}
-_BACKUP_RETRY_SECONDS = 300      # min gap between attempts after a failure
+_backup_last_failure: Dict[str, float] = {}
+_BACKUP_RETRY_SECONDS = 300      # min gap before retrying after a FAILURE
+_BACKUP_WAIT_SECONDS = 5         # first caller waits at most this long
 _BACKUP_DEADLINE_SECONDS = 600   # abandon one backup attempt after this long
 _BACKUP_PAGES_PER_STEP = 512     # copy in small steps so writers can get in
 _BACKUP_SLEEP_SECONDS = 0.05
@@ -369,9 +372,13 @@ def _run_daily_backup(db_root: str, today: str) -> None:
             _prune_auto_backups(folder)
         _write_guard(db_root, size)
         _daily_done[db_root] = today
+        with _backup_state_lock:
+            _backup_last_failure.pop(db_root, None)
     except Exception:
         # A failed backup must never block normal use. Drop the partial
         # file; the next attempt (after the retry delay) starts clean.
+        with _backup_state_lock:
+            _backup_last_failure[db_root] = time.monotonic()
         if tmp:
             try:
                 os.remove(tmp)
@@ -389,28 +396,32 @@ def _run_daily_backup(db_root: str, today: str) -> None:
 
 def _daily_backup_and_guard(db_root: str,
                             conn: Optional[sqlite3.Connection] = None) -> None:
-    """Never raises and never blocks. Starts (at most one) background thread
-    that takes today's backup if not already taken, then records the current
-    size in the guard marker. `conn` is accepted for compatibility but is
-    not used: the background thread opens its own connection."""
+    """Never raises; waits at most _BACKUP_WAIT_SECONDS. Starts (at most
+    one) thread that takes today's backup if not already taken, then records
+    the current size in the guard marker. `conn` is accepted for
+    compatibility but is not used: the thread opens its own connection."""
     today = datetime.now().strftime("%Y%m%d")
     if _daily_done.get(db_root) == today:
         return
     with _backup_state_lock:
         if _backup_inflight.get(db_root):
             return
-        now = time.monotonic()
-        last = _backup_last_attempt.get(db_root)
-        if last is not None and now - last < _BACKUP_RETRY_SECONDS:
+        last = _backup_last_failure.get(db_root)
+        if last is not None and time.monotonic() - last < _BACKUP_RETRY_SECONDS:
             return
         _backup_inflight[db_root] = True
-        _backup_last_attempt[db_root] = now
     try:
-        threading.Thread(target=_run_daily_backup, args=(db_root, today),
-                         name="ariyan-daily-backup", daemon=True).start()
+        worker = threading.Thread(target=_run_daily_backup,
+                                  args=(db_root, today),
+                                  name="ariyan-daily-backup", daemon=True)
+        worker.start()
     except Exception:
         with _backup_state_lock:
             _backup_inflight[db_root] = False
+        return
+    # Wait briefly so a normal-sized backup (and the guard marker) is done
+    # when get_connection() returns; never wait longer than this.
+    worker.join(_BACKUP_WAIT_SECONDS)
 
 
 def get_connection(db_root: str) -> sqlite3.Connection:
